@@ -1,0 +1,19 @@
+{
+  "name": "websculpt",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ブラウザで動く WebGPU 製 3D スカルプトツール（ZBrush ライク）。websculpt.html を開くだけで動作（Node 不要）",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "node server.mjs 8080",
+    "test": "node test/core.test.mjs",
+    "test:gpu": "node test/run-gpu-check.mjs",
+    "test:e2e": "node test/interaction.mjs",
+    "test:e2e:file": "node build.mjs && node test/interaction.mjs --file",
+    "shots": "node test/screenshot.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,56 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # コアロジックのテスト（ブラウザ不要の部分）。壊れていたら公開しない
+      - name: Test
+        run: node test/core.test.mjs
+
+      # 単一ファイル版 websculpt.html を最新のソースから作り直す
+      - name: Build single-file bundle
+        run: node build.mjs
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p _site
+          cp -r index.html websculpt.html css js _site/
+          cp -r docs _site/ 2>/dev/null || true
+          cp README.md _site/ 2>/dev/null || true
+          # Jekyll の処理を無効化（_ 始まりのファイルを消されないように）
+          touch _site/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

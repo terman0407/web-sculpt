@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8"><title>MatCap preview</title>
+<style>
+ body{margin:0;background:#111318;color:#ccd;font:12px system-ui;padding:14px}
+ .row{display:flex;gap:12px;flex-wrap:wrap}
+ .cell{text-align:center}
+ .cell canvas{display:block;border-radius:8px;background:#0a0b0d}
+ .cell span{display:block;margin-top:5px;color:#8b93a3}
+</style></head><body>
+<div class="row" id="r"></div>
+<script type="module">
+import { MATERIALS, materialThumb } from '../js/matcap.js';
+const r = document.getElementById('r');
+MATERIALS.forEach((m,i)=>{
+  const d=document.createElement('div'); d.className='cell';
+  d.appendChild(materialThumb(i,200));
+  const s=document.createElement('span'); s.textContent=`${i}: ${m.name}`;
+  d.appendChild(s); r.appendChild(d);
+});
+window.__ready=true;
+</script></body></html>

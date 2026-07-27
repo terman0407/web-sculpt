@@ -1,0 +1,4 @@
+# リポジトリ内は LF で統一する（Windows / macOS / CI 間で差分が出ないように）
+* text=auto eol=lf
+
+*.png binary

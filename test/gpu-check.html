@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>WebSculpt GPU check</title>
+<style>
+  body { margin: 0; background: #111; color: #ddd; font: 12px monospace; }
+  #cv { width: 512px; height: 384px; display: block; }
+  pre { padding: 8px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<pre id="out">waiting…</pre>
+
+<script type="module">
+import { Renderer } from '../js/renderer.js';
+import { SculptMesh, PRIMITIVES } from '../js/mesh.js';
+import { Sculptor } from '../js/sculptor.js';
+import { OrbitCamera } from '../js/camera.js';
+import * as SH from '../js/shaders.js';
+
+const errors = [];
+const notes = [];
+
+// Renderer 内部で作られる device にも uncapturederror を仕込むため requestDevice を包む
+if (window.GPUAdapter) {
+  const orig = GPUAdapter.prototype.requestDevice;
+  GPUAdapter.prototype.requestDevice = async function (...a) {
+    const dev = await orig.apply(this, a);
+    dev.addEventListener('uncapturederror', (e) => {
+      errors.push('uncapturederror: ' + (e.error && e.error.message ? e.error.message : String(e.error)));
+    });
+    return dev;
+  };
+}
+
+const nextFrame = () => new Promise(r => requestAnimationFrame(r));
+
+function viewState() {
+  return {
+    material: 0, wireframe: false, ao: true,
+    aoIntensity: 0.9, aoRadius: 1.0, aoPower: 1.35,
+    cavity: 0.55, peak: 0.18, cavityGain: 3.2,
+    grid: true, gridColor: [0.55, 0.60, 0.68, 0.5],
+    debugView: 0,
+    exposure: 1.0, wireAlpha: 0.32, maskDarken: 0.9,
+    bgTop: [0.05, 0.06, 0.07, 1], bgBot: [0.01, 0.012, 0.016, 1],
+    ringColor: [1, 1, 1, 0.9],
+  };
+}
+
+window.runGpuCheck = async function () {
+  const result = { ok: false, adapter: null, shaders: [], errors, notes, steps: [] };
+  const step = (s) => { result.steps.push(s); };
+  try {
+    if (!navigator.gpu) { errors.push('navigator.gpu が存在しない'); return result; }
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) { errors.push('requestAdapter() が null'); return result; }
+    const i = adapter.info || {};
+    result.adapter = {
+      vendor: i.vendor || '', architecture: i.architecture || '',
+      device: i.device || '', description: i.description || '',
+      features: [...adapter.features].slice(0, 40),
+    };
+    step('adapter ok');
+
+    // ---- 1) 各 WGSL を個別にコンパイルして診断を取る -------------------
+    const dev0 = await adapter.requestDevice();
+    const mods = {
+      BG: SH.BG_WGSL, MESH: SH.MESH_WGSL, WIRE: SH.WIRE_WGSL, GRID: SH.GRID_WGSL,
+      SSAO: SH.SSAO_WGSL, BLUR: SH.BLUR_WGSL, PICK: SH.PICK_WGSL,
+      PRESENT: SH.PRESENT_WGSL, RING: SH.RING_WGSL,
+    };
+    for (const [name, code] of Object.entries(mods)) {
+      dev0.pushErrorScope('validation');
+      const m = dev0.createShaderModule({ code, label: name });
+      const info = await m.getCompilationInfo();
+      const err = await dev0.popErrorScope();
+      result.shaders.push({
+        name,
+        messages: [...info.messages].map(x => `${x.type} L${x.lineNum}:${x.linePos} ${x.message}`),
+        scopeError: err ? err.message : null,
+      });
+    }
+    step('shader compile ok');
+    dev0.destroy();
+
+    // ---- 2) レンダラを実際に構築して数フレーム描画 ---------------------
+    const canvas = document.getElementById('cv');
+    const r = await Renderer.create(canvas);
+    step(`renderer created rt=${r.rtW}x${r.rtH} canvas=${canvas.width}x${canvas.height}`);
+    r.device.pushErrorScope('validation');
+
+    const mesh = new SculptMesh();
+    const g = PRIMITIVES.sphere();
+    mesh.setGeometry(g.positions, g.indices);
+    const state = Object.assign(viewState(), {
+      brush: 'clay', radiusPx: 80, strength: 0.7, paintColor: [0.6, 0.2, 0.15],
+      worldRadius: 0.3, dynTopo: true, decimate: true, detail: 0.7, maxVerts: 300000,
+      focalShift: 0, backfaceMask: false, toCamera: null,
+      symmetry: { x: true, y: false, z: false },
+    });
+    const sculptor = new Sculptor(mesh, state);
+    const cam = new OrbitCamera();
+    const bb = mesh.bounds();
+    cam.frame(bb.center, bb.radius);
+    cam.update(canvas.clientWidth || 512, canvas.clientHeight || 384);
+
+    // ワイヤフレーム + リング + AO をすべて有効にして 1 周させる
+    const ringMat = new Float32Array(16); ringMat[0] = ringMat[5] = ringMat[10] = ringMat[15] = 1;
+    const rings = [{ matrix: ringMat }];
+
+    const cx = (canvas.clientWidth || 512) / 2;
+    const cy = (canvas.clientHeight || 384) / 2;
+
+    for (let f = 0; f < 8; f++) {
+      state.wireframe = (f % 2 === 1);
+      state.ao = (f % 3 !== 2);
+      r.resize();
+      cam.update(canvas.clientWidth || 512, canvas.clientHeight || 384);
+      r.requestPick(cx, cy);
+      r.render(cam, mesh, state, rings);
+      await nextFrame();
+    }
+    await r.device.queue.onSubmittedWorkDone();
+    step('rendered 8 frames (wire/AO 切り替え含む)');
+
+    // ---- 3) ピッキング -------------------------------------------------
+    result.pick = { ok: r.pick.ok, point: Array.from(r.pick.point), depth: r.pick.depth };
+    if (!r.pick.ok) {
+      errors.push('深度リードバックによるピッキングが失敗（中央に球があるはず）');
+    } else {
+      const d = Math.hypot(...r.pick.point);
+      result.pick.radiusFromOrigin = d;
+      if (Math.abs(d - 1) > 0.08) {
+        errors.push(`ピック点が球面上にない: |p| = ${d.toFixed(4)} (期待 ≈ 1)`);
+      }
+      // カメラ側の面を拾っているか
+      const toCam = [cam.eye[0] - r.pick.point[0], cam.eye[1] - r.pick.point[1], cam.eye[2] - r.pick.point[2]];
+      const dot = toCam[0] * r.pick.point[0] + toCam[1] * r.pick.point[1] + toCam[2] * r.pick.point[2];
+      if (dot <= 0) errors.push('ピック点が裏面側になっている');
+    }
+
+    // ---- 4) 彫刻してバッファ拡張パスを踏む -----------------------------
+    if (r.pick.ok) {
+      const p = new Float32Array(r.pick.point);
+      state.worldRadius = 0.3;
+      sculptor.beginStroke('clay', p, 1);
+      for (let k = 1; k <= 20; k++) {
+        p[0] = r.pick.point[0] + k * 0.012;
+        p[1] = r.pick.point[1] + k * 0.006;
+        p[2] = r.pick.point[2];
+        sculptor.addSample(p);
+      }
+      sculptor.endStroke();
+      step(`sculpt ok → ${mesh.liveVerts} verts / ${mesh.liveTris} tris`);
+      state.wireframe = true;
+      for (let f = 0; f < 3; f++) {
+        r.requestPick(cx, cy);
+        r.render(cam, mesh, state, rings);
+        await nextFrame();
+      }
+      await r.device.queue.onSubmittedWorkDone();
+      step('rendered after topology growth');
+    }
+
+    // ---- 5) レンダースケール変更 ---------------------------------------
+    r.setRenderScale(0.6);
+    r.render(cam, mesh, state, rings);
+    await nextFrame();
+    r.setRenderScale(1.5);
+    r.render(cam, mesh, state, rings);
+    await nextFrame();
+    await r.device.queue.onSubmittedWorkDone();
+    step(`render scale 切り替え ok rt=${r.rtW}x${r.rtH}`);
+
+    // ---- 6) マテリアル全種 ---------------------------------------------
+    for (let m = 0; m < r.matcapCount; m++) {
+      state.material = m;
+      r.render(cam, mesh, state, rings);
+      await nextFrame();
+    }
+    await r.device.queue.onSubmittedWorkDone();
+    step(`matcap ${r.matcapCount} 種を描画 ok`);
+
+    const scoped = await r.device.popErrorScope();
+    if (scoped) errors.push('validation: ' + scoped.message);
+
+    for (const s of result.shaders) {
+      if (s.scopeError) errors.push(`${s.name} シェーダのコンパイルエラー: ${s.scopeError}`);
+      for (const m of s.messages) if (m.startsWith('error')) errors.push(`${s.name}: ${m}`);
+    }
+
+    result.ok = errors.length === 0;
+  } catch (e) {
+    errors.push('例外: ' + (e && e.stack ? e.stack : String(e)));
+  }
+  document.getElementById('out').textContent = JSON.stringify(result, null, 2);
+  return result;
+};
+
+// 読み込み時に一度だけ実行し、Promise を公開する（CDP から await される）
+window.__gpuCheck = window.runGpuCheck().then((r) => { window.__gpuResult = r; return r; });
+</script>
+</body>
+</html>

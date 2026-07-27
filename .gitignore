@@ -1,0 +1,8 @@
+node_modules/
+.DS_Store
+Thumbs.db
+_site/
+*.tmp.mjs
+
+# テスト実行で生成されるスクリーンショット（README 用は docs/images/ に置いてある）
+test/shots/
