@@ -1,5 +1,7 @@
 # WebSculpt
 
+**▶ [ブラウザで開く](https://terman0407.github.io/web-sculpt/)** — インストール不要（WebGPU 対応ブラウザが必要）
+
 ブラウザだけで動く ZBrush ライクな 3D スカルプトツール。レンダリングは **WebGPU**、
 彫刻ロジックは素の JavaScript。ビルドステップ・外部ライブラリ・外部アセットは一切なし。
 
@@ -39,6 +41,8 @@ node build.mjs         # → websculpt.html を再生成
 
 1. リポジトリを作って push（`main` または `master`）
 2. Settings → Pages → Source を **GitHub Actions** にする
+
+（このリポジトリは既に設定済みで、https://terman0407.github.io/web-sculpt/ で公開されています）
 
 これで push ごとに「コアテスト → 単一ファイル版のビルド → 公開」が走ります。
 公開される URL は `https://<user>.github.io/<repo>/`。
