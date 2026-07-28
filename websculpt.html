@@ -3004,6 +3004,9 @@ function parallelState() { return poolState; }
 function parallelError() { return poolError; }
 function parallelWorkers() { return pool ? pool.workers.length : 0; }
 
+// 直列部分（振り分け・ペイロード構築）とワーカー待ちの内訳
+let lastTiming = { build: 0, wait: 0, merge: 0 };
+
 function hardwareThreads() {
   const n = (typeof navigator === 'object' && navigator.hardwareConcurrency) || 4;
   // 1 コアは UI とメインスレッドの後処理に残す
@@ -3164,7 +3167,9 @@ async function parallelSplat(mesh, field, closest, g) {
       k += len;
     }
 
+    const tB = (typeof performance === 'object' ? performance.now() : Date.now());
     const payloads = buildSlabPayloads(mesh, g, slabs);
+    const tW = (typeof performance === 'object' ? performance.now() : Date.now());
     const wantClosest = !!closest;
     const gp = { nx: g.nx, ny: g.ny, nz: g.nz, ox: g.ox, oy: g.oy, oz: g.oz, h: g.h, band: g.band };
     const plane = g.nx * g.ny;
@@ -3196,13 +3201,15 @@ async function parallelSplat(mesh, field, closest, g) {
         g: gp, kBegin: sl.kBegin, kEnd: sl.kEnd, wantClosest, slabK,
       });
     })));
+    const tE = (typeof performance === 'object' ? performance.now() : Date.now());
+    lastTiming = { build: Math.round(tW - tB), wait: Math.round(tE - tW), merge: 0 };
     return true;
   } catch (err) {
     poolError = String((err && err.message) || err);
     return false;
   }
 }
-  return { parallelState, parallelError, parallelWorkers, initParallelField, disposeParallelField, parallelSplat };
+  return { parallelState, parallelError, parallelWorkers, lastTiming, initParallelField, disposeParallelField, parallelSplat };
 })();
 
 /* ===== dynamesh.js ===== */
@@ -3224,7 +3231,7 @@ __M['dynamesh.js'] = (function () {
 
 const { clamp } = __M['math.js'];
 const { wasmSplat, wasmFieldReady } = __M['wasmfield.js'];
-const { parallelSplat, parallelState } = __M['parallelfield.js'];
+const { parallelSplat, parallelState, lastTiming } = __M['parallelfield.js'];
 
 const LARGE = 1e9;
 
@@ -3669,6 +3676,7 @@ async function dynamesh(mesh, opts = {}) {
       inputTris: mesh.liveTris,
       wasm: usedWasm,
       parallel: usedParallel,
+      parTiming: usedParallel ? Object.assign({}, lastTiming) : null,
       resolution: res,
       grid: [nx, ny, nz],
       voxelSize: h,

@@ -73,6 +73,9 @@ export function parallelState() { return poolState; }
 export function parallelError() { return poolError; }
 export function parallelWorkers() { return pool ? pool.workers.length : 0; }
 
+// 直列部分（振り分け・ペイロード構築）とワーカー待ちの内訳
+export let lastTiming = { build: 0, wait: 0, merge: 0 };
+
 function hardwareThreads() {
   const n = (typeof navigator === 'object' && navigator.hardwareConcurrency) || 4;
   // 1 コアは UI とメインスレッドの後処理に残す
@@ -233,7 +236,9 @@ export async function parallelSplat(mesh, field, closest, g) {
       k += len;
     }
 
+    const tB = (typeof performance === 'object' ? performance.now() : Date.now());
     const payloads = buildSlabPayloads(mesh, g, slabs);
+    const tW = (typeof performance === 'object' ? performance.now() : Date.now());
     const wantClosest = !!closest;
     const gp = { nx: g.nx, ny: g.ny, nz: g.nz, ox: g.ox, oy: g.oy, oz: g.oz, h: g.h, band: g.band };
     const plane = g.nx * g.ny;
@@ -265,6 +270,8 @@ export async function parallelSplat(mesh, field, closest, g) {
         g: gp, kBegin: sl.kBegin, kEnd: sl.kEnd, wantClosest, slabK,
       });
     })));
+    const tE = (typeof performance === 'object' ? performance.now() : Date.now());
+    lastTiming = { build: Math.round(tW - tB), wait: Math.round(tE - tW), merge: 0 };
     return true;
   } catch (err) {
     poolError = String((err && err.message) || err);
