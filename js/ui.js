@@ -245,6 +245,12 @@ export function buildUI(app) {
     title: 'ペンタブレットの筆圧を半径と強さに反映する',
     onChange: v => { state.usePressure = v; },
   });
+  slider(bs, {
+    label: 'ダブ間隔', min: 0.02, max: 0.25, step: 0.01, value: state.dabSpacing,
+    title: '小さいほど滑らか（点が並んだ感じが減る）。1 ダブの強さは自動で補正される',
+    onInput: v => { state.dabSpacing = v; },
+  });
+
   const paintRow = el('div', 'ctl', bs);
   {
     const top = el('div', 'ctl-top', paintRow);

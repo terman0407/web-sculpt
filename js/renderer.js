@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import { clamp } from './math.js';
+import { DIRTY_SHIFT, DIRTY_BLOCK } from './mesh.js';
 import { generateMatcapLayer, MATERIALS } from './matcap.js';
 import {
   UNIFORM_FLOATS, UO,
@@ -509,22 +510,43 @@ export class Renderer {
       return;
     }
 
-    if (mesh.vDirtyMax >= mesh.vDirtyMin) {
-      const a = Math.max(0, mesh.vDirtyMin);
-      const b = Math.min(mesh.nv - 1, mesh.vDirtyMax);
-      if (b >= a) {
-        const n = b - a + 1;
-        d.queue.writeBuffer(this.vbPos, a * 12, mesh.positions, a * 3, n * 3);
-        d.queue.writeBuffer(this.vbNrm, a * 12, mesh.normals, a * 3, n * 3);
-        d.queue.writeBuffer(this.vbCol, a * 12, mesh.colors, a * 3, n * 3);
-        d.queue.writeBuffer(this.vbMask, a * 4, mesh.mask, a, n);
-        d.queue.writeBuffer(this.vbCurv, a * 4, mesh.curv, a, n);
+    // dirty をブロック単位で見て、連続する塊だけを転送する。
+    // min〜max の 1 区間で送ると、ブラシが触れた頂点がインデックス上に
+    // 散らばっている場合に配列全体（数百万頂点 = 100MB 超）を毎フレーム送ることになる。
+    if (mesh.vBlockMax >= mesh.vBlockMin) {
+      const blocks = mesh.vBlocks;
+      let run = -1;
+      for (let b = mesh.vBlockMin; b <= mesh.vBlockMax + 1; b++) {
+        const on = b <= mesh.vBlockMax && blocks[b] === 1;
+        if (on && run < 0) run = b;
+        else if (!on && run >= 0) {
+          const a = run * DIRTY_BLOCK;
+          const e = Math.min(mesh.nv, b * DIRTY_BLOCK);
+          const n = e - a;
+          if (n > 0) {
+            d.queue.writeBuffer(this.vbPos, a * 12, mesh.positions, a * 3, n * 3);
+            d.queue.writeBuffer(this.vbNrm, a * 12, mesh.normals, a * 3, n * 3);
+            d.queue.writeBuffer(this.vbCol, a * 12, mesh.colors, a * 3, n * 3);
+            d.queue.writeBuffer(this.vbMask, a * 4, mesh.mask, a, n);
+            d.queue.writeBuffer(this.vbCurv, a * 4, mesh.curv, a, n);
+          }
+          run = -1;
+        }
       }
     }
-    if (mesh.tDirtyMax >= mesh.tDirtyMin) {
-      const a = Math.max(0, mesh.tDirtyMin);
-      const b = Math.min(mesh.nt - 1, mesh.tDirtyMax);
-      if (b >= a) d.queue.writeBuffer(this.ib, a * 12, mesh.tris, a * 3, (b - a + 1) * 3);
+    if (mesh.tBlockMax >= mesh.tBlockMin) {
+      const blocks = mesh.tBlocks;
+      let run = -1;
+      for (let b = mesh.tBlockMin; b <= mesh.tBlockMax + 1; b++) {
+        const on = b <= mesh.tBlockMax && blocks[b] === 1;
+        if (on && run < 0) run = b;
+        else if (!on && run >= 0) {
+          const a = run * DIRTY_BLOCK;
+          const e = Math.min(mesh.nt, b * DIRTY_BLOCK);
+          if (e > a) d.queue.writeBuffer(this.ib, a * 12, mesh.tris, a * 3, (e - a) * 3);
+          run = -1;
+        }
+      }
     }
     mesh.clearDirty();
   }

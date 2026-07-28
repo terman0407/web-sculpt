@@ -26,6 +26,7 @@ const state = {
   radiusPx: 90,
   strength: 0.5,
   focalShift: 0,             // -1..1（ZBrush の Focal Shift 相当）
+  dabSpacing: 0.06,         // ダブ間隔（ブラシ半径に対する割合。小さいほど滑らか）
   lazyRadius: 10,            // レイジーマウスの追従半径（画面px、0 で無効）
   usePressure: true,
   pressureSize: 0.45,        // 筆圧が半径に効く割合

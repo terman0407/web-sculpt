@@ -11,7 +11,11 @@
 //  * GPU 転送は dirty レンジ（最小/最大インデックス）のみ。
 // ---------------------------------------------------------------------------
 
-export const MAX_VERTS_HARD = 2000000;   // エッジキーの packing 上限に合わせる
+export const MAX_VERTS_HARD = 2000000;
+
+// dirty 管理のブロックサイズ（2^11 = 2048 要素ごと）
+export const DIRTY_SHIFT = 11;
+export const DIRTY_BLOCK = 1 << DIRTY_SHIFT;   // エッジキーの packing 上限に合わせる
 
 function growF32(src, used, cap) {
   const a = new Float32Array(cap);
@@ -56,9 +60,15 @@ export class SculptMesh {
     this.trackVerts = null;
     this.trackTris = null;
 
-    // 転送用 dirty レンジ
+    // 転送用 dirty 管理。min/max の 1 区間だけだと、ブラシが触れた頂点が
+    // インデックス上に散らばっている場合（細分化後は普通に起きる）に
+    // 配列全体を毎フレーム転送することになるため、ブロック単位でも持つ。
     this.vDirtyMin = Infinity; this.vDirtyMax = -1;
     this.tDirtyMin = Infinity; this.tDirtyMax = -1;
+    this.vBlocks = new Uint8Array(0);
+    this.tBlocks = new Uint8Array(0);
+    this.vBlockMin = Infinity; this.vBlockMax = -1;
+    this.tBlockMin = Infinity; this.tBlockMax = -1;
     this.topoVersion = 0;      // トポロジが変わるたびに増加（ワイヤフレーム再構築用）
     this.geomVersion = 0;      // 形状が変わるたびに増加
 
@@ -79,6 +89,10 @@ export class SculptMesh {
     this.vAlive = growU8(this.vAlive, this.nv, cap);
     // ring はスロットを使い回す（毎回作り直すと小さい配列の大量確保で GC が重くなる）
     for (let i = this.ring.length; i < cap; i++) this.ring.push(null);
+    {
+      const nb = (cap >> DIRTY_SHIFT) + 1;
+      if (this.vBlocks.length < nb) { const a = new Uint8Array(nb); a.set(this.vBlocks); this.vBlocks = a; }
+    }
     this.capV = cap;
   }
 
@@ -86,6 +100,10 @@ export class SculptMesh {
     if (cap <= this.capT) return;
     cap = Math.max(cap, Math.ceil(this.capT * 1.6), 2048);
     this.tris = growI32(this.tris, this.nt * 3, cap * 3);
+    {
+      const nb = (cap >> DIRTY_SHIFT) + 1;
+      if (this.tBlocks.length < nb) { const a = new Uint8Array(nb); a.set(this.tBlocks); this.tBlocks = a; }
+    }
     this.capT = cap;
   }
 
@@ -94,18 +112,34 @@ export class SculptMesh {
   markVert(i) {
     if (i < this.vDirtyMin) this.vDirtyMin = i;
     if (i > this.vDirtyMax) this.vDirtyMax = i;
+    const b = i >> DIRTY_SHIFT;
+    this.vBlocks[b] = 1;
+    if (b < this.vBlockMin) this.vBlockMin = b;
+    if (b > this.vBlockMax) this.vBlockMax = b;
   }
   markTri(t) {
     if (t < this.tDirtyMin) this.tDirtyMin = t;
     if (t > this.tDirtyMax) this.tDirtyMax = t;
+    const b = t >> DIRTY_SHIFT;
+    this.tBlocks[b] = 1;
+    if (b < this.tBlockMin) this.tBlockMin = b;
+    if (b > this.tBlockMax) this.tBlockMax = b;
   }
   markAllDirty() {
     this.vDirtyMin = 0; this.vDirtyMax = this.nv - 1;
     this.tDirtyMin = 0; this.tDirtyMax = this.nt - 1;
+    this.vBlockMin = 0; this.vBlockMax = Math.max(0, (this.nv - 1) >> DIRTY_SHIFT);
+    this.tBlockMin = 0; this.tBlockMax = Math.max(0, (this.nt - 1) >> DIRTY_SHIFT);
+    this.vBlocks.fill(1, this.vBlockMin, this.vBlockMax + 1);
+    this.tBlocks.fill(1, this.tBlockMin, this.tBlockMax + 1);
   }
   clearDirty() {
+    if (this.vBlockMax >= this.vBlockMin) this.vBlocks.fill(0, this.vBlockMin, this.vBlockMax + 1);
+    if (this.tBlockMax >= this.tBlockMin) this.tBlocks.fill(0, this.tBlockMin, this.tBlockMax + 1);
     this.vDirtyMin = Infinity; this.vDirtyMax = -1;
     this.tDirtyMin = Infinity; this.tDirtyMax = -1;
+    this.vBlockMin = Infinity; this.vBlockMax = -1;
+    this.tBlockMin = Infinity; this.tBlockMax = -1;
   }
 
   // --- 頂点 ---------------------------------------------------------------

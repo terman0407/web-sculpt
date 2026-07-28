@@ -171,6 +171,7 @@ export class Sculptor {
     this._pt = V3.create();
     this._mp = V3.create();
     this._step = V3.create();
+    this._avgDabMs = 0;         // 1 ダブの実測コスト（EMA）
     this._walk = V3.create();
 
     this.history.reset(mesh);
@@ -181,6 +182,7 @@ export class Sculptor {
     this.history.reset(mesh);
     this.stroking = false;
     this.hoverSeed = -1;
+    this._avgDabMs = 0;
     this.levels.clear();
     this.dropPendingCurvature();
   }
@@ -319,7 +321,10 @@ export class Sculptor {
     this._ensureStamps();
     const T = m.tris;
 
-    // 法線が変わった頂点の隣も曲率が変わるので 1-ring 広げる
+    // pend には既に「動いた頂点 + その 1-ring」が入っている（_updateNormals が
+    // 法線更新の対象として積んだもの）。ここでさらに 1-ring 広げると集合が 3 倍に
+    // 膨らみ、高密度では 1 フレーム 30ms 近くかかる。曲率は陰影にしか効かず、
+    // 境界のわずかな誤差は次のダブで上書きされるので広げない。
     const id = ++this.stamp;
     const nS = this.nStamp;
     const cset = this.curvSet;
@@ -328,15 +333,6 @@ export class Sculptor {
       const v = pend[k];
       if (v >= m.nv || !m.isVertAlive(v)) continue;
       if (nS[v] !== id) { nS[v] = id; cset.push(v); }
-      const r = m.ring[v];
-      if (!r) continue;
-      for (let j = 0; j < r.length; j++) {
-        const ti = r[j] * 3;
-        for (let e = 0; e < 3; e++) {
-          const u = T[ti + e];
-          if (nS[u] !== id) { nS[u] = id; cset.push(u); }
-        }
-      }
     }
     pend.length = 0;
     this.cvStampId++;
@@ -358,6 +354,26 @@ export class Sculptor {
    * 「ブラシの見た目の大きさに対して一定のポリゴン密度」になる（Sculptris Pro 方式）。
    * detail 0 → ブラシ直径あたり約 9 分割、detail 1 → 約 44 分割。
    */
+  /**
+   * point に近い頂点を返す。まず候補（前回のシード）から 1-ring 降下し、
+   * 遠すぎるときだけ全走査に落とす。260 万頂点だと全走査は 1 回 45ms かかるので、
+   * ストローク開始のたびに走らせると無視できないヒッチになる。
+   */
+  _seedNear(point, hint) {
+    const m = this.mesh;
+    if (m.liveVerts === 0) return -1;
+    if (hint >= 0 && hint < m.nv && m.isVertAlive(hint)) {
+      const s = descend(m, hint, point);
+      if (s >= 0) {
+        const i = s * 3, P = m.positions;
+        const d = Math.hypot(P[i] - point[0], P[i + 1] - point[1], P[i + 2] - point[2]);
+        const tol = Math.max(this.state.worldRadius, this.targetEdgeLength(this.state.worldRadius) * 4);
+        if (d <= tol) return s;
+      }
+    }
+    return nearestVertexBrute(m, point);
+  }
+
   targetEdgeLength(radius) {
     const d = clamp(this.state.detail, 0, 1);
     return radius * (0.22 - 0.175 * d);
@@ -379,7 +395,9 @@ export class Sculptor {
       const ms = this.mirrors[i];
       const sgn = this.activeMirrors[i];
       V3.set(this._mp, point[0] * sgn[0], point[1] * sgn[1], point[2] * sgn[2]);
-      ms.seed = nearestVertexBrute(m, this._mp);
+      // 全頂点走査は 260 万頂点で 1 ミラーあたり 45ms かかる。
+      // ホバー中に追従させているシードから降下すれば通常はそれで足りる。
+      ms.seed = this._seedNear(this._mp, i === 0 ? this.hoverSeed : this.mirrors[i].seed);
       V3.copy(ms.lastPoint, this._mp);
       V3.copy(ms.center, this._mp);
       ms.lockedVerts = null;
@@ -407,7 +425,16 @@ export class Sculptor {
       return;
     }
 
-    const spacing = Math.max(radius * 0.16, 1e-6);
+    // ダブ間隔。0.16R だと通常のドラッグ速度で 3 フレームに 1 回しか置かれず、
+    // ストロークが「点を並べた」ように見える。細かくして、そのぶん 1 ダブの
+    // 強さを間隔に比例させると、総量を変えずに連続的な当たりになる。
+    const spacingFrac = (this.state.dabSpacing > 0 ? this.state.dabSpacing : 0.16);
+    const budgetMs = this.state.strokeBudgetMs > 0 ? this.state.strokeBudgetMs : 12;
+    // 1 ダブの実測コストが予算を超える密度では、間隔そのものを広げる。
+    // そうしないと「毎フレーム 1 ダブ = 毎フレーム数十 ms」で固まってしまう。
+    // 軽い状況では係数 1 のままなので、設定した細かい間隔がそのまま効く。
+    const load = this._avgDabMs > 0.05 ? Math.max(1, this._avgDabMs / budgetMs) : 1;
+    const spacing = Math.max(radius * spacingFrac * load, 1e-6);
     V3.sub(this._delta, point, ms0.lastPoint);
     let dist = V3.len(this._delta);
     if (dist < spacing) {
@@ -415,7 +442,7 @@ export class Sculptor {
       // 動いていなくても圧を掛け続けたいブラシ（塗り系）は薄く継続
       if (brush === 'paint' || brush === 'mask' || brush === 'smooth') {
         V3.set(this._delta, 0, 0, 0);
-        this._dabAll(point, this._delta, false, 0.35);
+        this._dabAll(point, this._delta, false, 0.35 * spacingFrac / 0.16);
       }
       return;
     }
@@ -423,17 +450,37 @@ export class Sculptor {
     // カーソルが大きく飛んだフレームで何十ダブも打つとフレームが数百 ms 固まる。
     // 上限本数に加えて時間予算でも打ち切り、1 フレームの作業量を有界にする。
     // 打ち切った場合も lastPoint は進めた所までなので、次フレームで続きから再開する。
-    const steps = Math.min(32, Math.max(1, Math.floor(dist / spacing)));
+    let steps = Math.min(64, Math.max(1, Math.floor(dist / spacing)));
+
+    // 1 ダブの実測コストから、このフレームで打てる本数を見積もって上限にする。
+    // 高密度では 1 ダブ数十 ms かかるので、間隔だけ細かくすると毎フレーム
+    // 数百 ms 固まってしまう。逆に軽い状況では細かい間隔がそのまま通る。
+    if (this._avgDabMs > 0.05) {
+      const affordable = Math.max(1, Math.floor(budgetMs / this._avgDabMs));
+      if (steps > affordable) steps = affordable;
+    }
+
+    // 1 ダブの強さは「実際に進んだ距離」に比例させる。こうすると間隔を変えても
+    // 本数が制限されても、ストローク全体で置かれる量がほぼ一定になる。
+    const dabScale = clamp((dist / steps) / (radius * 0.16), 0.05, 4);
+
     const step = this._step, p = this._walk;
     V3.scale(step, this._delta, 1 / steps);
     V3.copy(p, ms0.lastPoint);
-    const budget = this.state.strokeBudgetMs > 0 ? this.state.strokeBudgetMs : Infinity;
-    const t0 = budget === Infinity ? 0 : performance.now();
+    const budget = budgetMs;
+    const tStart = performance.now();
+    let done = 0;
     for (let s = 0; s < steps; s++) {
       V3.add(p, p, step);
-      this._dabAll(p, step, false);
+      this._dabAll(p, step, false, dabScale);
+      done++;
       // 1 ダブが数十 ms かかることがあるので、間引かず毎回見る
-      if (budget !== Infinity && performance.now() - t0 > budget) break;
+      if (performance.now() - tStart > budget) break;
+    }
+    // 実測コストを指数移動平均で覚えておく（次フレームの本数見積もりに使う）
+    if (done > 0) {
+      const per = (performance.now() - tStart) / done;
+      this._avgDabMs = this._avgDabMs > 0 ? this._avgDabMs * 0.7 + per * 0.3 : per;
     }
   }
 
