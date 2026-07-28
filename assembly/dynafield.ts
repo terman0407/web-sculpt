@@ -21,7 +21,7 @@ export function release(ptr: usize): void {
 }
 
 /** 点と三角形の最短距離の 2 乗（Ericson, Real-Time Collision Detection） */
-// @inline
+@inline
 function pointTriDist2(
   px: f64, py: f64, pz: f64,
   ax: f64, ay: f64, az: f64,
