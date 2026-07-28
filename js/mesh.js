@@ -719,8 +719,17 @@ export class SculptMesh {
   }
 
   /** フリースロットが多くなったら詰める（ストローク終了時に呼ぶ） */
-  compact() {
-    if (this.freeTris.length < this.nt * 0.2 && this.freeVerts.length < this.nv * 0.2) return false;
+  /**
+   * 死んだスロットを詰めて 0..liveVerts-1 / 0..liveTris-1 が全部生きている状態にする。
+   *
+   * ゴミが少ないうちは費用に見合わないので既定では何もしない（false を返す）。
+   * 「詰まっていること」を前提にする処理（分割レベル）は force=true で呼ぶこと。
+   * 実際に、dyntopo で死んだスロットが 2 個（0.03%）残っただけで Divide が
+   * 範囲外の頂点を参照して形が崩壊するバグを出した。
+   */
+  compact(force = false) {
+    if (!force && this.freeTris.length < this.nt * 0.2 && this.freeVerts.length < this.nv * 0.2) return false;
+    if (this.freeTris.length === 0 && this.freeVerts.length === 0) return false;
     const remapV = new Int32Array(this.nv).fill(-1);
     const P = new Float32Array(this.liveVerts * 3);
     const N = new Float32Array(this.liveVerts * 3);

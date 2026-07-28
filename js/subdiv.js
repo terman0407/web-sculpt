@@ -149,7 +149,14 @@ export class SubdivLevels {
    * @returns {object} 統計
    */
   divide(mesh) {
-    mesh.compact();
+    // dyntopo などでトポロジが変わっていたら、積んであるレベルはもう使えない。
+    // 先に捨てておかないと、古い番号で作られた coarseTris が残ったまま
+    // 新しいレベルが積まれ、SDiv 下げで壊れる。
+    this.validate(mesh);
+    // ここは「詰まっている」ことに完全に依存するので必ず詰める。
+    // 既定の compact() はゴミが 20% 未満だと何もしないため、
+    // dyntopo が残した数個の死んだスロットで前提が崩れていた。
+    mesh.compact(true);
     const nv = mesh.liveVerts;
     // compact 済みなので 0..nv-1 が生きている頂点、0..nt-1 が生きている面
     const coarseTris = new Int32Array(mesh.liveTris * 3);

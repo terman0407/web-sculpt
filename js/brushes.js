@@ -86,8 +86,15 @@ export class BrushEngine {
 
   _ensureLayer(capV) {
     if (this.layerAcc.length < capV) {
-      this.layerAcc = new Float32Array(capV);
-      this.layerStamp = new Int32Array(capV);
+      // 中身を引き継ぐこと。レイヤーブラシは「ストローク中に一度盛った高さで止まる」
+      // 挙動を layerAcc / layerStamp の蓄積で表しているので、作り直すだけだと
+      // 動的トポロジで容量が伸びた瞬間に蓄積が消え、同じ場所が二度盛られて段差になる。
+      const acc = new Float32Array(capV);
+      acc.set(this.layerAcc);
+      this.layerAcc = acc;
+      const st = new Int32Array(capV);
+      st.set(this.layerStamp);
+      this.layerStamp = st;
     }
   }
 

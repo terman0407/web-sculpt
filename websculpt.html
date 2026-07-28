@@ -1918,8 +1918,17 @@ class SculptMesh {
   }
 
   /** フリースロットが多くなったら詰める（ストローク終了時に呼ぶ） */
-  compact() {
-    if (this.freeTris.length < this.nt * 0.2 && this.freeVerts.length < this.nv * 0.2) return false;
+  /**
+   * 死んだスロットを詰めて 0..liveVerts-1 / 0..liveTris-1 が全部生きている状態にする。
+   *
+   * ゴミが少ないうちは費用に見合わないので既定では何もしない（false を返す）。
+   * 「詰まっていること」を前提にする処理（分割レベル）は force=true で呼ぶこと。
+   * 実際に、dyntopo で死んだスロットが 2 個（0.03%）残っただけで Divide が
+   * 範囲外の頂点を参照して形が崩壊するバグを出した。
+   */
+  compact(force = false) {
+    if (!force && this.freeTris.length < this.nt * 0.2 && this.freeVerts.length < this.nv * 0.2) return false;
+    if (this.freeTris.length === 0 && this.freeVerts.length === 0) return false;
     const remapV = new Int32Array(this.nv).fill(-1);
     const P = new Float32Array(this.liveVerts * 3);
     const N = new Float32Array(this.liveVerts * 3);
@@ -2325,8 +2334,15 @@ class BrushEngine {
 
   _ensureLayer(capV) {
     if (this.layerAcc.length < capV) {
-      this.layerAcc = new Float32Array(capV);
-      this.layerStamp = new Int32Array(capV);
+      // 中身を引き継ぐこと。レイヤーブラシは「ストローク中に一度盛った高さで止まる」
+      // 挙動を layerAcc / layerStamp の蓄積で表しているので、作り直すだけだと
+      // 動的トポロジで容量が伸びた瞬間に蓄積が消え、同じ場所が二度盛られて段差になる。
+      const acc = new Float32Array(capV);
+      acc.set(this.layerAcc);
+      this.layerAcc = acc;
+      const st = new Int32Array(capV);
+      st.set(this.layerStamp);
+      this.layerStamp = st;
     }
   }
 
@@ -4392,7 +4408,14 @@ class SubdivLevels {
    * @returns {object} 統計
    */
   divide(mesh) {
-    mesh.compact();
+    // dyntopo などでトポロジが変わっていたら、積んであるレベルはもう使えない。
+    // 先に捨てておかないと、古い番号で作られた coarseTris が残ったまま
+    // 新しいレベルが積まれ、SDiv 下げで壊れる。
+    this.validate(mesh);
+    // ここは「詰まっている」ことに完全に依存するので必ず詰める。
+    // 既定の compact() はゴミが 20% 未満だと何もしないため、
+    // dyntopo が残した数個の死んだスロットで前提が崩れていた。
+    mesh.compact(true);
     const nv = mesh.liveVerts;
     // compact 済みなので 0..nv-1 が生きている頂点、0..nt-1 が生きている面
     const coarseTris = new Int32Array(mesh.liveTris * 3);

@@ -871,7 +871,6 @@ head('保存用のパック');
   validate(m2, { closed: false, label: 'pack round-trip' });
 }
 
-
 // ---------------------------------------------------------------------------
 head('WASM 距離場（JS 版との一致）');
 {
@@ -946,6 +945,81 @@ head('WASM 距離場（JS 版との一致）');
       ok(allOk && pages() === base, `順不同の解放でも増えない (${pages()} ページ)`);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// dyntopo のあとで Divide しても壊れないか。
+//
+// dyntopo + デシメートは死んだスロットを数個残す。compact() はゴミが 20% 未満だと
+// 何もしないので、divide() の「0..liveVerts-1 が全部生きている」前提が崩れ、
+// 生きた面が範囲外の頂点を参照して形が崩壊していた
+// （実測: 死んだスロット 2/7050 で最長辺が平均の 36 倍、最小半径 0.9989 → 0.5704）。
+head('dyntopo → Divide');
+{
+  const g = PRIMITIVES.sphere();
+  const m = new SculptMesh();
+  m.setGeometry(g.positions, g.indices);
+  const s = new Sculptor(m, makeState({ dynTopo: true, decimate: true, worldRadius: 0.3 }));
+  const pt = new Float32Array(3);
+  for (let k = 0; k < 6; k++) {
+    const th = k * 1.0;
+    pt.set([Math.cos(th), 0.2, Math.sin(th)]);
+    s.beginStroke('clay', pt, 1);
+    for (let q = 1; q <= 12; q++) {
+      pt.set([Math.cos(th + q * 0.05), 0.2 + q * 0.01, Math.sin(th + q * 0.05)]);
+      s.addSample(pt);
+    }
+    s.endStroke();
+  }
+  ok(m.nv > m.liveVerts, `dyntopo が死んだスロットを残している (${m.nv - m.liveVerts} 個 / ${m.nv})`);
+
+  const stats = () => {
+    let n = 0, sum = 0, mx = 0, rmin = Infinity;
+    const T = m.tris, P = m.positions;
+    for (let t = 0; t < m.nt; t++) {
+      const i = t * 3, a = T[i], b = T[i + 1], c = T[i + 2];
+      if (a === b && b === c) continue;
+      for (const [u, v] of [[a, b], [b, c], [c, a]]) {
+        const iu = u * 3, iv = v * 3;
+        const d = Math.hypot(P[iu] - P[iv], P[iu + 1] - P[iv + 1], P[iu + 2] - P[iv + 2]);
+        sum += d; n++; if (d > mx) mx = d;
+      }
+    }
+    for (let v = 0; v < m.nv; v++) {
+      if (!m.vAlive[v]) continue;
+      const i = v * 3, r = Math.hypot(P[i], P[i + 1], P[i + 2]);
+      if (r < rmin) rmin = r;
+    }
+    return { ratio: mx / (sum / n), rmin };
+  };
+  const a = stats();
+  s.divide();
+  const b = stats();
+  console.log(`       前 最長辺/平均 ${a.ratio.toFixed(1)} 最小半径 ${a.rmin.toFixed(4)}`
+    + ` → 後 ${b.ratio.toFixed(1)} / ${b.rmin.toFixed(4)}`);
+  ok(b.ratio < a.ratio * 1.5, `Divide 後も辺の長さが揃っている (${a.ratio.toFixed(1)} → ${b.ratio.toFixed(1)})`);
+  ok(b.rmin > a.rmin * 0.95, `Divide で原点へ落ちる頂点がない (${a.rmin.toFixed(4)} → ${b.rmin.toFixed(4)})`);
+  let bad = 0;
+  for (let t = 0; t < m.nt; t++) {
+    const i = t * 3, x = m.tris[i], y = m.tris[i + 1], z = m.tris[i + 2];
+    if (x === y && y === z) continue;
+    if (x >= m.liveVerts || y >= m.liveVerts || z >= m.liveVerts) bad++;
+  }
+  ok(bad === 0, `Divide 後は全部の面が 0..liveVerts-1 を指す (範囲外 ${bad})`);
+  validate(m, { label: 'dyntopo → divide' });
+}
+
+head('compact(force)');
+{
+  const g = PRIMITIVES.sphere();
+  const m = new SculptMesh();
+  m.setGeometry(g.positions, g.indices);
+  for (let t = 0; t < m.nt; t++) { if (m.isTriAlive(t)) { m.removeTriangle(t); break; } }
+  ok(m.compact() === false, '閾値未満では compact() は何もしない');
+  ok(m.compact(true) === true, 'compact(true) は閾値を無視して詰める');
+  ok(m.nv === m.liveVerts && m.nt === m.liveTris,
+    `詰めたあとは死んだスロットが無い (${m.nv}/${m.liveVerts} 頂点, ${m.nt}/${m.liveTris} 面)`);
+  ok(m.compact(true) === false, 'ゴミが無ければ force でも何もしない');
 }
 
 console.log('\n' + (failures === 0 ? '✅ すべて通過' : `❌ ${failures} 件の失敗`));
