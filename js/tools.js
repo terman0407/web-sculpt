@@ -19,6 +19,7 @@ import { MorphTarget, computeMorphWeights } from './morph.js';
 import { Transpose } from './transpose.js';
 import { clipPlane, trimPlane, slicePlane, mirrorWeld, planeFromScreenLine, planeFromAxis } from './clip.js';
 import { STROKES, strokeDefaults } from './alpha.js';
+import { remesh, quadDominant, edgeLengthForTris } from './remesh.js';
 import { clamp } from './math.js';
 
 /** 変形とマスク操作の既定パラメータ一式（state に置く） */
@@ -398,6 +399,42 @@ export class Tools {
     this.morph.clear();
     if (this.ui) this.ui.refreshMorph();
     this.toast('トポロジが変わったためモーフターゲットを破棄しました', 4000);
+  }
+
+  // --- リメッシュ（ZRemesher 相当） ----------------------------------------
+
+  /**
+   * 目標ポリゴン数でリメッシュする。
+   * トポロジが変わるので分割レベル・レイヤー・モーフは破棄される。
+   */
+  applyRemesh() {
+    const st = this.state;
+    const m = this.mesh;
+    const before = m.liveTris;
+    const r = remesh(m, {
+      targetTris: Math.max(100, Math.round(st.remeshTris || 20000)),
+      iterations: Math.max(1, Math.round(st.remeshIterations || 5)),
+      adaptive: st.remeshAdaptive || 0,
+      relax: st.remeshRelax === undefined ? 0.5 : st.remeshRelax,
+      project: st.remeshProject !== false,
+      maxVerts: st.maxVerts,
+    });
+    if (!r.ok) { this.toast('リメッシュできませんでした: ' + r.reason, 4000); return; }
+    this.afterTopologyChange();
+    this.toast(`リメッシュ: ${before.toLocaleString()} → ${r.tris.toLocaleString()} 面`
+      + ` / 目標辺長 ${r.targetLen.toFixed(4)} / ${r.ms}ms`
+      + `（分割 ${r.split} / 統合 ${r.collapse} / 反転 ${r.flip}）`, 5000);
+  }
+
+  /** 現在の形を四角優勢にしたときの面の内訳（書き出しと表示用） */
+  quadStats() {
+    const q = quadDominant(this.mesh);
+    return q;
+  }
+
+  /** いまの面数から、目標ポリゴン数の目安を返す（UI の初期値用） */
+  suggestRemeshTris() {
+    return Math.max(1000, Math.min(500000, Math.round(this.mesh.liveTris / 2)));
   }
 
   // --- クリップ / トリム / スライス / ミラー&ウェルド -----------------------

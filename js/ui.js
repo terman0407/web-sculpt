@@ -235,6 +235,7 @@ export function buildUI(app) {
   let clipModeSeg = null, transposeToggle = null;
   let alphaGrid = null, strokeSeg = null, strokeParamBox = null;
   let subtoolList = null, subtoolIcons = null, subtoolSolo = null, subtoolPrimSeg = null;
+  let remeshTrisSlider = null, remeshQuadInfo = null;
   let subtoolPrim = 'sphere';
   let syncStrokeParams = () => {};
 
@@ -884,6 +885,64 @@ export function buildUI(app) {
       + 'モーフブラシ（左のパレット）で塗った所だけ戻すこともできます。';
   }
 
+  // --- リメッシュ（ZRemesher 相当） ---------------------------------------
+  const rm = section(right, 'リメッシュ', true);
+  {
+    remeshTrisSlider = slider(rm, {
+      label: '目標ポリゴン数', min: 500, max: 300000, step: 500, value: state.remeshTris,
+      fmt: (v) => (v >= 10000 ? (v / 1000).toFixed(0) + 'k' : String(Math.round(v))),
+      title: 'この面数に近づくようエッジ長を逆算して均一化します（ZRemesher の Target Polygons Count 相当）',
+      onInput: (v) => { state.remeshTris = v; },
+    });
+    slider(rm, {
+      label: '曲率への追従', min: 0, max: 1, step: 0.05, value: state.remeshAdaptive,
+      title: '上げると曲率の高い所を細かく、平らな所を粗くします（0 で完全に均一）',
+      onInput: (v) => { state.remeshAdaptive = v; },
+    });
+    slider(rm, {
+      label: '整え（緩和）', min: 0, max: 1, step: 0.05, value: state.remeshRelax,
+      title: '三角形の形をそろえる強さ。上げるほど整うが、細部が丸まりやすくなる',
+      onInput: (v) => { state.remeshRelax = v; },
+    });
+    slider(rm, {
+      label: '反復回数', min: 1, max: 12, step: 1, value: state.remeshIterations,
+      fmt: (v) => String(Math.round(v)),
+      title: '多いほど整うが時間がかかる',
+      onInput: (v) => { state.remeshIterations = v; },
+    });
+    toggle(rm, {
+      label: '元の形へ投影して保つ', value: state.remeshProject,
+      title: '整えたあと元の表面へ引き戻して形を維持します（切ると細部が丸まります）',
+      onChange: (on) => { state.remeshProject = on; },
+    });
+    btnRow(rm, [
+      { label: '現在の半分', title: 'いまの面数の半分を目標にする', onClick: () => {
+        state.remeshTris = app.tools.suggestRemeshTris();
+        remeshTrisSlider.set(state.remeshTris);
+      } },
+      { label: 'リメッシュ実行', cls: 'primary', onClick: () => app.remeshAdaptive() },
+    ]);
+    el('div', 'subhead', rm).textContent = '書き出し';
+    toggle(rm, {
+      label: 'OBJ を四角優勢で書き出す', value: state.exportQuads,
+      title: '隣り合う三角形を対にして四角として書き出します（ZRemesher の出力に近い見た目になります）',
+      onChange: (on) => { state.exportQuads = on; },
+    });
+    remeshQuadInfo = el('p', 'note', rm);
+    btnRow(rm, [
+      { label: '四角化率を調べる', cls: 'wide', onClick: () => {
+        const q = app.tools.quadStats();
+        remeshQuadInfo.textContent = `四角 ${q.quads.toLocaleString()} + 三角 ${q.tris.toLocaleString()}`
+          + `（三角形の ${(q.ratio * 100).toFixed(1)}% が四角に入ります）`;
+      } },
+    ]);
+    el('p', 'note', rm).textContent =
+      'ダイナメッシュが「形を作り直す」のに対して、リメッシュは「形を保ったまま'
+      + 'ポリゴンの配置だけを整える」操作です。分割 / 統合 / 辺の張り替え / 接線緩和を'
+      + '反復し、毎回元の表面へ引き戻します。トポロジが変わるので分割レベル・'
+      + 'レイヤー・モーフは破棄されます。';
+  }
+
   // --- クリップ / トリム -------------------------------------------------
   const cl = section(right, 'クリップ / トリム', true);
   {
@@ -1207,6 +1266,7 @@ export function buildUI(app) {
       if (groupAngleSlider) groupAngleSlider.set(state.groupAngle);
       if (groupViewToggle) groupViewToggle.set(state.groupView);
       if (clipModeSeg) clipModeSeg.set(state.clipMode);
+      if (remeshTrisSlider) remeshTrisSlider.set(state.remeshTris);
       if (strokeSeg) strokeSeg.set(state.stroke);
       if (alphaGrid) alphaGrid.btns.forEach((b, k) => b.classList.toggle('on', k === state.alpha));
       refreshLayers();

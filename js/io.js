@@ -22,7 +22,12 @@ function buildRemap(mesh) {
   return { remap, count: n, tris };
 }
 
-export function exportOBJ(mesh, { withColor = true, name = 'websculpt' } = {}) {
+/**
+ * @param {object} opt
+ *   quads: remesh.quadDominant() の出力を渡すと四角優勢の面リストで書き出す。
+ *          ZRemesher の出力は四角なので、他のツールで開いたときの見た目を近づけられる。
+ */
+export function exportOBJ(mesh, { withColor = true, name = 'websculpt', quads = null } = {}) {
   const { remap, count, tris } = buildRemap(mesh);
   const P = mesh.positions, N = mesh.normals, C = mesh.colors;
   const out = [];
@@ -44,9 +49,27 @@ export function exportOBJ(mesh, { withColor = true, name = 'websculpt' } = {}) {
     const i = v * 3;
     out.push(`vn ${f(N[i])} ${f(N[i + 1])} ${f(N[i + 2])}`);
   }
-  for (let i = 0; i < tris.length; i += 3) {
-    const a = tris[i] + 1, b = tris[i + 1] + 1, c = tris[i + 2] + 1;
-    out.push(`f ${a}//${a} ${b}//${b} ${c}//${c}`);
+  if (quads && quads.offsets && quads.offsets.length > 1) {
+    // 四角優勢の面リストが渡されたらそれを書く（remesh.quadDominant の出力）。
+    // 三角形も混ざるので、面ごとに頂点数が変わる形で出す。
+    // 頂点番号はメッシュ側のものなので remap を通す。
+    const F = quads.faces, O = quads.offsets;
+    for (let k = 0; k + 1 < O.length; k++) {
+      let line = 'f';
+      let bad = false;
+      for (let i = O[k]; i < O[k + 1]; i++) {
+        const r = remap[F[i]];
+        if (r < 0) { bad = true; break; }
+        const n = r + 1;
+        line += ' ' + n + '//' + n;
+      }
+      if (!bad) out.push(line);
+    }
+  } else {
+    for (let i = 0; i < tris.length; i += 3) {
+      const a = tris[i] + 1, b = tris[i + 1] + 1, c = tris[i + 2] + 1;
+      out.push(`f ${a}//${a} ${b}//${b} ${c}//${c}`);
+    }
   }
   return out.join('\n') + '\n';
 }

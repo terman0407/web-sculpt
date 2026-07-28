@@ -65,6 +65,13 @@ const state = {
   clipFalloff: 0,          // クリップの減衰（0 で完全な平面）
   transposeMode: false,    // トランスポーズ中か（W キーで切り替え）
   transposeLocal: false,   // ギズモの軸を選択領域の主成分に合わせる
+  // リメッシュ（ZRemesher 相当）
+  remeshTris: 20000,       // 目標三角形数
+  remeshIterations: 5,
+  remeshAdaptive: 0.5,     // 曲率適応の強さ 0..1
+  remeshRelax: 0.5,        // 接線緩和の量
+  remeshProject: true,     // 元の表面へ投影して形を保つ
+  exportQuads: false,      // OBJ を四角優勢で書き出す
   // 表示
   material: 0,
   wireframe: false,
@@ -139,8 +146,9 @@ const app = {
   newMesh(kind) {
     const gen = PRIMITIVES[kind] || PRIMITIVES.sphere;
     const g = gen();
-    // 新規作成はサブツールも 1 個に戻す（「作り直し」の意味をはっきりさせる）
-    mesh = new SculptMesh();
+    // 新規作成はサブツールも 1 個に戻す（「作り直し」の意味をはっきりさせる）。
+    // ただしメッシュのオブジェクトは作り直さず、いまアクティブなものを使い回す。
+    // 差し替えると外から掴んでいる参照（テストや拡張）が古いメッシュを指すため。
     mesh.setGeometry(g.positions, g.indices);
     if (renderer) {
       for (const t of subtools.list) renderer.destroyStatic(t.id);
@@ -297,6 +305,24 @@ const app = {
   listProjects: () => store.listProjects(),
   estimateUsage: () => store.estimateUsage(),
   saveSettingsNow() { store.saveSettings(state); },
+  /** リメッシュ。数百 ms かかるのでオーバーレイを出してから実行する */
+  async remeshAdaptive() {
+    if (busy) return;
+    busy = true;
+    ui.showBusy('リメッシュ中…');
+    await new Promise(requestAnimationFrame);
+    await new Promise(requestAnimationFrame);
+    try {
+      tools.applyRemesh();
+      frameCameraKeepView();
+    } catch (e) {
+      ui.toast('リメッシュでエラー: ' + e.message, 5000);
+      console.error(e);
+    } finally {
+      ui.hideBusy();
+      busy = false;
+    }
+  },
   setTranspose(on) { applyTransposeMode(on); },
   toggleTranspose() { applyTransposeMode(!state.transposeMode); },
   resetSettings() {
@@ -311,7 +337,15 @@ const app = {
   exportFile(kind) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     if (kind === 'obj') {
-      download(exportOBJ(mesh), `websculpt-${stamp}.obj`, 'text/plain');
+      // 四角優勢で出すと ZRemesher の出力に近い見た目で他のツールで開ける。
+      // 対にできなかった三角形は三角形のまま出る。
+      const quads = state.exportQuads && tools ? tools.quadStats() : null;
+      download(exportOBJ(mesh, { quads }), `websculpt-${stamp}.obj`, 'text/plain');
+      if (quads) {
+        ui.toast(`OBJ を書き出しました（四角 ${quads.quads.toLocaleString()} + 三角 ${quads.tris.toLocaleString()}`
+          + ` / 四角化率 ${(quads.ratio * 100).toFixed(0)}%）`, 3500);
+        return;
+      }
     } else if (kind === 'stl') {
       download(exportSTL(mesh), `websculpt-${stamp}.stl`, 'model/stl');
     } else if (kind === 'ply') {

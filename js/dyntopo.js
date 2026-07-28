@@ -136,6 +136,74 @@ export function collapseEdge(mesh, a, b, maxValence = 16) {
   return true;
 }
 
+/**
+ * 辺 (a,b) を反対側の対角線へ張り替える（エッジフリップ）。
+ *
+ * 等方リメッシュで価数を 6 に近づけるのに使う。分割とコラプスだけだと
+ * 価数が 4 や 9 の頂点が残り、細分化したときに歪みが出る。
+ *
+ * 隣接する 2 三角形を tri0 = (a,b,c) / tri1 = (b,a,d) とすると、共有辺を除いた
+ * 外周は b→c→a→d→b になる。これを対角線 c-d で割ると (c,a,d) と (c,d,b) で、
+ * どちらも元の巻き方向と整合する。
+ *
+ * 次のいずれかに当たる場合は何もしない（false を返す）:
+ *   * 共有三角形が 2 枚でない（境界 / 非多様体）
+ *   * 辺 (c,d) が既に存在する（張ると多重辺になる）
+ *   * 反転後に法線が裏返る、または面積が潰れる
+ *   * 価数の偏りが改善しない
+ */
+export function flipEdge(mesh, a, b, opts = {}) {
+  if (!mesh.isVertAlive(a) || !mesh.isVertAlive(b)) return false;
+  mesh.trianglesWithEdge(a, b, _sh);
+  if (_sh.length !== 2) return false;
+  const t0 = _sh[0], t1 = _sh[1];
+  const T = mesh.tris;
+
+  // それぞれの「辺に含まれない頂点」を取る
+  const opp = (t) => {
+    const i = t * 3;
+    for (let e = 0; e < 3; e++) {
+      const v = T[i + e];
+      if (v !== a && v !== b) return v;
+    }
+    return -1;
+  };
+  const c = opp(t0), d = opp(t1);
+  if (c < 0 || d < 0 || c === d) return false;
+
+  // 辺 (c,d) が既にあるなら張れない
+  mesh.trianglesWithEdge(c, d, _sh2);
+  if (_sh2.length > 0) return false;
+
+  // 価数の改善を見る。閉曲面の内部は 6 が理想
+  if (opts.checkValence !== false) {
+    const va = mesh.valence(a), vb = mesh.valence(b);
+    const vc = mesh.valence(c), vd = mesh.valence(d);
+    const before = Math.abs(va - 6) + Math.abs(vb - 6) + Math.abs(vc - 6) + Math.abs(vd - 6);
+    const after = Math.abs(va - 1 - 6) + Math.abs(vb - 1 - 6) + Math.abs(vc + 1 - 6) + Math.abs(vd + 1 - 6);
+    if (after >= before) return false;
+  }
+
+  // 反転チェック: 新しい 2 枚の法線が、元の 2 枚の平均法線と同じ向きか
+  const P = mesh.positions;
+  triNormal(P, T[t0 * 3], T[t0 * 3 + 1], T[t0 * 3 + 2], _n0);
+  triNormal(P, T[t1 * 3], T[t1 * 3 + 1], T[t1 * 3 + 2], _n1);
+  const rx = _n0[0] + _n1[0], ry = _n0[1] + _n1[1], rz = _n0[2] + _n1[2];
+  triNormal(P, c, a, d, _n0);
+  triNormal(P, c, d, b, _n1);
+  const l0 = _n0[0] * _n0[0] + _n0[1] * _n0[1] + _n0[2] * _n0[2];
+  const l1 = _n1[0] * _n1[0] + _n1[1] * _n1[1] + _n1[2] * _n1[2];
+  if (l0 < 1e-24 || l1 < 1e-24) return false;               // 潰れる
+  if (_n0[0] * rx + _n0[1] * ry + _n0[2] * rz <= 0) return false;
+  if (_n1[0] * rx + _n1[1] * ry + _n1[2] * rz <= 0) return false;
+
+  mesh.setTriangle(t0, c, a, d);
+  mesh.setTriangle(t1, c, d, b);
+  return true;
+}
+
+const _sh2 = [];
+
 const _touchedVerts = [];
 // コラプス候補の辺。ダブごとに確保し直さないようモジュールスコープで使い回す
 let _edgeA = new Int32Array(0);
