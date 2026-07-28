@@ -135,9 +135,13 @@ class MirrorState {
     this.center = V3.create();
     this.lockedVerts = null;   // move ブラシ用の固定領域
     this.lockedCount = 0;
-    this.verts = [];
-    this.tris = [];
+    // verts / tris は Sculptor が持つ共有スクラッチ配列を指す。
+    // 次に _gather を呼ぶまでしか有効でない（_dab はミラーごとに
+    // 収集 → 適用 → 法線更新まで完結するので、これで足りる）。
+    this.verts = null;
+    this.tris = null;
     this.count = 0;
+    this.triCount = 0;
   }
 }
 
@@ -152,12 +156,19 @@ export class Sculptor {
     this.tStamp = new Int32Array(0);
     this.stamp = 0;
     this.queue = new Int32Array(0);
-    this.normalSet = [];
-    this.curvSet = [];
-    this.curvPending = [];      // フレーム末にまとめて曲率を直す頂点
+    // 領域は 1 ダブで数万頂点になる。ここを JS 配列 + push で持つと
+    // 1 ダブあたり十数万回の push になり、それ自体が数 ms かかっていた。
+    // すべて Int32Array + 件数カウンタに置き換えてある。
+    this.gTris = new Int32Array(0);   // _gather が集めた三角形
+    this.normalSet = new Int32Array(0);
+    this.normalCount = 0;
+    this.curvSet = new Int32Array(0);
+    this.curvCount = 0;
+    this.curvPending = new Int32Array(0);   // フレーム末にまとめて曲率を直す頂点
+    this.curvPendCount = 0;
     this.cvStamp = new Int32Array(0);
     this.cvStampId = 1;
-    this._movedVerts = [];      // dyntopo のコラプスで位置が動いた頂点
+    this._movedVerts = [];      // dyntopo のコラプスで位置が動いた頂点（数十個なので配列のまま）
     this.nStamp = new Int32Array(0);
     this.levels = new SubdivLevels();
 
@@ -233,48 +244,79 @@ export class Sculptor {
     }
   }
 
-  /** ブラシ球内の連結頂点と、それに接する三角形を収集 */
+  /** list を count 件入る大きさまで広げる（内容は保持する） */
+  static _grow(list, count) {
+    if (list.length >= count) return list;
+    const a = new Int32Array(Math.max(1024, count, list.length * 2));
+    a.set(list);
+    return a;
+  }
+
+  /**
+   * ブラシ球内の連結頂点と、それに接する三角形を収集。
+   *
+   * 頂点リストは BFS のキューそのもの（取り出した順 = 収集順）なので、
+   * 別配列に積み直さずキューを ms.verts として使い回す。
+   */
   _gather(ms, center, radius) {
     const m = this.mesh;
     this._ensureStamps();
     const id = ++this.stamp;
     const vS = this.vStamp, tS = this.tStamp, q = this.queue;
     const P = m.positions, T = m.tris;
-    const RC = m.ringCount, RD = m.ringData;
-    const verts = ms.verts, tris = ms.tris;
-    verts.length = 0; tris.length = 0;
+    const RC = m.ringCount, RD = m.ringData, REX = m.ringExt;
+    const qlen = q.length;
+    let TR = this.gTris;
+    ms.verts = q; ms.tris = TR;
+    ms.count = 0; ms.triCount = 0;
 
     const cx = center[0], cy = center[1], cz = center[2];
     const r2 = radius * radius;
-    let head = 0, tail = 0;
+    let head = 0, tail = 0, nt = 0;
 
     const seed = ms.seed;
-    if (seed < 0 || seed >= m.nv || !m.isVertAlive(seed)) { ms.count = 0; return; }
+    if (seed < 0 || seed >= m.nv || !m.isVertAlive(seed)) return;
     vS[seed] = id;
     q[tail++] = seed;
 
     while (head < tail) {
       const v = q[head++];
-      verts.push(v);
       const rc = RC[v];
       if (rc === 0) continue;
-      const rbase = rc <= RING_STRIDE ? v * RING_STRIDE : -1;
-      const rex = rbase < 0 ? m.ringExt[v] : null;
+      const inline = rc <= RING_STRIDE;
+      const rbase = inline ? v * RING_STRIDE : 0;
+      const rex = inline ? null : REX[v];
+      if (nt + rc > TR.length) { TR = Sculptor._grow(TR, nt + rc); this.gTris = TR; ms.tris = TR; }
       for (let j = 0; j < rc; j++) {
-        const t = rex ? rex[j] : RD[rbase + j];
-        if (tS[t] !== id) { tS[t] = id; tris.push(t); }
+        const t = inline ? RD[rbase + j] : rex[j];
+        if (tS[t] !== id) { tS[t] = id; TR[nt++] = t; }
         const ti = t * 3;
-        for (let e = 0; e < 3; e++) {
-          const u = T[ti + e];
-          if (vS[u] === id) continue;
+        // 3 頂点は毎回全部見るのでループを展開する
+        let u = T[ti];
+        if (vS[u] !== id) {
           vS[u] = id;
           const ui = u * 3;
           const dx = P[ui] - cx, dy = P[ui + 1] - cy, dz = P[ui + 2] - cz;
-          if (dx * dx + dy * dy + dz * dz <= r2 && tail < q.length) q[tail++] = u;
+          if (dx * dx + dy * dy + dz * dz <= r2 && tail < qlen) q[tail++] = u;
+        }
+        u = T[ti + 1];
+        if (vS[u] !== id) {
+          vS[u] = id;
+          const ui = u * 3;
+          const dx = P[ui] - cx, dy = P[ui + 1] - cy, dz = P[ui + 2] - cz;
+          if (dx * dx + dy * dy + dz * dz <= r2 && tail < qlen) q[tail++] = u;
+        }
+        u = T[ti + 2];
+        if (vS[u] !== id) {
+          vS[u] = id;
+          const ui = u * 3;
+          const dx = P[ui] - cx, dy = P[ui + 1] - cy, dz = P[ui + 2] - cz;
+          if (dx * dx + dy * dy + dz * dz <= r2 && tail < qlen) q[tail++] = u;
         }
       }
     }
-    ms.count = verts.length;
+    ms.count = tail;
+    ms.triCount = nt;
   }
 
   /**
@@ -287,7 +329,7 @@ export class Sculptor {
    * @param tris  verts に接する三角形（_gather が集めたものをそのまま渡す）。
    *              渡すと ring を辿り直さずに済むぶん大幅に速い。
    */
-  _updateNormals(verts, count, tris = null) {
+  _updateNormals(verts, count, tris = null, triCount = 0) {
     const m = this.mesh;
     this._ensureStamps();
     const T = m.tris;
@@ -295,52 +337,66 @@ export class Sculptor {
     // 1 段目: 移動頂点 + その 1-ring（法線の更新範囲）
     const id1 = ++this.stamp;
     const nS = this.nStamp;
-    const set = this.normalSet;
-    set.length = 0;
+    // tris 経路の上限は count + triCount*3 で確定するので先に確保しておく
+    // （以降は境界確認が要らない）。ring 経路は上限が読めないので途中で広げる。
+    const bound = tris ? count + triCount * 3 : count + 64;
+    let set = this.normalSet;
+    if (set.length < bound) { set = new Int32Array(Math.max(1024, bound)); this.normalSet = set; }
+    let ns = 0;
     if (tris) {
       // 「verts に接する三角形の全頂点」= verts + その 1-ring。
       // 三角形リストを 1 回舐めるだけで済み、ring の間接参照が消える。
       for (let k = 0; k < count; k++) {
         const v = verts[k];
-        if (nS[v] !== id1) { nS[v] = id1; set.push(v); }
+        if (nS[v] !== id1) { nS[v] = id1; set[ns++] = v; }
       }
-      for (let k = 0; k < tris.length; k++) {
+      for (let k = 0; k < triCount; k++) {
         const ti = tris[k] * 3;
-        for (let e = 0; e < 3; e++) {
-          const u = T[ti + e];
-          if (nS[u] !== id1) { nS[u] = id1; set.push(u); }
-        }
+        let u = T[ti];
+        if (nS[u] !== id1) { nS[u] = id1; set[ns++] = u; }
+        u = T[ti + 1];
+        if (nS[u] !== id1) { nS[u] = id1; set[ns++] = u; }
+        u = T[ti + 2];
+        if (nS[u] !== id1) { nS[u] = id1; set[ns++] = u; }
       }
     } else {
+      const RC = m.ringCount, RD = m.ringData, REX = m.ringExt;
       for (let k = 0; k < count; k++) {
         const v = verts[k];
-        if (nS[v] !== id1) { nS[v] = id1; set.push(v); }
-        const rc = m.ringCount[v];
+        if (nS[v] !== id1) { nS[v] = id1; set[ns++] = v; }
+        const rc = RC[v];
         if (rc === 0) continue;
-        const rb = rc <= RING_STRIDE ? v * RING_STRIDE : -1;
-        const rex = rb < 0 ? m.ringExt[v] : null;
+        const inline = rc <= RING_STRIDE;
+        const rb = inline ? v * RING_STRIDE : 0;
+        const rex = inline ? null : REX[v];
+        if (ns + rc * 3 > set.length) { set = Sculptor._grow(set, ns + rc * 3); this.normalSet = set; }
         for (let j = 0; j < rc; j++) {
-          const ti = (rex ? rex[j] : m.ringData[rb + j]) * 3;
-          for (let e = 0; e < 3; e++) {
-            const u = T[ti + e];
-            if (nS[u] !== id1) { nS[u] = id1; set.push(u); }
-          }
+          const ti = (inline ? RD[rb + j] : rex[j]) * 3;
+          let u = T[ti];
+          if (nS[u] !== id1) { nS[u] = id1; set[ns++] = u; }
+          u = T[ti + 1];
+          if (nS[u] !== id1) { nS[u] = id1; set[ns++] = u; }
+          u = T[ti + 2];
+          if (nS[u] !== id1) { nS[u] = id1; set[ns++] = u; }
         }
       }
     }
+    this.normalCount = ns;
     // 面法線を 1 面 1 回だけ計算する版も試したが、そのための三角形集合を
     // 作るコストのほうが上回ったので頂点ごとの計算のままにしてある。
-    m.computeNormalsFor(set, set.length);
+    m.computeNormalsFor(set, ns);
 
     // 曲率は見た目（キャビティ陰影）にしか使わず、彫刻の挙動には影響しない。
     // 1 フレームに何十ダブも打たれるので、ここでは「後で計算する頂点」を
     // 積むだけにして、実際の計算はフレーム末に 1 回だけ行う。
     const cs = this.cvStamp, cid = this.cvStampId;
-    const pend = this.curvPending;
-    for (let k = 0; k < set.length; k++) {
+    let pend = this.curvPending, pn = this.curvPendCount;
+    if (pn + ns > pend.length) { pend = Sculptor._grow(pend, pn + ns); this.curvPending = pend; }
+    for (let k = 0; k < ns; k++) {
       const v = set[k];
-      if (cs[v] !== cid) { cs[v] = cid; pend.push(v); }
+      if (cs[v] !== cid) { cs[v] = cid; pend[pn++] = v; }
     }
+    this.curvPendCount = pn;
   }
 
   /**
@@ -349,10 +405,10 @@ export class Sculptor {
    */
   flushCurvature() {
     const pend = this.curvPending;
-    if (pend.length === 0) return 0;
+    const pn = this.curvPendCount;
+    if (pn === 0) return 0;
     const m = this.mesh;
     this._ensureStamps();
-    const T = m.tris;
 
     // pend には既に「動いた頂点 + その 1-ring」が入っている（_updateNormals が
     // 法線更新の対象として積んだもの）。ここでさらに 1-ring 広げると集合が 3 倍に
@@ -360,25 +416,27 @@ export class Sculptor {
     // 境界のわずかな誤差は次のダブで上書きされるので広げない。
     const id = ++this.stamp;
     const nS = this.nStamp;
-    const cset = this.curvSet;
-    cset.length = 0;
-    for (let k = 0; k < pend.length; k++) {
+    let cset = this.curvSet;
+    if (cset.length < pn) { cset = new Int32Array(Math.max(1024, pn)); this.curvSet = cset; }
+    let cn = 0;
+    for (let k = 0; k < pn; k++) {
       const v = pend[k];
       if (v >= m.nv || !m.isVertAlive(v)) continue;
-      if (nS[v] !== id) { nS[v] = id; cset.push(v); }
+      if (nS[v] !== id) { nS[v] = id; cset[cn++] = v; }
     }
-    pend.length = 0;
+    this.curvPendCount = 0;
+    this.curvCount = cn;
     this.cvStampId++;
-    if (cset.length === 0) return 0;
-    m.computeCurvatureFor(cset, cset.length);
-    m.smoothCurvatureFor(cset, cset.length);
-    for (let k = 0; k < cset.length; k++) m.markVert(cset[k]);
-    return cset.length;
+    if (cn === 0) return 0;
+    m.computeCurvatureFor(cset, cn);
+    m.smoothCurvatureFor(cset, cn);
+    for (let k = 0; k < cn; k++) m.markVert(cset[k]);
+    return cn;
   }
 
   /** メッシュを差し替えたときなど、溜まっている曲率更新を捨てる */
   dropPendingCurvature() {
-    this.curvPending.length = 0;
+    this.curvPendCount = 0;
     this.cvStampId++;
   }
 
@@ -568,7 +626,7 @@ export class Sculptor {
     if (brush === 'move') {
       if (first || !ms.lockedVerts) {
         this._gather(ms, point, radius);
-        ms.lockedVerts = ms.verts.slice();
+        ms.lockedVerts = ms.verts.slice(0, ms.count);
         ms.lockedCount = ms.count;
         V3.copy(ms.center, point);
       } else {
@@ -601,7 +659,7 @@ export class Sculptor {
       // 1 ダブで作れる頂点数を領域サイズに比例させる。粗い面に大きなブラシを
       // 当てたときに 1 フレームで数千頂点作って固まるのを防ぐ。
       // 上限に当たっても次のダブで続きが分割されるので、数フレームで目標密度に届く。
-      const ch = refineRegion(m, ms.tris, point, radius, target, {
+      const ch = refineRegion(m, ms.tris, ms.triCount, point, radius, target, {
         subdivide: true,
         decimate: st.decimate,
         maxVerts: st.maxVerts,
@@ -633,7 +691,7 @@ export class Sculptor {
     });
 
     if (brush !== 'paint' && brush !== 'mask') {
-      this._updateNormals(ms.verts, ms.count, ms.tris);
+      this._updateNormals(ms.verts, ms.count, ms.tris, ms.triCount);
     }
   }
 
@@ -768,9 +826,10 @@ export class Sculptor {
     const bb = m.bounds();
     const center = V3.create(bb.center[0], bb.center[1], bb.center[2]);
     const radius = bb.radius * 4;
-    const tris = [];
-    for (let t = 0; t < m.nt; t++) if (m.isTriAlive(t)) tris.push(t);
-    refineRegion(m, tris, center, radius, targetLen, {
+    const tris = new Int32Array(m.liveTris);
+    let nTris = 0;
+    for (let t = 0; t < m.nt; t++) if (m.isTriAlive(t)) tris[nTris++] = t;
+    refineRegion(m, tris, nTris, center, radius, targetLen, {
       subdivide: true, decimate: true, maxVerts: this.state.maxVerts, maxNewPerStep: 400000,
     });
     m.compact();

@@ -123,6 +123,18 @@ export class SculptMesh {
     this.capT = cap;
   }
 
+  /**
+   * 頂点 nv 個・三角形 nt 個ぶんの容量を先に確保する。
+   *
+   * 呼び出し側が mesh.positions などをローカル変数に持って回るとき、途中で
+   * 配列が作り直されると古い配列を掴んだままになる。あらかじめここで広げておけば
+   * その区間では再確保が起きないので、キャッシュしたまま安全に使える。
+   */
+  reserve(nv, nt) {
+    if (nv > this.capV) this._allocVerts(nv);
+    if (nt > this.capT) this._allocTris(nt);
+  }
+
   // --- dirty マーキング ---------------------------------------------------
 
   markVert(i) {
@@ -383,29 +395,63 @@ export class SculptMesh {
 
   // --- 法線 ---------------------------------------------------------------
 
+  // このループはハイポリのブラシで最も重い場所の一つなので、
+  //  * this.xxx のプロパティ読みを全部ローカルへ退避
+  //  * valence <= RING_STRIDE（ほぼ全部）と、はみ出し組を別ループに分ける
+  //    → 内側ループから ex ? ex[j] : RD[...] の分岐が消える
+  //  * markVert() の呼び出しをインライン化してループ後に 1 回だけ書き戻す
+  //    （呼び出しごとに this への読み書きが 8 回あった）
+  // という形にしてある。アルゴリズムは変えていない。
   computeNormalsFor(list, count = list.length) {
-    const P = this.positions, N = this.normals, T = this.tris, RD = this.ringData;
+    const P = this.positions, N = this.normals, T = this.tris;
+    const RD = this.ringData, RC = this.ringCount, REX = this.ringExt;
+    const VB = this.vBlocks;
+    let dMin = this.vDirtyMin, dMax = this.vDirtyMax;
+    let bMin = this.vBlockMin, bMax = this.vBlockMax;
+
     for (let k = 0; k < count; k++) {
       const v = list[k];
-      const c = this.ringCount[v];
-      if (c === 0) continue;
-      const base = c <= RING_STRIDE ? v * RING_STRIDE : -1;
-      const ex = base < 0 ? this.ringExt[v] : null;
+      const rc = RC[v];
+      if (rc === 0) continue;
       let nx = 0, ny = 0, nz = 0;
-      for (let j = 0; j < c; j++) {
-        const i = (ex ? ex[j] : RD[base + j]) * 3;
-        const a = T[i] * 3, b = T[i + 1] * 3, c = T[i + 2] * 3;
-        const e1x = P[b] - P[a], e1y = P[b + 1] - P[a + 1], e1z = P[b + 2] - P[a + 2];
-        const e2x = P[c] - P[a], e2y = P[c + 1] - P[a + 1], e2z = P[c + 2] - P[a + 2];
-        nx += e1y * e2z - e1z * e2y;
-        ny += e1z * e2x - e1x * e2z;
-        nz += e1x * e2y - e1y * e2x;
+      if (rc <= RING_STRIDE) {
+        const base = v * RING_STRIDE;
+        for (let j = 0; j < rc; j++) {
+          const i = RD[base + j] * 3;
+          const a = T[i] * 3, b = T[i + 1] * 3, c = T[i + 2] * 3;
+          const ax = P[a], ay = P[a + 1], az = P[a + 2];
+          const e1x = P[b] - ax, e1y = P[b + 1] - ay, e1z = P[b + 2] - az;
+          const e2x = P[c] - ax, e2y = P[c + 1] - ay, e2z = P[c + 2] - az;
+          nx += e1y * e2z - e1z * e2y;
+          ny += e1z * e2x - e1x * e2z;
+          nz += e1x * e2y - e1y * e2x;
+        }
+      } else {
+        const ex = REX[v];
+        for (let j = 0; j < rc; j++) {
+          const i = ex[j] * 3;
+          const a = T[i] * 3, b = T[i + 1] * 3, c = T[i + 2] * 3;
+          const ax = P[a], ay = P[a + 1], az = P[a + 2];
+          const e1x = P[b] - ax, e1y = P[b + 1] - ay, e1z = P[b + 2] - az;
+          const e2x = P[c] - ax, e2y = P[c + 1] - ay, e2z = P[c + 2] - az;
+          nx += e1y * e2z - e1z * e2y;
+          ny += e1z * e2x - e1x * e2z;
+          nz += e1x * e2y - e1y * e2x;
+        }
       }
       const l = Math.sqrt(nx * nx + ny * ny + nz * nz);
       const iv = v * 3;
-      if (l > 1e-20) { N[iv] = nx / l; N[iv + 1] = ny / l; N[iv + 2] = nz / l; }
-      this.markVert(v);
+      if (l > 1e-20) { const s = 1 / l; N[iv] = nx * s; N[iv + 1] = ny * s; N[iv + 2] = nz * s; }
+      // markVert(v) のインライン展開
+      if (v < dMin) dMin = v;
+      if (v > dMax) dMax = v;
+      const bb = v >> DIRTY_SHIFT;
+      VB[bb] = 1;
+      if (bb < bMin) bMin = bb;
+      if (bb > bMax) bMax = bb;
     }
+    this.vDirtyMin = dMin; this.vDirtyMax = dMax;
+    this.vBlockMin = bMin; this.vBlockMax = bMax;
   }
 
   /**
@@ -415,28 +461,39 @@ export class SculptMesh {
    */
   // 辺長は二乗和の平方根（RMS）で代用する。平均長との差は正則なメッシュでは小さく、
   // 陰影用の量なので実用上問題ない。内側ループから sqrt を丸ごと外せる。
+  // 内側は「三角形の 3 頂点のうち v でない 2 つ」を足す。以前は e=0..3 を回して
+  // u === v を弾いていたが、どれが v かは比較 2 回で分かるので
+  // ループと分岐をまとめて消せる（近傍 6 個に対して 18 反復 → 12 回の読み出し）。
+  // 各近傍が 2 回数えられるのは平均を取るので結果に影響しない。
   computeCurvatureFor(list, count = list.length) {
-    const P = this.positions, N = this.normals, T = this.tris, CV = this.curv, RD = this.ringData;
+    const P = this.positions, N = this.normals, T = this.tris, CV = this.curv;
+    const RD = this.ringData, RC = this.ringCount, REX = this.ringExt;
     for (let k = 0; k < count; k++) {
       const v = list[k];
-      const c = this.ringCount[v];
-      if (c === 0) { CV[v] = 0; continue; }
-      const base = c <= RING_STRIDE ? v * RING_STRIDE : -1;
-      const ex = base < 0 ? this.ringExt[v] : null;
+      const rc = RC[v];
+      if (rc === 0) { CV[v] = 0; continue; }
+      const inline = rc <= RING_STRIDE;
+      const base = inline ? v * RING_STRIDE : 0;
+      const ex = inline ? null : REX[v];
       const iv = v * 3;
       const px = P[iv], py = P[iv + 1], pz = P[iv + 2];
       let sx = 0, sy = 0, sz = 0, e2 = 0, cnt = 0;
-      for (let j = 0; j < c; j++) {
-        const ti = (ex ? ex[j] : RD[base + j]) * 3;
-        for (let e = 0; e < 3; e++) {
-          const u = T[ti + e];
-          if (u === v) continue;
-          const iu = u * 3;
-          const dx = P[iu] - px, dy = P[iu + 1] - py, dz = P[iu + 2] - pz;
-          sx += dx; sy += dy; sz += dz;
-          e2 += dx * dx + dy * dy + dz * dz;
-          cnt++;
-        }
+      for (let j = 0; j < rc; j++) {
+        const ti = (inline ? RD[base + j] : ex[j]) * 3;
+        const t0 = T[ti], t1 = T[ti + 1], t2 = T[ti + 2];
+        let u1, u2;
+        if (t0 === v) { u1 = t1; u2 = t2; }
+        else if (t1 === v) { u1 = t2; u2 = t0; }
+        else { u1 = t0; u2 = t1; }
+        const i1 = u1 * 3;
+        let dx = P[i1] - px, dy = P[i1 + 1] - py, dz = P[i1 + 2] - pz;
+        sx += dx; sy += dy; sz += dz;
+        e2 += dx * dx + dy * dy + dz * dz;
+        const i2 = u2 * 3;
+        dx = P[i2] - px; dy = P[i2 + 1] - py; dz = P[i2 + 2] - pz;
+        sx += dx; sy += dy; sz += dz;
+        e2 += dx * dx + dy * dy + dz * dz;
+        cnt += 2;
       }
       if (cnt === 0 || e2 <= 0) { CV[v] = 0; continue; }
       const inv = 1 / cnt;
@@ -448,25 +505,28 @@ export class SculptMesh {
 
   /** 曲率は 2 次量でノイズが乗りやすいので 1-ring 平均で軽く均す */
   smoothCurvatureFor(list, count = list.length, amount = 0.55) {
-    const T = this.tris, CV = this.curv, RD = this.ringData;
+    const T = this.tris, CV = this.curv;
+    const RD = this.ringData, RC = this.ringCount, REX = this.ringExt;
     const tmp = this._curvTmp && this._curvTmp.length >= count
       ? this._curvTmp : (this._curvTmp = new Float32Array(Math.max(1024, count * 2)));
     for (let k = 0; k < count; k++) {
       const v = list[k];
-      const c = this.ringCount[v];
-      if (c === 0) { tmp[k] = CV[v]; continue; }
-      const base = c <= RING_STRIDE ? v * RING_STRIDE : -1;
-      const ex = base < 0 ? this.ringExt[v] : null;
-      let s = 0, cnt = 0;
-      for (let j = 0; j < c; j++) {
-        const ti = (ex ? ex[j] : RD[base + j]) * 3;
-        for (let e = 0; e < 3; e++) {
-          const u = T[ti + e];
-          if (u === v) continue;
-          s += CV[u]; cnt++;
-        }
+      const rc = RC[v];
+      const cv = CV[v];
+      if (rc === 0) { tmp[k] = cv; continue; }
+      const inline = rc <= RING_STRIDE;
+      const base = inline ? v * RING_STRIDE : 0;
+      const ex = inline ? null : REX[v];
+      let s = 0;
+      for (let j = 0; j < rc; j++) {
+        const ti = (inline ? RD[base + j] : ex[j]) * 3;
+        const t0 = T[ti], t1 = T[ti + 1], t2 = T[ti + 2];
+        // computeCurvatureFor と同じ「v でない 2 つ」の取り出し方
+        if (t0 === v) s += CV[t1] + CV[t2];
+        else if (t1 === v) s += CV[t2] + CV[t0];
+        else s += CV[t0] + CV[t1];
       }
-      tmp[k] = cnt ? CV[v] + (s / cnt - CV[v]) * amount : CV[v];
+      tmp[k] = cv + (s / (rc * 2) - cv) * amount;
     }
     for (let k = 0; k < count; k++) CV[list[k]] = tmp[k];
   }

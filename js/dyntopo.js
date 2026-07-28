@@ -143,26 +143,34 @@ let _edgeB = new Int32Array(0);
 let _edgeL = new Float64Array(0);
 let _edgeOrder = new Int32Array(0);
 const _orderList = [];
-const _considerBuf = [];
+let _considerBuf = new Int32Array(0);
 const _freshTris = [];
 
 /**
  * ブラシ領域を目標エッジ長に合わせて再分割 / 間引きする。
  *
  * @param {SculptMesh} mesh
- * @param {number[]} regionTris  領域内の三角形 ID
+ * @param {Int32Array} regionTris 領域内の三角形 ID
+ * @param {number} regionCount   regionTris の有効件数
  * @param {number[]} center      ブラシ中心 (world)
  * @param {number} radius        ブラシ半径 (world)
  * @param {number} targetLen     目標エッジ長 (world)
  * @param {object} opt {subdivide, decimate, maxVerts, maxNewPerStep}
  * @returns {boolean} トポロジが変化したか
  */
-export function refineRegion(mesh, regionTris, center, radius, targetLen, opt = {}) {
+export function refineRegion(mesh, regionTris, regionCount, center, radius, targetLen, opt = {}) {
   const doSplit = opt.subdivide !== false;
   const doCollapse = opt.decimate === true;
   const maxVerts = Math.min(opt.maxVerts || 1200000, MAX_VERTS_HARD);
   // 1 ダブの領域は数百頂点なので、1 万を超える生成は明らかに異常系。低めに抑える
   const maxNew = opt.maxNewPerStep || 4000;
+
+  // ここから下では mesh.positions / mesh.tris をローカルに持って回すので、
+  // 途中で配列が作り直されると古い配列を掴んだままになる（新頂点の座標が
+  // 読めず NaN になり、分割が黙って止まったり誤ったコラプスが起きる）。
+  // 先に必要なぶんだけ容量を確保して、この関数の中では再確保が起きないようにする。
+  // 1 回の分割で頂点 1 個・三角形 2 個が増えるので、最悪ぶんを見積もって渡す。
+  mesh.reserve(mesh.nv + maxNew + 8, mesh.nt + maxNew * 2 + 8);
 
   // 分割 / コラプスのしきい値。目標長を挟んでヒステリシスを持たせ、
   // 同じ辺が分割と統合を往復するのを防ぐ。コラプス側は既存ディテールを
@@ -175,9 +183,14 @@ export function refineRegion(mesh, regionTris, center, radius, targetLen, opt = 
   let changed = false;
 
   // 領域の三角形リストは使い回しの配列にコピーする（ダブごとの slice を避ける）
-  const consider = _considerBuf;
-  consider.length = 0;
-  for (let k = 0; k < regionTris.length; k++) consider.push(regionTris[k]);
+  // 数万件を push すると無視できないコストになるので Int32Array + 件数で持つ。
+  let consider = _considerBuf;
+  let nConsider = regionCount;
+  if (consider.length < nConsider) {
+    consider = new Int32Array(Math.max(4096, nConsider * 2));
+    _considerBuf = consider;
+  }
+  for (let k = 0; k < nConsider; k++) consider[k] = regionTris[k];
 
   // ---- 分割パス --------------------------------------------------------
   if (doSplit && mesh.liveVerts < maxVerts) {
@@ -188,7 +201,7 @@ export function refineRegion(mesh, regionTris, center, radius, targetLen, opt = 
       mesh.trackTris = _freshTris;
       let splits = 0;
       const T = mesh.tris;
-      for (let k = 0; k < consider.length; k++) {
+      for (let k = 0; k < nConsider; k++) {
         const t = consider[k];
         const i = t * 3;
         const i0 = T[i], i1 = T[i + 1], i2 = T[i + 2];
@@ -222,7 +235,12 @@ export function refineRegion(mesh, regionTris, center, radius, targetLen, opt = 
       if (splits > 0) changed = true;
       if (splits === 0 || mesh.liveVerts >= maxVerts || created >= maxNew) break;
       // 分割で作られた三角形も次パスで再チェックする
-      for (let k = 0; k < _freshTris.length; k++) consider.push(_freshTris[k]);
+      if (nConsider + _freshTris.length > consider.length) {
+        const a = new Int32Array(Math.max(4096, (nConsider + _freshTris.length) * 2));
+        a.set(consider.subarray(0, nConsider));
+        consider = a; _considerBuf = a;
+      }
+      for (let k = 0; k < _freshTris.length; k++) consider[nConsider++] = _freshTris[k];
     }
   }
 
@@ -234,14 +252,14 @@ export function refineRegion(mesh, regionTris, center, radius, targetLen, opt = 
     const cr2 = radius * radius;
     const cl2 = collapseLen * collapseLen;
     let ne = 0;
-    if (_edgeA.length < consider.length * 3) {
-      const cap = Math.max(1024, consider.length * 4);
+    if (_edgeA.length < nConsider * 3) {
+      const cap = Math.max(1024, nConsider * 4);
       _edgeA = new Int32Array(cap);
       _edgeB = new Int32Array(cap);
       _edgeL = new Float64Array(cap);
       _edgeOrder = new Int32Array(cap);
     }
-    for (let k = 0; k < consider.length; k++) {
+    for (let k = 0; k < nConsider; k++) {
       const t = consider[k];
       if (!mesh.isTriAlive(t)) continue;
       const i = t * 3;
