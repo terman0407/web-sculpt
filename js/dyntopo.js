@@ -88,7 +88,7 @@ export function collapseEdge(mesh, a, b, maxValence = 16) {
   const px = (nax + nbx) * 0.5, py = (nay + nby) * 0.5, pz = (naz + nbz) * 0.5;
 
   // --- 反転 / 退化チェック（実際に動かす前に予測法線で判定） ---
-  const ringA = mesh.ring[a], ringB = mesh.ring[b];
+  const ringA = mesh.ringArray(a), ringB = mesh.ringArray(b);
   const check = (tris, moved) => {
     for (let k = 0; k < tris.length; k++) {
       const t = tris[k];
@@ -126,7 +126,7 @@ export function collapseEdge(mesh, a, b, maxValence = 16) {
   mesh.removeTriangle(shared[0]);
   mesh.removeTriangle(shared[1]);
 
-  const bt = mesh.ring[b].slice();
+  const bt = mesh.ringArray(b);
   const T = mesh.tris;
   for (let k = 0; k < bt.length; k++) {
     const t = bt[k], i = t * 3;

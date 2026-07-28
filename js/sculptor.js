@@ -9,6 +9,7 @@
 // ---------------------------------------------------------------------------
 
 import { V3, clamp } from './math.js';
+import { RING_STRIDE } from './mesh.js';
 import { BrushEngine, needsTopology, usesDelta } from './brushes.js';
 import { refineRegion } from './dyntopo.js';
 import { dynamesh } from './dynamesh.js';
@@ -54,12 +55,15 @@ function descend(mesh, start, p, maxSteps = 400) {
   let cur = start;
   let ci = cur * 3;
   let cd = (P[ci] - px) ** 2 + (P[ci + 1] - py) ** 2 + (P[ci + 2] - pz) ** 2;
+  const RC = mesh.ringCount, RD = mesh.ringData;
   for (let s = 0; s < maxSteps; s++) {
-    const r = mesh.ring[cur];
-    if (!r || r.length === 0) return cur;
+    const rc = RC[cur];
+    if (rc === 0) return cur;
+    const base = rc <= RING_STRIDE ? cur * RING_STRIDE : -1;
+    const ex = base < 0 ? mesh.ringExt[cur] : null;
     let next = -1, nd = cd;
-    for (let j = 0; j < r.length; j++) {
-      const ti = r[j] * 3;
+    for (let j = 0; j < rc; j++) {
+      const ti = (ex ? ex[j] : RD[base + j]) * 3;
       for (let e = 0; e < 3; e++) {
         const u = T[ti + e];
         if (u === cur) continue;
@@ -236,6 +240,7 @@ export class Sculptor {
     const id = ++this.stamp;
     const vS = this.vStamp, tS = this.tStamp, q = this.queue;
     const P = m.positions, T = m.tris;
+    const RC = m.ringCount, RD = m.ringData;
     const verts = ms.verts, tris = ms.tris;
     verts.length = 0; tris.length = 0;
 
@@ -251,10 +256,12 @@ export class Sculptor {
     while (head < tail) {
       const v = q[head++];
       verts.push(v);
-      const r = m.ring[v];
-      if (!r) continue;
-      for (let j = 0; j < r.length; j++) {
-        const t = r[j];
+      const rc = RC[v];
+      if (rc === 0) continue;
+      const rbase = rc <= RING_STRIDE ? v * RING_STRIDE : -1;
+      const rex = rbase < 0 ? m.ringExt[v] : null;
+      for (let j = 0; j < rc; j++) {
+        const t = rex ? rex[j] : RD[rbase + j];
         if (tS[t] !== id) { tS[t] = id; tris.push(t); }
         const ti = t * 3;
         for (let e = 0; e < 3; e++) {
@@ -308,10 +315,12 @@ export class Sculptor {
       for (let k = 0; k < count; k++) {
         const v = verts[k];
         if (nS[v] !== id1) { nS[v] = id1; set.push(v); }
-        const r = m.ring[v];
-        if (!r) continue;
-        for (let j = 0; j < r.length; j++) {
-          const ti = r[j] * 3;
+        const rc = m.ringCount[v];
+        if (rc === 0) continue;
+        const rb = rc <= RING_STRIDE ? v * RING_STRIDE : -1;
+        const rex = rb < 0 ? m.ringExt[v] : null;
+        for (let j = 0; j < rc; j++) {
+          const ti = (rex ? rex[j] : m.ringData[rb + j]) * 3;
           for (let e = 0; e < 3; e++) {
             const u = T[ti + e];
             if (nS[u] !== id1) { nS[u] = id1; set.push(u); }
@@ -674,11 +683,13 @@ export class Sculptor {
     for (let it = 0; it < iterations; it++) {
       for (let v = 0; v < m.nv; v++) {
         if (!m.isVertAlive(v)) continue;
-        const r = m.ring[v];
+        const rc = m.ringCount[v];
+        const rb = rc <= RING_STRIDE ? v * RING_STRIDE : -1;
+        const rex = rb < 0 ? m.ringExt[v] : null;
         let sx = 0, sy = 0, sz = 0, c = 0;
-        if (r) {
-          for (let j = 0; j < r.length; j++) {
-            const ti = r[j] * 3;
+        {
+          for (let j = 0; j < rc; j++) {
+            const ti = (rex ? rex[j] : m.ringData[rb + j]) * 3;
             for (let e = 0; e < 3; e++) {
               const u = T[ti + e];
               if (u === v) continue;

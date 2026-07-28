@@ -121,7 +121,7 @@ console.log('\n=== ダイナメッシュ ===');
   for (let i = 0; i < 40; i++) stroke(s, 'clay', i, 20);
   console.log(`  （入力 ${m.liveVerts.toLocaleString()} 頂点）`);
   for (const res of QUICK ? [96] : [64, 96, 128, 192]) {
-    const r = dynamesh(m, { resolution: res, smooth: 1, transferColor: true });
+    const r = await dynamesh(m, { resolution: res, smooth: 1, transferColor: true });
     results.push({ name: `dynamesh res${res}`, ms: r.stats.ms });
     console.log(`  ${String(r.stats.ms).padStart(9)} ms   dynamesh res${res} → ${r.stats.verts.toLocaleString()} 頂点`);
   }

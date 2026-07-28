@@ -15,7 +15,13 @@ export const MAX_VERTS_HARD = 2000000;
 
 // dirty 管理のブロックサイズ（2^11 = 2048 要素ごと）
 export const DIRTY_SHIFT = 11;
-export const DIRTY_BLOCK = 1 << DIRTY_SHIFT;   // エッジキーの packing 上限に合わせる
+export const DIRTY_BLOCK = 1 << DIRTY_SHIFT;
+
+// 頂点ごとの隣接三角形は「インライン 8 スロット + はみ出しは JS 配列」で持つ。
+// 頂点ごとに JS 配列を 1 本ずつ持つ形だと、260 万頂点で 260 万個の小さな
+// ヒープオブジェクトになり、ブラシが触れる 4 万頂点ぶんが全部キャッシュミスになる。
+// 平坦な型付き配列にすると 1 回の添字アクセスで済む。valence が 8 を超えるのは稀。
+export const RING_STRIDE = 8;   // エッジキーの packing 上限に合わせる
 
 function growF32(src, used, cap) {
   const a = new Float32Array(cap);
@@ -52,7 +58,10 @@ export class SculptMesh {
     this.vAlive = new Uint8Array(0);
     this.tris = new Int32Array(0);
 
-    this.ring = [];            // ring[v] = 隣接三角形 id の配列
+    this.ringCount = new Int32Array(0);   // 頂点ごとの隣接三角形数（valence）
+    this.ringData = new Int32Array(0);    // インライン格納（v * RING_STRIDE + j）
+    this.ringExt = [];                    // valence > RING_STRIDE の頂点だけ JS 配列
+    this._ringScratch = new Int32Array(256);
     this.freeVerts = [];
     this.freeTris = [];
 
@@ -87,8 +96,15 @@ export class SculptMesh {
     this.mask = growF32(this.mask, this.nv, cap);
     this.curv = growF32(this.curv, this.nv, cap);
     this.vAlive = growU8(this.vAlive, this.nv, cap);
-    // ring はスロットを使い回す（毎回作り直すと小さい配列の大量確保で GC が重くなる）
-    for (let i = this.ring.length; i < cap; i++) this.ring.push(null);
+    {
+      // 他の配列と同じく「使用済み分だけ」写す。setGeometry は capV を 0 に戻すので、
+      // 旧配列のほうが大きいことがある。
+      const used = Math.min(this.nv, cap);
+      const rc = new Int32Array(cap); rc.set(this.ringCount.subarray(0, used)); this.ringCount = rc;
+      const rd = new Int32Array(cap * RING_STRIDE);
+      rd.set(this.ringData.subarray(0, used * RING_STRIDE)); this.ringData = rd;
+      for (let i = this.ringExt.length; i < cap; i++) this.ringExt.push(null);
+    }
     {
       const nb = (cap >> DIRTY_SHIFT) + 1;
       if (this.vBlocks.length < nb) { const a = new Uint8Array(nb); a.set(this.vBlocks); this.vBlocks = a; }
@@ -159,7 +175,7 @@ export class SculptMesh {
     this.mask[v] = m;
     this.curv[v] = 0;
     this.vAlive[v] = 1;
-    { const r = this.ring[v]; if (r) r.length = 0; else this.ring[v] = []; }
+    this.ringCount[v] = 0; this.ringExt[v] = null;
     this.liveVerts++;
     this.markVert(v);
     if (this.trackVerts) this.trackVerts.push(v);
@@ -193,7 +209,7 @@ export class SculptMesh {
   removeVertex(v) {
     if (!this.vAlive[v]) return;
     this.vAlive[v] = 0;
-    { const r = this.ring[v]; if (r) r.length = 0; else this.ring[v] = []; }
+    this.ringCount[v] = 0; this.ringExt[v] = null;
     this.freeVerts.push(v);
     this.liveVerts--;
     this.topoVersion++;
@@ -204,14 +220,81 @@ export class SculptMesh {
   // --- 三角形 -------------------------------------------------------------
 
   _link(v, t) {
-    const r = this.ring[v];
-    if (r) r.push(t);
+    const c = this.ringCount[v];
+    if (c < RING_STRIDE) {
+      this.ringData[v * RING_STRIDE + c] = t;
+    } else if (c === RING_STRIDE) {
+      // インラインから溢れた: 全件を JS 配列へ移す
+      const ex = new Array(RING_STRIDE + 1);
+      const b = v * RING_STRIDE;
+      for (let j = 0; j < RING_STRIDE; j++) ex[j] = this.ringData[b + j];
+      ex[RING_STRIDE] = t;
+      this.ringExt[v] = ex;
+    } else {
+      this.ringExt[v].push(t);
+    }
+    this.ringCount[v] = c + 1;
   }
+
   _unlink(v, t) {
-    const r = this.ring[v];
-    if (!r) return;
-    const k = r.indexOf(t);
-    if (k >= 0) { r[k] = r[r.length - 1]; r.pop(); }
+    const c = this.ringCount[v];
+    if (c === 0) return;
+    if (c <= RING_STRIDE) {
+      const b = v * RING_STRIDE;
+      for (let j = 0; j < c; j++) {
+        if (this.ringData[b + j] === t) {
+          this.ringData[b + j] = this.ringData[b + c - 1];
+          this.ringCount[v] = c - 1;
+          return;
+        }
+      }
+      return;
+    }
+    const ex = this.ringExt[v];
+    const k = ex.indexOf(t);
+    if (k < 0) return;
+    ex[k] = ex[ex.length - 1]; ex.pop();
+    this.ringCount[v] = c - 1;
+    if (c - 1 <= RING_STRIDE) {            // インラインへ戻す
+      const b = v * RING_STRIDE;
+      for (let j = 0; j < c - 1; j++) this.ringData[b + j] = ex[j];
+      this.ringExt[v] = null;
+    }
+  }
+
+  /**
+   * 頂点 v の隣接三角形を走査するための (配列, 開始位置, 個数) を返す。
+   * 通常はインライン領域をそのまま指すのでコピーは起きない。
+   * はみ出している稀な頂点だけスクラッチへ写す。
+   */
+  ringView(v) {
+    const c = this.ringCount[v];
+    if (c <= RING_STRIDE) return { arr: this.ringData, off: v * RING_STRIDE, n: c };
+    const ex = this.ringExt[v];
+    let sc = this._ringScratch;
+    if (sc.length < c) { sc = this._ringScratch = new Int32Array(Math.ceil(c * 1.5)); }
+    for (let j = 0; j < c; j++) sc[j] = ex[j];
+    return { arr: sc, off: 0, n: c };
+  }
+
+  /** 走査用の開始位置だけ返す軽量版（呼び出し側で ringCount と合わせて使う） */
+  ringBase(v) {
+    const c = this.ringCount[v];
+    if (c <= RING_STRIDE) return v * RING_STRIDE;
+    const ex = this.ringExt[v];
+    let sc = this._ringScratch;
+    if (sc.length < c) { sc = this._ringScratch = new Int32Array(Math.ceil(c * 1.5)); }
+    for (let j = 0; j < c; j++) sc[j] = ex[j];
+    return -1;                              // -1 = スクラッチを見る合図
+  }
+
+  /** 冷たい経路向け: 隣接三角形を JS 配列で返す */
+  ringArray(v) {
+    const c = this.ringCount[v];
+    if (c > RING_STRIDE) return this.ringExt[v].slice();
+    const b = v * RING_STRIDE, out = new Array(c);
+    for (let j = 0; j < c; j++) out[j] = this.ringData[b + j];
+    return out;
   }
 
   addTriangle(a, b, c) {
@@ -265,12 +348,15 @@ export class SculptMesh {
   /** 辺 (a,b) を共有する三角形を out に詰める（向きは無視） */
   trianglesWithEdge(a, b, out) {
     out.length = 0;
-    const r = this.ring[a];
-    if (!r) return out;
-    const T = this.tris;
-    for (let k = 0; k < r.length; k++) {
-      const i = r[k] * 3;
-      if (T[i] === b || T[i + 1] === b || T[i + 2] === b) out.push(r[k]);
+    const c = this.ringCount[a];
+    if (c === 0) return out;
+    const RD = this.ringData, T = this.tris;
+    const base = c <= RING_STRIDE ? a * RING_STRIDE : -1;
+    const ex = base < 0 ? this.ringExt[a] : null;
+    for (let k = 0; k < c; k++) {
+      const t = ex ? ex[k] : RD[base + k];
+      const i = t * 3;
+      if (T[i] === b || T[i + 1] === b || T[i + 2] === b) out.push(t);
     }
     return out;
   }
@@ -278,11 +364,13 @@ export class SculptMesh {
   /** 頂点 v の 1-ring 頂点を out(Set 互換 push) に集める */
   oneRing(v, out) {
     out.length = 0;
-    const r = this.ring[v];
-    if (!r) return out;
-    const T = this.tris;
-    for (let k = 0; k < r.length; k++) {
-      const i = r[k] * 3;
+    const c = this.ringCount[v];
+    if (c === 0) return out;
+    const RD = this.ringData, T = this.tris;
+    const base = c <= RING_STRIDE ? v * RING_STRIDE : -1;
+    const ex = base < 0 ? this.ringExt[v] : null;
+    for (let k = 0; k < c; k++) {
+      const i = (ex ? ex[k] : RD[base + k]) * 3;
       for (let j = 0; j < 3; j++) {
         const w = T[i + j];
         if (w !== v && out.indexOf(w) < 0) out.push(w);
@@ -291,22 +379,21 @@ export class SculptMesh {
     return out;
   }
 
-  valence(v) {
-    const r = this.ring[v];
-    return r ? r.length : 0;
-  }
+  valence(v) { return this.ringCount[v]; }
 
   // --- 法線 ---------------------------------------------------------------
 
   computeNormalsFor(list, count = list.length) {
-    const P = this.positions, N = this.normals, T = this.tris;
+    const P = this.positions, N = this.normals, T = this.tris, RD = this.ringData;
     for (let k = 0; k < count; k++) {
       const v = list[k];
-      const r = this.ring[v];
-      if (!r || r.length === 0) continue;
+      const c = this.ringCount[v];
+      if (c === 0) continue;
+      const base = c <= RING_STRIDE ? v * RING_STRIDE : -1;
+      const ex = base < 0 ? this.ringExt[v] : null;
       let nx = 0, ny = 0, nz = 0;
-      for (let j = 0; j < r.length; j++) {
-        const i = r[j] * 3;
+      for (let j = 0; j < c; j++) {
+        const i = (ex ? ex[j] : RD[base + j]) * 3;
         const a = T[i] * 3, b = T[i + 1] * 3, c = T[i + 2] * 3;
         const e1x = P[b] - P[a], e1y = P[b + 1] - P[a + 1], e1z = P[b + 2] - P[a + 2];
         const e2x = P[c] - P[a], e2y = P[c + 1] - P[a + 1], e2z = P[c + 2] - P[a + 2];
@@ -329,16 +416,18 @@ export class SculptMesh {
   // 辺長は二乗和の平方根（RMS）で代用する。平均長との差は正則なメッシュでは小さく、
   // 陰影用の量なので実用上問題ない。内側ループから sqrt を丸ごと外せる。
   computeCurvatureFor(list, count = list.length) {
-    const P = this.positions, N = this.normals, T = this.tris, CV = this.curv;
+    const P = this.positions, N = this.normals, T = this.tris, CV = this.curv, RD = this.ringData;
     for (let k = 0; k < count; k++) {
       const v = list[k];
-      const r = this.ring[v];
-      if (!r || r.length === 0) { CV[v] = 0; continue; }
+      const c = this.ringCount[v];
+      if (c === 0) { CV[v] = 0; continue; }
+      const base = c <= RING_STRIDE ? v * RING_STRIDE : -1;
+      const ex = base < 0 ? this.ringExt[v] : null;
       const iv = v * 3;
       const px = P[iv], py = P[iv + 1], pz = P[iv + 2];
       let sx = 0, sy = 0, sz = 0, e2 = 0, cnt = 0;
-      for (let j = 0; j < r.length; j++) {
-        const ti = r[j] * 3;
+      for (let j = 0; j < c; j++) {
+        const ti = (ex ? ex[j] : RD[base + j]) * 3;
         for (let e = 0; e < 3; e++) {
           const u = T[ti + e];
           if (u === v) continue;
@@ -359,16 +448,18 @@ export class SculptMesh {
 
   /** 曲率は 2 次量でノイズが乗りやすいので 1-ring 平均で軽く均す */
   smoothCurvatureFor(list, count = list.length, amount = 0.55) {
-    const T = this.tris, CV = this.curv;
+    const T = this.tris, CV = this.curv, RD = this.ringData;
     const tmp = this._curvTmp && this._curvTmp.length >= count
       ? this._curvTmp : (this._curvTmp = new Float32Array(Math.max(1024, count * 2)));
     for (let k = 0; k < count; k++) {
       const v = list[k];
-      const r = this.ring[v];
-      if (!r || r.length === 0) { tmp[k] = CV[v]; continue; }
+      const c = this.ringCount[v];
+      if (c === 0) { tmp[k] = CV[v]; continue; }
+      const base = c <= RING_STRIDE ? v * RING_STRIDE : -1;
+      const ex = base < 0 ? this.ringExt[v] : null;
       let s = 0, cnt = 0;
-      for (let j = 0; j < r.length; j++) {
-        const ti = r[j] * 3;
+      for (let j = 0; j < c; j++) {
+        const ti = (ex ? ex[j] : RD[base + j]) * 3;
         for (let e = 0; e < 3; e++) {
           const u = T[ti + e];
           if (u === v) continue;
@@ -471,17 +562,14 @@ export class SculptMesh {
   }
 
   rebuildRings() {
-    const nv = this.nv, ring = this.ring, T = this.tris;
-    // 既存の配列を length=0 で再利用する（作り直すと nv 個ぶんの確保が発生する）
-    for (let v = 0; v < nv; v++) {
-      const r = ring[v];
-      if (r) r.length = 0; else ring[v] = [];
-    }
+    const nv = this.nv, T = this.tris;
+    this.ringCount.fill(0, 0, nv);
+    for (let v = 0; v < nv; v++) this.ringExt[v] = null;
     for (let t = 0; t < this.nt; t++) {
       const i = t * 3;
       const a = T[i], b = T[i + 1], c = T[i + 2];
       if (a === b && b === c) continue;
-      ring[a].push(t); ring[b].push(t); ring[c].push(t);
+      this._link(a, t); this._link(b, t); this._link(c, t);
     }
   }
 
@@ -662,7 +750,6 @@ export class SculptMesh {
     this.liveVerts = s.liveVerts; this.liveTris = s.liveTris;
     this.freeVerts = s.freeVerts.slice();
     this.freeTris = s.freeTris.slice();
-    this.ring.length = Math.max(this.ring.length, this.capV);
     this.rebuildRings();
     this.computeAllNormals();
     this.computeAllCurvature();

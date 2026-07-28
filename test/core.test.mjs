@@ -41,7 +41,7 @@ function validate(mesh, { closed = true, label = '', genus = 0, reportChiOnly = 
 
   // 2. ring 整合性
   for (let v = 0; v < mesh.nv; v++) {
-    const r = mesh.ring[v];
+    const r = mesh.ringArray(v);
     if (!mesh.vAlive[v]) { if (r && r.length) errs.push(`dead vert ${v} has ring`); continue; }
     if (!r) { errs.push(`alive vert ${v} has null ring`); continue; }
     const seen = new Set();
@@ -58,7 +58,7 @@ function validate(mesh, { closed = true, label = '', genus = 0, reportChiOnly = 
     const i = t * 3, a = T[i], b = T[i + 1], c = T[i + 2];
     if (a === b && b === c) continue;
     for (const v of [a, b, c]) {
-      const r = mesh.ring[v];
+      const r = mesh.ringArray(v);
       if (!r || r.indexOf(t) < 0) errs.push(`tri ${t} not in ring of ${v}`);
     }
   }
@@ -453,7 +453,7 @@ async function checkDyna(src, opts, label, expect = {}) {
     let count = 0;
     while (stack.length) {
       const v = stack.pop(); count++;
-      for (const t of m.ring[v]) {
+      for (const t of m.ringArray(v)) {
         for (let e = 0; e < 3; e++) {
           const u = m.tris[t * 3 + e];
           if (!seen[u]) { seen[u] = 1; stack.push(u); }

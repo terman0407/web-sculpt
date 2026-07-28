@@ -4,6 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import { V3, clamp } from './math.js';
+import { RING_STRIDE } from './mesh.js';
 
 export const BRUSHES = [
   { id: 'clay', name: 'Clay Buildup', jp: 'クレイ', short: 'クレイ', icon: '◤', hint: '平均平面まで粘土を盛る。基本のブラシ' },
@@ -223,13 +224,16 @@ export class BrushEngine {
         // ヤコビ法：全頂点の 1-ring 平均を先に求めてから一括で移動
         const tmp = this.tmp;
         const T = mesh.tris;
+        const RC = mesh.ringCount, RD = mesh.ringData;
         for (let k = 0; k < n; k++) {
           const v = verts[k];
-          const r = mesh.ring[v];
+          const rc = RC[v];
+          const rb = rc <= RING_STRIDE ? v * RING_STRIDE : -1;
+          const rex = rb < 0 ? mesh.ringExt[v] : null;
           let sx = 0, sy = 0, sz = 0, cnt = 0;
-          if (r) {
-            for (let j = 0; j < r.length; j++) {
-              const ti = r[j] * 3;
+          {
+            for (let j = 0; j < rc; j++) {
+              const ti = (rex ? rex[j] : RD[rb + j]) * 3;
               for (let e = 0; e < 3; e++) {
                 const u = T[ti + e];
                 if (u === v) continue;
@@ -256,13 +260,16 @@ export class BrushEngine {
         // 接線方向のみのラプラシアン。形（体積）を保ったまま三角形の分布を整える
         const tmp = this.tmp;
         const T = mesh.tris;
+        const RC = mesh.ringCount, RD = mesh.ringData;
         for (let k = 0; k < n; k++) {
           const v = verts[k];
-          const r = mesh.ring[v];
+          const rc = RC[v];
+          const rb = rc <= RING_STRIDE ? v * RING_STRIDE : -1;
+          const rex = rb < 0 ? mesh.ringExt[v] : null;
           let sx = 0, sy = 0, sz = 0, cnt = 0;
-          if (r) {
-            for (let j = 0; j < r.length; j++) {
-              const ti = r[j] * 3;
+          {
+            for (let j = 0; j < rc; j++) {
+              const ti = (rex ? rex[j] : RD[rb + j]) * 3;
               for (let e = 0; e < 3; e++) {
                 const u = T[ti + e];
                 if (u === v) continue;
