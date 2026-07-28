@@ -15,9 +15,11 @@ import { DEFORMS, DEFORM_BY_ID, defaultOpts as deformDefaults, applyDeform } fro
 import { MASK_OPS, MASK_OP_BY_ID, applyMaskOp } from './masktools.js';
 import { SculptLayers } from './layers.js';
 import { PolyGroups, GROUP_METHODS } from './polygroups.js';
-import { MorphTarget } from './morph.js';
+import { MorphTarget, computeMorphWeights } from './morph.js';
 import { Transpose } from './transpose.js';
 import { clipPlane, trimPlane, slicePlane, mirrorWeld, planeFromScreenLine, planeFromAxis } from './clip.js';
+import { STROKES, strokeDefaults } from './alpha.js';
+import { clamp } from './math.js';
 
 /** 変形とマスク操作の既定パラメータ一式（state に置く） */
 export function defaultToolState() {
@@ -29,7 +31,10 @@ export function defaultToolState() {
     for (const q of (op.params || [])) p[q.key] = q.def;
     mask.params[op.id] = p;
   }
-  return { deform, mask };
+  // ストロークタイプごとのパラメータ
+  const strokeParams = {};
+  for (const st of STROKES) strokeParams[st.id] = strokeDefaults(st.id);
+  return { deform, mask, strokeParams };
 }
 
 export class Tools {
@@ -48,6 +53,7 @@ export class Tools {
     this._visVersion = -1;
     // グループ色プレビュー用に退避した本来の頂点カラー
     this._savedColors = null;
+    this._morphWarned = false;
   }
 
   get state() { return this.ctx.state; }
@@ -63,12 +69,37 @@ export class Tools {
   // --- 彫刻をレイヤーへ記録する仕掛け --------------------------------------
 
   /**
+   * モーフブラシの実処理を sculptor へ差す。
+   * ブラシ領域の頂点だけを、減衰重み × 強さで記憶形状へ戻す。
+   */
+  installMorphHook() {
+    const s = this.sculptor;
+    if (!s || s.morphHook) return;
+    s.morphHook = (mesh, verts, count, center, radius, st) => {
+      if (!this.morph.has) {
+        // 記憶が無いと何も起きず理由も分からないので 1 回だけ知らせる
+        if (!this._morphWarned) {
+          this._morphWarned = true;
+          this.toast('モーフブラシを使うには先に「モーフターゲット > 記憶」を押します', 4500);
+        }
+        return;
+      }
+      if (!this.morph.validate(mesh)) { this.morphInvalid(); return; }
+      const w = computeMorphWeights(mesh, verts, count, center, radius, st.focalShift || 0);
+      const amount = clamp(st.effStrength !== undefined ? st.effStrength : st.strength, 0, 1);
+      this.morph.morphBrush(mesh, verts, count, w, amount);
+    };
+  }
+
+  /**
    * sculptor の recorder フックを、いまのレイヤー状態に合わせて張り替える。
    * 記録対象のレイヤーが無いときは null にして、ブラシ経路のオーバーヘッドを消す。
+   * ついでにモーフブラシのフックも差す（どちらも sculptor へ挿す穴なので一緒に見る）。
    */
   syncRecorder() {
     const s = this.sculptor;
     if (!s) return;
+    this.installMorphHook();
     if (this.layers.recording < 0) { s.recorder = null; return; }
     if (!s.recorder) {
       s.recorder = {
@@ -326,6 +357,7 @@ export class Tools {
   // --- モーフターゲット ----------------------------------------------------
 
   morphStore() {
+    this._morphWarned = false;
     const r = this.morph.store(this.mesh);
     if (this.ui) this.ui.refreshMorph();
     this.toast(`モーフターゲットを記憶しました（${r.verts.toLocaleString()} 頂点 / ${(r.bytes / 1048576).toFixed(1)} MB）`);

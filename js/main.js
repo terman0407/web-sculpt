@@ -29,6 +29,10 @@ const state = {
   strength: 0.5,
   focalShift: 0,             // -1..1（ZBrush の Focal Shift 相当）
   dabSpacing: 0.06,         // ダブ間隔（ブラシ半径に対する割合。小さいほど滑らか）
+  alpha: '',                // ブラシアルファ（空文字で無効。ZBrush の Alpha パレット相当）
+  alphaAlign: true,         // アルファをストローク方向に合わせる
+  stroke: 'dots',           // ストロークタイプ（ZBrush の Stroke パレット相当）
+  strokeParams: null,       // ストロークごとのパラメータ（defaultToolState が埋める）
   lazyRadius: 10,            // レイジーマウスの追従半径（画面px、0 で無効）
   usePressure: true,
   pressureSize: 0.45,        // 筆圧が半径に効く割合
@@ -951,6 +955,7 @@ async function boot() {
     autosave: scheduleAutosave,
   });
   app.tools = tools;
+  tools.syncRecorder();   // モーフブラシのフックもここで差される
   ui = buildUI(app);
   renderer.setRenderScale(state.renderScale);
   frameCamera();

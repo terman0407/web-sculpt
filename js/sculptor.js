@@ -14,6 +14,7 @@ import { BrushEngine, needsTopology, usesDelta } from './brushes.js';
 import { refineRegion } from './dyntopo.js';
 import { dynamesh } from './dynamesh.js';
 import { SubdivLevels } from './subdiv.js';
+import { STROKE_BY_ID, strokeDefaults, DEFAULT_STROKE } from './alpha.js';
 
 // シンメトリの写像。ZBrush の Symmetry パネル相当で 3 種類を合成する:
 //   * 平面ミラー   … 軸平面での反転（符号反転）
@@ -76,6 +77,22 @@ export function mirrorPoint(mir, p, out) {
 export function mirrorVector(mir, v, out) {
   const s = mir.s;
   return rotAxis(mir.axis, mir.ang, v[0] * s[0], v[1] * s[1], v[2] * s[2], out);
+}
+
+/**
+ * 決定論的な 0..1 の擬似乱数。ストロークのスプレーに使う。
+ *
+ * Math.random を使うと同じストロークを再生しても結果が変わり、
+ * Undo → やり直しで形が変わってしまう。ダブ番号とストロークの種から
+ * 決まるハッシュにしておけば、いつ何度実行しても同じ模様になる。
+ * （alpha.js の spray と同じ方針。あちらは planDabs の中で自前に持っている）
+ */
+function hash01(n, seed) {
+  let h = (n | 0) ^ Math.imul(seed | 0, 0x9e3779b9);
+  h = Math.imul(h ^ (h >>> 16), 0x85ebca6b);
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  h ^= h >>> 16;
+  return (h >>> 8) / 16777216;
 }
 
 /** 全頂点走査で p に最も近い生存頂点を返す */
@@ -239,6 +256,18 @@ export class Sculptor {
     // sculptor が layers.js を直接 import すると依存が逆流するので、
     // 外から差してもらう形にしてある。
     this.recorder = null;
+    this.morphHook = null;   // モーフブラシの実処理（tools が差す）
+
+    // ブラシアルファ用のダブ接平面。ダブごとに作り直して brushes へ渡す。
+    this._tanU = V3.create();
+    this._tanV = V3.create();
+    this._alphaRot = 0;
+    this._dabSeq = 0;          // ストローク内のダブ番号（スプレーの乱数の種）
+    this.strokeSeed = 0;
+    this._spray = V3.create();
+    this._sizeMul = 1;
+    this._strokeId = DEFAULT_STROKE;
+    this._strokeParams = strokeDefaults(DEFAULT_STROKE);
 
     this.history.reset(mesh);
   }
@@ -542,6 +571,17 @@ export class Sculptor {
     this.strokeDir = dir;
     this.topoChanged = false;
     this.dabCount = 0;
+    this._dabSeq = 0;
+    // ストロークごとの乱数の種。決定論にしたいので時計は使わず、
+    // ストローク番号と開始位置から作る（同じ操作なら同じ模様になる）。
+    this.strokeSeed = (this.engine.strokeId * 2654435761
+      + Math.round(point[0] * 8191) * 40503
+      + Math.round(point[1] * 8191) * 7919
+      + Math.round(point[2] * 8191) * 104729) | 0;
+    const sid = this.state.stroke || DEFAULT_STROKE;
+    this._strokeId = STROKE_BY_ID.has(sid) ? sid : DEFAULT_STROKE;
+    this._strokeParams = Object.assign(strokeDefaults(this._strokeId),
+      (this.state.strokeParams && this.state.strokeParams[this._strokeId]) || {});
     this.engine.beginStroke();
     this.activeMirrors = this.buildActiveMirrors();
     // ラジアルシンメトリでミラー数が増えるので、足りなければ足す
@@ -656,22 +696,131 @@ export class Sculptor {
 
   _dabAll(point, delta, first, scale = 1) {
     const mirrors = this.activeMirrors;
+    // スプレー系のストロークは、ダブごとに位置を接平面上でばらつかせ、
+    // 半径にもゆらぎを入れる。ミラーより手前で 1 回だけ計算して、
+    // ミラー先にも同じ散らしが写るようにする（左右対称を保つため）。
+    const sp = this._strokeParams;
+    let sPoint = point, sScale = scale;
+    this._sizeMul = 1;
+    if (sp && (sp.scatter > 0 || sp.sizeJitter > 0)) {
+      this._updateDabFrame(this.mirrors[0], delta);
+      const r = this.state.worldRadius;
+      const seq = this._dabSeq;
+      if (sp.scatter > 0) {
+        const a = hash01(seq * 4 + 1, this.strokeSeed) * Math.PI * 2;
+        const rr = Math.sqrt(hash01(seq * 4 + 2, this.strokeSeed)) * sp.scatter * r;
+        const U = this._tanU, V = this._tanV;
+        const ox = Math.cos(a) * rr, oy = Math.sin(a) * rr;
+        V3.set(this._spray,
+          point[0] + U[0] * ox + V[0] * oy,
+          point[1] + U[1] * ox + V[1] * oy,
+          point[2] + U[2] * ox + V[2] * oy);
+        sPoint = this._spray;
+      }
+      if (sp.sizeJitter > 0) {
+        // 0.35〜1.0 の範囲で縮める。大きくする方向へ振ると領域が広がって重くなる
+        this._sizeMul = 1 - hash01(seq * 4 + 3, this.strokeSeed) * sp.sizeJitter * 0.65;
+      }
+    }
     for (let i = 0; i < mirrors.length; i++) {
       const ms = this.mirrors[i];
-      mirrorPoint(mirrors[i], point, this._mp);
+      mirrorPoint(mirrors[i], sPoint, this._mp);
       mirrorVector(mirrors[i], delta, this._pt);
-      this._dab(ms, this._mp, this._pt, first, scale);
+      this._dab(ms, this._mp, this._pt, first, sScale);
       V3.copy(ms.lastPoint, this._mp);
     }
     this.dabCount++;
+    this._dabSeq++;
+  }
+
+  /**
+   * ダブの接平面の基底を作る。ブラシアルファはこの (U, V) 上でサンプルされる。
+   *
+   * 法線はシード頂点のものを使う（ブラシの平均法線は apply の中で初めて求まるので、
+   * 掛ける前には使えない）。U はストローク方向に合わせる（ZBrush の Align to Stroke）か、
+   * 合わせない設定なら法線から決まる安定した軸にする。
+   */
+  _updateDabFrame(ms, delta) {
+    const st = this.state;
+    const m = this.mesh;
+    const U = this._tanU, V = this._tanV;
+    const seed = ms.seed;
+    let nx = 0, ny = 1, nz = 0;
+    if (seed >= 0 && seed < m.nv) {
+      const i = seed * 3;
+      nx = m.normals[i]; ny = m.normals[i + 1]; nz = m.normals[i + 2];
+      const l = Math.hypot(nx, ny, nz);
+      if (l > 1e-12) { nx /= l; ny /= l; nz /= l; } else { nx = 0; ny = 1; nz = 0; }
+    }
+    // U の元になる方向
+    let ux = 0, uy = 0, uz = 0;
+    const align = st.alphaAlign !== false;
+    if (align && delta && (delta[0] || delta[1] || delta[2])) {
+      ux = delta[0]; uy = delta[1]; uz = delta[2];
+    } else {
+      // 法線と平行にならない軸を選ぶ（|n| の一番小さい成分の軸）
+      const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
+      if (ax <= ay && ax <= az) { ux = 1; }
+      else if (ay <= az) { uy = 1; }
+      else { uz = 1; }
+    }
+    // 法線成分を抜いて接平面へ落とす
+    const d = ux * nx + uy * ny + uz * nz;
+    ux -= nx * d; uy -= ny * d; uz -= nz * d;
+    let l = Math.hypot(ux, uy, uz);
+    if (l < 1e-12) {
+      // 退化したら別の軸でやり直す
+      ux = ny; uy = nz; uz = nx;
+      const d2 = ux * nx + uy * ny + uz * nz;
+      ux -= nx * d2; uy -= ny * d2; uz -= nz * d2;
+      l = Math.hypot(ux, uy, uz) || 1;
+    }
+    U[0] = ux / l; U[1] = uy / l; U[2] = uz / l;
+    // V = n × U（右手系）
+    V[0] = ny * U[2] - nz * U[1];
+    V[1] = nz * U[0] - nx * U[2];
+    V[2] = nx * U[1] - ny * U[0];
+
+    // 回転。spin が有効なストロークではダブごとに擬似ランダムに回す。
+    // Math.random は使わない（同じストロークが同じ結果になるようにする）。
+    const sp = this._strokeParams;
+    if (sp && sp.spin) {
+      const h = hash01(this._dabSeq * 2 + 1, this.strokeSeed);
+      this._alphaRot = h * Math.PI * 2;
+    } else {
+      this._alphaRot = 0;
+    }
+  }
+
+  /**
+   * ペイント色。colorSpray では明度と色相をダブごとに少し散らす。
+   * ZBrush の ColorSpray 相当で、鱗や岩肌を塗るときに単調にならない。
+   */
+  _dabColor() {
+    const st = this.state;
+    const sp = this._strokeParams;
+    const j = sp && sp.colorJitter ? sp.colorJitter : 0;
+    if (j <= 0) return st.paintColor;
+    const c = st.paintColor;
+    const out = this._jitterColor || (this._jitterColor = [0, 0, 0]);
+    const seq = this._dabSeq;
+    for (let k = 0; k < 3; k++) {
+      const h = hash01(seq * 8 + 5 + k, this.strokeSeed) * 2 - 1;
+      out[k] = clamp(c[k] * (1 + h * j), 0, 1);
+    }
+    return out;
   }
 
   _dab(ms, point, delta, first, scale) {
     const m = this.mesh;
     const st = this.state;
     const brush = this.strokeBrush;
-    const radius = st.worldRadius;
+    // スプレー系はダブごとに半径が揺れる（_dabAll が決めた倍率を掛ける）
+    const radius = st.worldRadius * (this._sizeMul || 1);
     if (radius <= 0) return;
+    // アルファを使うなら接平面の基底を作る。使わないなら計算しない
+    const alphaId = st.alpha || null;
+    if (alphaId) this._updateDabFrame(ms, delta);
 
     // --- シード追従 -----------------------------------------------------
     let seed = descend(m, ms.seed, point);
@@ -705,6 +854,7 @@ export class Sculptor {
         strength: (st.effStrength !== undefined ? st.effStrength : st.strength) * scale, dir: this.strokeDir,
         delta, color: st.paintColor, ignoreMask: false,
         focal: st.focalShift, toCamera: st.toCamera, backface: st.backfaceMask,
+        alpha: alphaId, tangent: this._tanU, bitangent: this._tanV, alphaRotation: this._alphaRot,
       });
       if (rec) rec.after(m, ms.lockedVerts, ms.lockedCount);
       this._updateNormals(ms.lockedVerts, ms.lockedCount);
@@ -748,14 +898,25 @@ export class Sculptor {
 
     const rec = this.recorder;
     if (rec) rec.before(m, ms.verts, ms.count);
+    // モーフブラシは「記憶した形へ戻す」だけで、通常のブラシとは処理が違う。
+    // morph.js を sculptor から直接 import すると依存が逆流するので、
+    // recorder と同じく外から差してもらうフックにしてある。
+    if (brush === 'morph') {
+      const hook = this.morphHook;
+      if (hook) hook(m, ms.verts, ms.count, point, radius, st);
+      if (rec) rec.after(m, ms.verts, ms.count);
+      this._updateNormals(ms.verts, ms.count, ms.tris, ms.triCount);
+      return;
+    }
     this.engine.apply(m, {
       type: brush,
       verts: ms.verts, count: ms.count,
       center: point, radius,
       strength: (st.effStrength !== undefined ? st.effStrength : st.strength) * scale, dir: this.strokeDir,
-      delta, color: st.paintColor,
+      delta, color: this._dabColor(),
       ignoreMask: brush === 'mask',
       focal: st.focalShift, toCamera: st.toCamera, backface: st.backfaceMask,
+      alpha: alphaId, tangent: this._tanU, bitangent: this._tanV, alphaRotation: this._alphaRot,
     });
 
     if (rec) rec.after(m, ms.verts, ms.count);

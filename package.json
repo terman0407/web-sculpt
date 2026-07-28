@@ -17,7 +17,10 @@
     "bench:gpu": "node test/bench-gpu.mjs",
     "bench:wasm": "node test/bench-wasm.mjs",
     "bench:dynamesh": "node --max-old-space-size=8192 test/bench-dynamesh.mjs",
-    "build:wasm:as": "asc assembly/dynafield.ts --outFile wasm/dynafield.wasm --optimize --optimizeLevel 3 --runtime minimal --exportRuntime --noAssert"
+    "build:wasm:as": "asc assembly/dynafield.ts --outFile wasm/dynafield.wasm --optimize --optimizeLevel 3 --runtime minimal --exportRuntime --noAssert",
+    "test:features": "node test/features.mjs && node test/alpha-stroke.mjs && node test/morph-brush.mjs",
+    "test:modules": "node test/deform.test.mjs && node test/masktools.test.mjs && node test/layers.test.mjs && node test/polygroups.test.mjs && node test/transpose.test.mjs && node test/clip.test.mjs && node test/alpha.test.mjs && node test/morph.test.mjs",
+    "test:all": "npm run test && npm run test:modules && npm run test:gpu && npm run test:e2e && npm run test:features"
   },
   "engines": {
     "node": ">=22"

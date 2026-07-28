@@ -8,6 +8,7 @@ import { clamp } from './math.js';
 import { DEFORMS } from './deform.js';
 import { MASK_OPS } from './masktools.js';
 import { GROUP_METHODS } from './polygroups.js';
+import { ALPHAS, ALPHA_SIZE, alphaData, STROKES } from './alpha.js';
 
 const el = (tag, cls, parent) => {
   const n = document.createElement(tag);
@@ -177,6 +178,31 @@ function iconRow(parent, items) {
   return { el: row, buttons: made, enable(id, on) { const b = made.get(id); if (b) b.disabled = !on; } };
 }
 
+/**
+ * アルファのサムネイル。alphaData は 0..1 の Float32Array なので
+ * そのままグレースケールとして描く（matcap.js の materialThumb と同じ方式）。
+ */
+function alphaThumb(id, size = 40) {
+  const cv = document.createElement('canvas');
+  cv.width = size; cv.height = size;
+  const ctx = cv.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  const data = alphaData(id);
+  const N = ALPHA_SIZE;
+  for (let y = 0; y < size; y++) {
+    const sy = Math.min(N - 1, Math.floor((y + 0.5) / size * N));
+    for (let x = 0; x < size; x++) {
+      const sx = Math.min(N - 1, Math.floor((x + 0.5) / size * N));
+      const a = clamp(data[sy * N + sx], 0, 1);
+      const g = Math.round(Math.pow(a, 1 / 2.2) * 255);
+      const q = (y * size + x) * 4;
+      img.data[q] = g; img.data[q + 1] = g; img.data[q + 2] = g; img.data[q + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return cv;
+}
+
 /** X / Y / Z の軸選択 */
 function axisPicker(parent, value, onChange) {
   return segmented(parent, [
@@ -207,6 +233,8 @@ export function buildUI(app) {
   let groupList = null, groupAngleSlider = null, groupViewToggle = null;
   let morphAmount = null, morphFactor = null, morphInfo = null;
   let clipModeSeg = null, transposeToggle = null;
+  let alphaGrid = null, strokeSeg = null, strokeParamBox = null;
+  let syncStrokeParams = () => {};
 
   /** 選択中のレイヤーに対して何かする。無ければ促す */
   const withLayer = (fn) => {
@@ -535,6 +563,83 @@ export function buildUI(app) {
     { label: '反転', onClick: () => app.invertMask() },
   ]);
   el('p', 'note', mk).textContent = 'Ctrl+ドラッグでマスクを塗る / Ctrl+Alt+ドラッグで消す。マスク部分は彫刻されません。';
+
+  // --- アルファ / ストローク ---------------------------------------------
+  // ZBrush の Alpha パレットと Stroke パレット相当。
+  const al = section(right, 'アルファ / ストローク', true);
+  {
+    el('div', 'subhead', al).textContent = 'ブラシアルファ（断面形状）';
+    const grid = el('div', 'alphagrid', al);
+    const alphaBtns = new Map();
+    const mkAlpha = (id, label, title) => {
+      const b = el('button', 'alpha' + (state.alpha === id ? ' on' : ''), grid);
+      b.title = title;
+      if (id === '') {
+        // 「なし」は文字で示す（サムネイルを作る意味がない）
+        b.textContent = '—';
+        b.style.color = 'var(--text-dim)';
+        b.style.fontSize = '15px';
+      } else {
+        b.appendChild(alphaThumb(id, 40));
+      }
+      b.onclick = () => {
+        state.alpha = id;
+        alphaBtns.forEach((x, k) => x.classList.toggle('on', k === id));
+      };
+      alphaBtns.set(id, b);
+    };
+    mkAlpha('', 'なし', 'アルファを使わない（通常の丸い当たり）');
+    for (const a of ALPHAS) mkAlpha(a.id, a.jp, `${a.jp} — ${a.hint}`);
+    alphaGrid = { btns: alphaBtns };
+    toggle(al, {
+      label: 'ストローク方向に合わせる', value: state.alphaAlign,
+      title: 'アルファの向きをドラッグ方向に合わせる（ZBrush の Align to Stroke）',
+      onChange: (on) => { state.alphaAlign = on; },
+    });
+
+    el('div', 'subhead', al).textContent = 'ストロークタイプ';
+    strokeSeg = segmented(al, STROKES.map((s) => ({
+      label: s.jp, value: s.id, title: s.hint,
+    })), state.stroke, (v) => { state.stroke = v; syncStrokeParams(); });
+
+    // ストロークごとのパラメータ。選んだものだけ出す
+    strokeParamBox = el('div', 'ctl-group', al);
+    syncStrokeParams = () => {
+      strokeParamBox.textContent = '';
+      const meta = STROKES.find((s) => s.id === state.stroke);
+      if (!meta || !meta.params || meta.params.length === 0) {
+        strokeParamBox.style.display = 'none';
+        return;
+      }
+      strokeParamBox.style.display = '';
+      const o = state.strokeParams[state.stroke];
+      const RANGE = {
+        spacing: { min: 0.02, max: 0.6, step: 0.01, jp: 'ダブ間隔' },
+        scatter: { min: 0, max: 2, step: 0.05, jp: '散らし' },
+        sizeJitter: { min: 0, max: 1, step: 0.05, jp: 'サイズのゆらぎ' },
+        colorJitter: { min: 0, max: 1, step: 0.05, jp: '色のゆらぎ' },
+      };
+      for (const key of meta.params) {
+        const r = RANGE[key];
+        if (!r) continue;
+        slider(strokeParamBox, {
+          label: r.jp, min: r.min, max: r.max, step: r.step, value: o[key],
+          title: meta.hint,
+          onInput: (v) => { o[key] = v; },
+        });
+      }
+      toggle(strokeParamBox, {
+        label: 'ダブごとに回す', value: !!o.spin,
+        title: 'アルファの向きをダブごとにランダムに回す（同じストロークなら同じ結果）',
+        onChange: (on) => { o.spin = on; },
+      });
+    };
+    syncStrokeParams();
+
+    el('p', 'note', al).textContent =
+      'アルファはブラシの断面形状です。鱗・ひび・布目などをスタンプのように押せます。'
+      + 'スプレーは同じストロークなら必ず同じ模様になるので、Undo してやり直しても結果が変わりません。';
+  }
 
   // --- デフォーメーション -----------------------------------------------
   // ZBrush の Deformation パレット相当。スライダーは値を決めるだけで、
@@ -1036,6 +1141,8 @@ export function buildUI(app) {
       if (groupAngleSlider) groupAngleSlider.set(state.groupAngle);
       if (groupViewToggle) groupViewToggle.set(state.groupView);
       if (clipModeSeg) clipModeSeg.set(state.clipMode);
+      if (strokeSeg) strokeSeg.set(state.stroke);
+      if (alphaGrid) alphaGrid.btns.forEach((b, k) => b.classList.toggle('on', k === state.alpha));
       refreshLayers();
       refreshGroups();
       refreshMorph();

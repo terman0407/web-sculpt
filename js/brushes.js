@@ -5,6 +5,7 @@
 
 import { V3, clamp } from './math.js';
 import { RING_STRIDE } from './mesh.js';
+import { alphaWeightAt } from './alpha.js';
 
 export const BRUSHES = [
   { id: 'clay', name: 'Clay Buildup', jp: 'クレイ', short: 'クレイ', icon: '◤', hint: '平均平面まで粘土を盛る。基本のブラシ' },
@@ -22,6 +23,7 @@ export const BRUSHES = [
   { id: 'nudge', name: 'Nudge', jp: 'ナッジ', short: 'ナッジ', icon: '➤', hint: '表面に沿ってずらす' },
   { id: 'paint', name: 'Paint', jp: 'ペイント', short: 'ペイント', icon: '✎', hint: '頂点カラーを塗る (ポリペイント)' },
   { id: 'mask', name: 'Mask', jp: 'マスク', short: 'マスク', icon: '▩', hint: 'マスクを塗る (Ctrl+ドラッグでも可)' },
+  { id: 'morph', name: 'Morph', jp: 'モーフ', short: 'モーフ', icon: '⟲', hint: '記憶した形へ部分的に戻す（モーフターゲットの記憶が先に必要）' },
 ];
 
 export const BRUSH_IDS = BRUSHES.map(b => b.id);
@@ -116,6 +118,10 @@ export class BrushEngine {
    *   toCamera   : Float32Array(3)|null 視線の逆方向（バックフェイスマスク用）
    *   backface   : bool 裏を向いた面を無視するか
    *   ignoreMask : bool
+   *   alpha      : string|null ブラシアルファの id（null で無効）
+   *   tangent    : Float32Array(3) ダブ接平面の U 軸
+   *   bitangent  : Float32Array(3) ダブ接平面の V 軸
+   *   alphaRotation : number アルファの回転（ラジアン）
    */
   apply(mesh, c) {
     const n = c.count;
@@ -130,6 +136,11 @@ export class BrushEngine {
     const useMask = !c.ignoreMask;
     const focal = clamp(c.focal || 0, -1, 1);
     const bf = c.backface && c.toCamera ? c.toCamera : null;
+    // ブラシアルファ（断面形状）。ダブの接平面上の (u,v) で 0..1 を引いて
+    // 通常の距離減衰に掛ける。接平面の基底は呼び出し側（sculptor）が作る。
+    const alpha = c.alpha || null;
+    const at = c.tangent, bt = c.bitangent, arot = c.alphaRotation || 0;
+    const useAlpha = !!(alpha && at && bt);
 
     // --- 減衰重み + 面積加重平均法線 + 加重重心 --------------------------
     let anx = 0, any = 0, anz = 0;
@@ -141,6 +152,7 @@ export class BrushEngine {
       let t = Math.sqrt(dx * dx + dy * dy + dz * dz) * invR;
       if (t > 1) t = 1;
       let f = falloff(t, focal);
+      if (useAlpha && f > 0) f *= alphaWeightAt(alpha, P[i], P[i + 1], P[i + 2], c.center, at, bt, R, arot);
       if (useMask) f *= (1 - clamp(MK[v], 0, 1));
       if (bf && f > 0) {
         // 視点から見て裏を向いている頂点を落とす（ZBrush の BackfaceMask）
