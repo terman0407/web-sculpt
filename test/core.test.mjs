@@ -919,6 +919,32 @@ head('WASM 距離場（JS 版との一致）');
       console.log(`       res${res}: JS ${jsR.stats.ms}ms (距離場 ${jsR.stats.phase.distance}) / `
         + `WASM ${waR.stats.ms}ms (距離場 ${waR.stats.phase.distance})`);
     }
+
+    // --- アロケータがメモリを回収するか -------------------------------------
+    // wasm 側は自前のバンプアロケータなので、release で巻き戻せていないと
+    // ダイナメッシュを繰り返すたびに線形メモリが伸び続ける（実際に一度やった）。
+    head('WASM アロケータ');
+    {
+      const { instance } = await WebAssembly.instantiate(bytes, {
+        env: { abort() { throw new Error('wasm abort'); } },
+      });
+      const W = instance.exports;
+      const pages = () => W.memory.buffer.byteLength / 65536;
+      const N = 2e6;
+      const batch = (order) => {
+        const p = [W.alloc(5e5 * 12), W.alloc(1e6 * 12), W.alloc(N * 4), W.alloc(N * 4)];
+        if (p.some((x) => !x)) return false;
+        for (const i of order) W.release(p[i]);
+        return true;
+      };
+      ok(batch([3, 2, 1, 0]), '確保できる');
+      const base = pages();
+      let allOk = true;
+      for (let r = 0; r < 10; r++) allOk = batch([3, 2, 1, 0]) && allOk;
+      ok(allOk && pages() === base, `LIFO 解放を 10 回繰り返してもメモリが増えない (${base} → ${pages()} ページ)`);
+      for (let r = 0; r < 10; r++) allOk = batch([0, 1, 3, 2]) && allOk;
+      ok(allOk && pages() === base, `順不同の解放でも増えない (${pages()} ページ)`);
+    }
   }
 }
 

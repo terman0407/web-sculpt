@@ -9,3 +9,7 @@ test/shots/
 
 # WASM ビルドに使う（実行時には不要）
 node_modules/
+
+# Rust ビルド成果物（wasm/dynafield.wasm はコミットしてある）
+rust/target/
+rust/Cargo.lock

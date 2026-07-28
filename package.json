@@ -12,11 +12,12 @@
     "test:e2e": "node test/interaction.mjs",
     "test:e2e:file": "node build.mjs && node test/interaction.mjs --file",
     "shots": "node test/screenshot.mjs",
-    "build:wasm": "asc assembly/dynafield.ts --outFile wasm/dynafield.wasm --optimize --optimizeLevel 3 --runtime minimal --exportRuntime --noAssert",
+    "build:wasm": "cd rust && cargo build --release --target wasm32-unknown-unknown && cp target/wasm32-unknown-unknown/release/dynafield.wasm ../wasm/dynafield.wasm",
     "bench": "node test/bench.mjs",
     "bench:gpu": "node test/bench-gpu.mjs",
     "bench:wasm": "node test/bench-wasm.mjs",
-    "bench:dynamesh": "node --max-old-space-size=8192 test/bench-dynamesh.mjs"
+    "bench:dynamesh": "node --max-old-space-size=8192 test/bench-dynamesh.mjs",
+    "build:wasm:as": "asc assembly/dynafield.ts --outFile wasm/dynafield.wasm --optimize --optimizeLevel 3 --runtime minimal --exportRuntime --noAssert"
   },
   "engines": {
     "node": ">=22"

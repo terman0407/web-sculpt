@@ -42,7 +42,11 @@ const CASES = [
 // --nowasm で JS 版のみに強制できる（比較用）
 if (!args.includes('--nowasm')) {
   try {
-    await initWasmFieldFromBytes(readFileSync(new URL('../wasm/dynafield.wasm', import.meta.url)));
+    // WEBSCULPT_WASM で別ビルド（Rust 版など）を指定して比較できる
+    const wp = process.env.WEBSCULPT_WASM
+      ? new URL(process.env.WEBSCULPT_WASM, `file://${process.cwd()}/`)
+      : new URL('../wasm/dynafield.wasm', import.meta.url);
+    await initWasmFieldFromBytes(readFileSync(wp));
   } catch { /* 無ければ JS 版のまま */ }
 }
 console.log(`\n解像度 res=${RES} 固定、入力ポリゴン数を変えて計測`

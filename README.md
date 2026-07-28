@@ -339,8 +339,8 @@ E2E テストが並列と逐次の出力一致を毎回検証している。
 
 ### WASM
 
-距離場スプラット（ダイナメッシュの約 9 割を占める）を AssemblyScript で書き、
-**本体に組み込んである**（`assembly/dynafield.ts` → `wasm/dynafield.wasm`、4.7 KB）。
+距離場スプラット（ダイナメッシュの約 9 割を占める）を **Rust** で書き、
+**本体に組み込んである**（`rust/src/lib.rs` → `wasm/dynafield.wasm`、2.9 KB）。
 
 - 起動時に非同期で読み込み、間に合わなければ **JS 版へ自動フォールバック**するので、
   読み込みに失敗しても機能は落ちない。
@@ -356,8 +356,29 @@ GitHub Pages での動作条件:
   GitHub Pages はヘッダを設定できない。Service Worker で合成する回避策はあるが、
   初回リロードが必要になり `file://` では動かないので採用していない。
 
-`npm install && npm run build:wasm` で `.wasm` を作り直せる（AssemblyScript は
-devDependency で、実行時には不要）。
+`npm run build:wasm` で `.wasm` を作り直せる（Rust ツールチェーン +
+`rustup target add wasm32-unknown-unknown` が必要。実行時には不要で、
+生成済みの `.wasm` はリポジトリにコミットしてある）。
+
+#### Rust と AssemblyScript を実測で比べた結果
+
+同じアルゴリズム・同じ打ち切り条件で両方書いて突き合わせた（`assembly/dynafield.ts`
+は比較用に残してある）。3M ポリゴン / res128 の距離場を 3 回計測した中央値:
+
+| | 距離場 | 全体 | サイズ |
+|---|---|---|---|
+| JS | 1535 ms | — | — |
+| AssemblyScript | 836 ms | 979 ms | 4,729 B |
+| Rust | 818 ms | 946 ms | 2,871 B |
+
+**速度はほぼ互角**（Rust が 2% ほど速いが、実行ごとのばらつきと同程度）。
+どちらも同じ WASM 命令列に落ちるので、この手の数値ループでは言語を変えても
+差は出ない — 効いたのは JS → WASM の 1.8 倍と、ワーカー並列化の 2.7 倍。
+Rust を採用したのはサイズが 4.7 KB → 2.9 KB になるから（単一ファイル版に
+base64 で埋め込むため）と、`cargo` だけでビルドが完結するため。
+
+`-C target-feature=+simd128` / `+nontrapping-fptoint` も試したが、
+このループでは有意差なし（自動ベクトル化が効く形になっていない）。
 
 ### 残っている制約
 

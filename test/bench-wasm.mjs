@@ -99,49 +99,65 @@ function splatJS(G, field, closest){
   }
 }
 
-// --- WASM をロード ---
-const bytes = readFileSync(new URL('../wasm/dynafield.wasm', import.meta.url));
-const { instance } = await WebAssembly.instantiate(bytes, { env: {
-  abort: () => { throw new Error('wasm abort'); },
-  'Math.min': Math.min, 'Math.max': Math.max, 'Math.floor': Math.floor,
-  'Math.ceil': Math.ceil, 'Math.sqrt': Math.sqrt,
-}});
-const W = instance.exports;
-console.log('  WASM exports:', Object.keys(W).join(', '));
+// --- WASM をロード（AssemblyScript / Rust の両方を比べる）---
+// wasm/dynafield.wasm が本番で使うもの（現在は Rust 版）。
+// rust/target 以下と assembly 版があればそれも並べて比べる。
+const CANDIDATES = [
+  { name: '本番 ', url: new URL('../wasm/dynafield.wasm', import.meta.url) },
+  { name: 'Rust', url: new URL('../rust/target/wasm32-unknown-unknown/release/dynafield.wasm', import.meta.url) },
+];
+const mods = [];
+for (const c of CANDIDATES) {
+  let bytes;
+  try { bytes = readFileSync(c.url); } catch { console.log(`  (${c.name.trim()} は未ビルド: スキップ)`); continue; }
+  const { instance } = await WebAssembly.instantiate(bytes, {
+    env: { abort: () => { throw new Error('wasm abort'); } },
+  });
+  mods.push({ ...c, W: instance.exports, bytes: bytes.length });
+  console.log(`  ${c.name.trim()}: ${bytes.length.toLocaleString()} B`);
+}
+if (mods.length === 0) { console.error('  WASM が 1 つも無い'); process.exit(1); }
 
+/** WASM 側で splat を走らせて (ms, field, closest) を返す */
+function runWasm(W, G, N) {
+  const pPos = W.alloc(mesh.nv * 12), pTri = W.alloc(mesh.nt * 12);
+  const pField = W.alloc(N * 4), pClose = W.alloc(N * 4);
+  new Float32Array(W.memory.buffer, pPos, mesh.nv * 3).set(mesh.positions.subarray(0, mesh.nv * 3));
+  new Int32Array(W.memory.buffer, pTri, mesh.nt * 3).set(mesh.tris.subarray(0, mesh.nt * 3));
+  W.fillField(pField, N, G.band);
+  W.fillClosest(pClose, N);
+  const t0 = process.hrtime.bigint();
+  W.splat(pPos, pTri, mesh.nt, pField, pClose,
+    G.nx, G.ny, G.nz, 0, G.nz - 1, G.ox, G.oy, G.oz, G.h, G.band);
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  // メモリが伸びるとビューが無効になるので、必ず読み出してからコピーする
+  const field = new Float32Array(new Float32Array(W.memory.buffer, pField, N));
+  const close = new Int32Array(new Int32Array(W.memory.buffer, pClose, N));
+  W.release(pClose); W.release(pField); W.release(pTri); W.release(pPos);
+  return { ms, field, close };
+}
+
+const REPEAT = 3;
 for (const res of [96, 128, 192]) {
   const G = setupGrid(res);
   const N = G.total;
 
-  // --- JS ---
   const fieldJS = new Float32Array(N).fill(G.band);
   const closeJS = new Int32Array(N).fill(-1);
-  let t0 = process.hrtime.bigint();
+  const t0 = process.hrtime.bigint();
   splatJS(G, fieldJS, closeJS);
-  const msJS = Number(process.hrtime.bigint()-t0)/1e6;
+  const msJS = Number(process.hrtime.bigint() - t0) / 1e6;
 
-  // --- WASM ---
-  const posBytes = mesh.nv*12, triBytes = mesh.nt*12;
-  const pPos = W.alloc(posBytes), pTri = W.alloc(triBytes);
-  const pField = W.alloc(N*4), pClose = W.alloc(N*4);
-  let mem = new Uint8Array(W.memory.buffer);
-  new Float32Array(W.memory.buffer, pPos, mesh.nv*3).set(mesh.positions.subarray(0, mesh.nv*3));
-  new Int32Array(W.memory.buffer, pTri, mesh.nt*3).set(mesh.tris.subarray(0, mesh.nt*3));
-  W.fillField(pField, N, G.band);
-  W.fillClosest(pClose, N);
-  t0 = process.hrtime.bigint();
-  W.splat(pPos, pTri, mesh.nt, pField, pClose, G.nx, G.ny, G.nz, G.ox, G.oy, G.oz, G.h, G.band);
-  const msWA = Number(process.hrtime.bigint()-t0)/1e6;
-  const fieldWA = new Float32Array(W.memory.buffer, pField, N);
-  const closeWA = new Int32Array(W.memory.buffer, pClose, N);
-
-  let dField=0, dClose=0, maxAbs=0;
-  for(let i=0;i<N;i++){
-    if(fieldJS[i]!==fieldWA[i]){ dField++; const a=Math.abs(fieldJS[i]-fieldWA[i]); if(a>maxAbs)maxAbs=a; }
-    if(closeJS[i]!==closeWA[i]) dClose++;
+  console.log(`\n  res${res} ${G.nx}x${G.ny}x${G.nz} (${(N / 1e6).toFixed(1)}M voxel)   JS ${msJS.toFixed(0)} ms`);
+  for (const m of mods) {
+    let best = Infinity, r = null;
+    for (let i = 0; i < REPEAT; i++) { const x = runWasm(m.W, G, N); if (x.ms < best) { best = x.ms; r = x; } }
+    let dField = 0, dClose = 0, maxAbs = 0;
+    for (let i = 0; i < N; i++) {
+      if (fieldJS[i] !== r.field[i]) { dField++; const a = Math.abs(fieldJS[i] - r.field[i]); if (a > maxAbs) maxAbs = a; }
+      if (closeJS[i] !== r.close[i]) dClose++;
+    }
+    console.log(`    ${m.name} ${best.toFixed(0).padStart(5)} ms  → JS 比 ${(msJS / best).toFixed(2)}x`
+      + `   差分 field=${dField} closest=${dClose} maxΔ=${maxAbs.toExponential(1)}`);
   }
-  console.log(`  res${String(res).padStart(3)} ${G.nx}x${G.ny}x${G.nz} (${(N/1e6).toFixed(1)}M voxel)`
-    + `  JS ${msJS.toFixed(0).padStart(5)} ms  WASM ${msWA.toFixed(0).padStart(5)} ms`
-    + `  → ${(msJS/msWA).toFixed(2)}x   差分 field=${dField} closest=${dClose} maxΔ=${maxAbs.toExponential(1)}`);
-  W.release(pPos); W.release(pTri); W.release(pField); W.release(pClose);
 }
