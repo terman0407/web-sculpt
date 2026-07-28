@@ -37,6 +37,7 @@ const state = {
   decimate: true,
   detail: 0.60,
   maxVerts: 1200000,
+  strokeBudgetMs: 12,   // 1 フレームの彫刻に使う上限時間（0 で無制限）
   // ダイナメッシュ
   dynaResolution: 96,
   dynaSmooth: 1,
@@ -674,6 +675,8 @@ function loop(t) {
   // 毎フレーム更新しないと、スライダーやキーで半径を変えてもカーソルリングに
   // 反映されない（彫刻を始めるまで古い値が使われてしまう）
   updateWorldRadius();
+  // このフレームのダブで溜まった曲率更新をまとめて処理する
+  sculptor.flushCurvature();
 
   const rings = buildRings();
   // ピックはレイジーマウスのリード位置で行う（ブラシが当たるのはそこ）
@@ -681,6 +684,8 @@ function loop(t) {
   else renderer.pickRequest = null;
 
   renderer.render(camera, mesh, state, rings);
+  // 残りの MatCap を 1 フレーム 1 枚ずつ裏で用意する（起動を待たせない）
+  renderer.fillNextMatcap();
 
   statTimer += dt;
   if (statTimer > 250) {

@@ -150,6 +150,10 @@ export class Sculptor {
     this.queue = new Int32Array(0);
     this.normalSet = [];
     this.curvSet = [];
+    this.curvPending = [];      // フレーム末にまとめて曲率を直す頂点
+    this.cvStamp = new Int32Array(0);
+    this.cvStampId = 1;
+    this._movedVerts = [];      // dyntopo のコラプスで位置が動いた頂点
     this.nStamp = new Int32Array(0);
     this.levels = new SubdivLevels();
 
@@ -178,6 +182,7 @@ export class Sculptor {
     this.stroking = false;
     this.hoverSeed = -1;
     this.levels.clear();
+    this.dropPendingCurvature();
   }
 
   /**
@@ -214,6 +219,7 @@ export class Sculptor {
     if (this.vStamp.length < m.capV) {
       this.vStamp = new Int32Array(m.capV);
       this.nStamp = new Int32Array(m.capV);
+      this.cvStamp = new Int32Array(m.capV);
       this.queue = new Int32Array(m.capV);
     }
     if (this.tStamp.length < m.capT) {
@@ -291,26 +297,60 @@ export class Sculptor {
     }
     m.computeNormalsFor(set, set.length);
 
-    // 2 段目: さらに 1-ring 広げて曲率を更新（法線が変わった頂点の隣も影響を受ける）
-    const id2 = ++this.stamp;
-    const cset = this.curvSet;
-    cset.length = 0;
+    // 曲率は見た目（キャビティ陰影）にしか使わず、彫刻の挙動には影響しない。
+    // 1 フレームに何十ダブも打たれるので、ここでは「後で計算する頂点」を
+    // 積むだけにして、実際の計算はフレーム末に 1 回だけ行う。
+    const cs = this.cvStamp, cid = this.cvStampId;
+    const pend = this.curvPending;
     for (let k = 0; k < set.length; k++) {
       const v = set[k];
-      if (nS[v] !== id2) { nS[v] = id2; cset.push(v); }
+      if (cs[v] !== cid) { cs[v] = cid; pend.push(v); }
+    }
+  }
+
+  /**
+   * 溜まっていた曲率の再計算をまとめて行う。毎フレーム 1 回、描画前に呼ぶ。
+   * @returns {number} 更新した頂点数
+   */
+  flushCurvature() {
+    const pend = this.curvPending;
+    if (pend.length === 0) return 0;
+    const m = this.mesh;
+    this._ensureStamps();
+    const T = m.tris;
+
+    // 法線が変わった頂点の隣も曲率が変わるので 1-ring 広げる
+    const id = ++this.stamp;
+    const nS = this.nStamp;
+    const cset = this.curvSet;
+    cset.length = 0;
+    for (let k = 0; k < pend.length; k++) {
+      const v = pend[k];
+      if (v >= m.nv || !m.isVertAlive(v)) continue;
+      if (nS[v] !== id) { nS[v] = id; cset.push(v); }
       const r = m.ring[v];
       if (!r) continue;
       for (let j = 0; j < r.length; j++) {
         const ti = r[j] * 3;
         for (let e = 0; e < 3; e++) {
           const u = T[ti + e];
-          if (nS[u] !== id2) { nS[u] = id2; cset.push(u); }
+          if (nS[u] !== id) { nS[u] = id; cset.push(u); }
         }
       }
     }
+    pend.length = 0;
+    this.cvStampId++;
+    if (cset.length === 0) return 0;
     m.computeCurvatureFor(cset, cset.length);
     m.smoothCurvatureFor(cset, cset.length);
     for (let k = 0; k < cset.length; k++) m.markVert(cset[k]);
+    return cset.length;
+  }
+
+  /** メッシュを差し替えたときなど、溜まっている曲率更新を捨てる */
+  dropPendingCurvature() {
+    this.curvPending.length = 0;
+    this.cvStampId++;
   }
 
   /**
@@ -380,13 +420,20 @@ export class Sculptor {
       return;
     }
 
-    const steps = Math.min(48, Math.max(1, Math.floor(dist / spacing)));
+    // カーソルが大きく飛んだフレームで何十ダブも打つとフレームが数百 ms 固まる。
+    // 上限本数に加えて時間予算でも打ち切り、1 フレームの作業量を有界にする。
+    // 打ち切った場合も lastPoint は進めた所までなので、次フレームで続きから再開する。
+    const steps = Math.min(32, Math.max(1, Math.floor(dist / spacing)));
     const step = this._step, p = this._walk;
     V3.scale(step, this._delta, 1 / steps);
     V3.copy(p, ms0.lastPoint);
+    const budget = this.state.strokeBudgetMs > 0 ? this.state.strokeBudgetMs : Infinity;
+    const t0 = budget === Infinity ? 0 : performance.now();
     for (let s = 0; s < steps; s++) {
       V3.add(p, p, step);
       this._dabAll(p, step, false);
+      // 1 ダブが数十 ms かかることがあるので、間引かず毎回見る
+      if (budget !== Infinity && performance.now() - t0 > budget) break;
     }
   }
 
@@ -395,7 +442,12 @@ export class Sculptor {
     this.stroking = false;
     const m = this.mesh;
     if (this.dabCount > 0) {
-      if (m.compact()) this.topoChanged = true;
+      // compact は頂点番号を詰め替えるので、その前に曲率を確定させる
+      this.flushCurvature();
+      if (m.compact()) {
+        this.topoChanged = true;
+        this.dropPendingCurvature();
+      }
       this.history.commit(m);
     }
   }
@@ -455,31 +507,39 @@ export class Sculptor {
       return;
     }
 
+    // --- 領域収集 -------------------------------------------------------
+    // 半径より少し広めに 1 回だけ集め、dyntopo とブラシ適用で共用する。
+    // 半径の外側は減衰が 0 になるので、余分に含めても結果は変わらない。
+    const gatherR = radius * 1.1;
+    this._gather(ms, point, gatherR);
+
     // --- 動的トポロジ ---------------------------------------------------
-    if (st.dynTopo && needsTopology(brush)) {
-      this._gather(ms, point, radius * 1.1);
-      if (ms.count > 0) {
-        const target = this.targetEdgeLength(radius);
-        const ch = refineRegion(m, ms.tris, point, radius, target, {
-          subdivide: true,
-          decimate: st.decimate,
-          maxVerts: st.maxVerts,
-        });
-        if (ch) {
-          this.topoChanged = true;
-          // トポロジが変わったのでシードを取り直し、領域の法線を作り直す
-          let s2 = descend(m, ms.seed, point);
-          if (s2 < 0 || !m.isVertAlive(s2)) s2 = nearestVertexBrute(m, point);
-          ms.seed = s2;
-          if (s2 >= 0) {
-            this._gather(ms, point, radius * 1.1);
-            if (ms.count > 0) this._updateNormals(ms.verts, ms.count);
-          }
-        }
+    if (st.dynTopo && needsTopology(brush) && ms.count > 0) {
+      const target = this.targetEdgeLength(radius);
+      const moved = this._movedVerts;
+      moved.length = 0;
+      // 1 ダブで作れる頂点数を領域サイズに比例させる。粗い面に大きなブラシを
+      // 当てたときに 1 フレームで数千頂点作って固まるのを防ぐ。
+      // 上限に当たっても次のダブで続きが分割されるので、数フレームで目標密度に届く。
+      const ch = refineRegion(m, ms.tris, point, radius, target, {
+        subdivide: true,
+        decimate: st.decimate,
+        maxVerts: st.maxVerts,
+        maxNewPerStep: Math.max(150, Math.min(300, ms.count)),
+        moved,
+      });
+      if (ch) {
+        this.topoChanged = true;
+        // トポロジが変わったのでシードを取り直して領域を集め直す
+        let s2 = descend(m, ms.seed, point);
+        if (s2 < 0 || !m.isVertAlive(s2)) s2 = nearestVertexBrute(m, point);
+        ms.seed = s2;
+        if (s2 >= 0) this._gather(ms, point, gatherR);
+        // 形状が動いたのはコラプス先だけなので、そこだけ法線を直せば足りる
+        if (moved.length) this._updateNormals(moved, moved.length);
       }
     }
 
-    this._gather(ms, point, radius);
     if (ms.count === 0) return;
 
     this.engine.apply(m, {

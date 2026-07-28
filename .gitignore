@@ -6,3 +6,6 @@ _site/
 
 # テスト実行で生成されるスクリーンショット（README 用は docs/images/ に置いてある）
 test/shots/
+
+# WASM ビルドに使う（実行時には不要）
+node_modules/

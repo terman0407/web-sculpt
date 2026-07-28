@@ -11,9 +11,16 @@
     "test:gpu": "node test/run-gpu-check.mjs",
     "test:e2e": "node test/interaction.mjs",
     "test:e2e:file": "node build.mjs && node test/interaction.mjs --file",
-    "shots": "node test/screenshot.mjs"
+    "shots": "node test/screenshot.mjs",
+    "build:wasm": "asc assembly/dynafield.ts --outFile wasm/dynafield.wasm --optimize --optimizeLevel 3 --runtime stub --exportRuntime --noAssert",
+    "bench": "node test/bench.mjs",
+    "bench:gpu": "node test/bench-gpu.mjs",
+    "bench:wasm": "node test/bench-wasm.mjs"
   },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "assemblyscript": "^0.28.20"
   }
 }

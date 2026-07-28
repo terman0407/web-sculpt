@@ -152,77 +152,149 @@ export const MATERIALS = [
   },
 ];
 
-function shade(cfg, n) {
-  let r = cfg.ambient[0], g = cfg.ambient[1], b = cfg.ambient[2];
-
+/**
+ * ピクセルループから定数計算を追い出すための事前計算。
+ * 光源方向の正規化やハーフベクトルは法線に依存しないので、
+ * 素直に書くと 1 枚 65536 px × 光源数ぶん無駄に計算・確保していた。
+ */
+function prepare(cfg) {
+  const p = {
+    env: !!cfg.env,
+    ar: cfg.ambient[0], ag: cfg.ambient[1], ab: cfg.ambient[2],
+    lights: [], specs: [],
+    rimR: 0, rimG: 0, rimB: 0, rimP: 0, hasRim: false,
+    tr: 1, tg: 1, tb: 1,
+  };
   if (cfg.env) {
-    // 反射ベクトル（視線 = +Z）
-    const d = 2 * n[2];
-    const refl = norm([d * n[0], d * n[1], d * n[2] - 1]);
-    const e = fakeEnv(refl);
-    const f = 0.06 + 0.94 * Math.pow(1 - Math.max(0, n[2]), 4);   // フレネル
-    const k = 0.55 + 0.45 * f;
-    r += e[0] * cfg.tint[0] * k;
-    g += e[1] * cfg.tint[1] * k;
-    b += e[2] * cfg.tint[2] * k;
+    p.tr = cfg.tint[0]; p.tg = cfg.tint[1]; p.tb = cfg.tint[2];
   } else {
-    for (const L of cfg.lights) {
+    for (const L of cfg.lights || []) {
       const d = norm(L.dir);
-      let ndl = n[0] * d[0] + n[1] * d[1] + n[2] * d[2];
       const wr = L.wrap || 0;
-      ndl = (ndl + wr) / (1 + wr);
-      if (ndl < 0) ndl = 0;
-      const k = ndl * L.intensity;
-      r += cfg.base[0] * L.color[0] * k;
-      g += cfg.base[1] * L.color[1] * k;
-      b += cfg.base[2] * L.color[2] * k;
+      p.lights.push({
+        dx: d[0], dy: d[1], dz: d[2],
+        wrap: wr, invW: 1 / (1 + wr),
+        // base × color × intensity をまとめておく
+        r: cfg.base[0] * L.color[0] * L.intensity,
+        g: cfg.base[1] * L.color[1] * L.intensity,
+        b: cfg.base[2] * L.color[2] * L.intensity,
+      });
     }
-    if (cfg.spec) {
-      for (const S of cfg.spec) {
-        const d = norm(S.dir);
-        // ハーフベクトル（視線 = +Z）
-        const h = norm([d[0], d[1], d[2] + 1]);
-        let nh = n[0] * h[0] + n[1] * h[1] + n[2] * h[2];
-        if (nh < 0) nh = 0;
-        const k = Math.pow(nh, S.power) * S.intensity;
-        r += S.color[0] * k; g += S.color[1] * k; b += S.color[2] * k;
-      }
+    for (const S of cfg.spec || []) {
+      const d = norm(S.dir);
+      const h = norm([d[0], d[1], d[2] + 1]);   // 視線 = +Z のハーフベクトル
+      p.specs.push({
+        hx: h[0], hy: h[1], hz: h[2], power: S.power,
+        r: S.color[0] * S.intensity, g: S.color[1] * S.intensity, b: S.color[2] * S.intensity,
+      });
+    }
+  }
+  if (cfg.rim) {
+    p.hasRim = true;
+    p.rimR = cfg.rim.color[0] * cfg.rim.intensity;
+    p.rimG = cfg.rim.color[1] * cfg.rim.intensity;
+    p.rimB = cfg.rim.color[2] * cfg.rim.intensity;
+    p.rimP = cfg.rim.power;
+  }
+  return p;
+}
+
+const _envL = norm([-0.45, 0.75, 0.5]);
+const _out = [0, 0, 0];
+
+/** 事前計算済みのマテリアルで法線 n を陰影付けする（確保なし） */
+function shadeP(p, nx, ny, nz) {
+  let r = p.ar, g = p.ag, b = p.ab;
+
+  if (p.env) {
+    // 反射ベクトル（視線 = +Z）
+    const d = 2 * nz;
+    let rx = d * nx, ry = d * ny, rz = d * nz - 1;
+    const l = Math.sqrt(rx * rx + ry * ry + rz * rz) || 1;
+    rx /= l; ry /= l; rz /= l;
+
+    // 疑似環境（インライン展開）
+    const y = ry;
+    let cr, cg, cb;
+    if (y > 0) {
+      const t = Math.pow(y, 0.6);
+      cr = 0.92 + (0.55 - 0.92) * t; cg = 0.90 + (0.68 - 0.90) * t; cb = 0.86 + (0.92 - 0.86) * t;
+    } else {
+      const t = Math.pow(-y, 0.5);
+      cr = 0.92 + (0.16 - 0.92) * t; cg = 0.90 + (0.15 - 0.90) * t; cb = 0.86 + (0.15 - 0.86) * t;
+    }
+    const s = rx * _envL[0] + ry * _envL[1] + rz * _envL[2];
+    const gl = s > 0 ? Math.pow(s, 220) * 2.5 : 0;
+    const kk = 0.82;
+    cr = cr * kk + gl; cg = cg * kk + gl; cb = cb * kk + gl;
+
+    const f = 0.06 + 0.94 * Math.pow(1 - (nz > 0 ? nz : 0), 4);   // フレネル
+    const k = 0.55 + 0.45 * f;
+    r += cr * p.tr * k; g += cg * p.tg * k; b += cb * p.tb * k;
+  } else {
+    const L = p.lights;
+    for (let i = 0; i < L.length; i++) {
+      const li = L[i];
+      let ndl = (nx * li.dx + ny * li.dy + nz * li.dz + li.wrap) * li.invW;
+      if (ndl <= 0) continue;
+      r += li.r * ndl; g += li.g * ndl; b += li.b * ndl;
+    }
+    const S = p.specs;
+    for (let i = 0; i < S.length; i++) {
+      const si = S[i];
+      const nh = nx * si.hx + ny * si.hy + nz * si.hz;
+      if (nh <= 0) continue;
+      const k = Math.pow(nh, si.power);
+      r += si.r * k; g += si.g * k; b += si.b * k;
     }
   }
 
-  if (cfg.rim) {
-    const f = Math.pow(1 - Math.max(0, Math.min(1, n[2])), cfg.rim.power) * cfg.rim.intensity;
-    r += cfg.rim.color[0] * f;
-    g += cfg.rim.color[1] * f;
-    b += cfg.rim.color[2] * f;
+  if (p.hasRim) {
+    const c = nz < 0 ? 0 : (nz > 1 ? 1 : nz);
+    const f = Math.pow(1 - c, p.rimP);
+    r += p.rimR * f; g += p.rimG * f; b += p.rimB * f;
   }
-  return [r, g, b];
+  _out[0] = r; _out[1] = g; _out[2] = b;
+  return _out;
 }
 
 /**
  * 全マテリアルの MatCap を生成する。
  * @returns {{data: Uint8Array, size: number, layers: number}}
  */
-export function generateMatcaps(size = 256) {
-  const layers = MATERIALS.length;
+/** 1 枚ぶんだけ生成する（起動時は表示中のマテリアルだけ作れば足りる） */
+export function generateMatcapLayer(index, size = 256) {
+  const r = generateMatcaps(size, [index]);
+  return r.data;
+}
+
+/**
+ * @param {number} size 1 辺の px 数
+ * @param {number[]|null} only 生成するマテリアル番号。null なら全部。
+ *        指定した場合、data は指定枚数ぶんだけを詰めた並びになる。
+ */
+export function generateMatcaps(size = 256, only = null) {
+  const idx = only || MATERIALS.map((_, i) => i);
+  const layers = idx.length;
   const data = new Uint8Array(size * size * 4 * layers);
-  const n = [0, 0, 1];
-  for (let l = 0; l < layers; l++) {
-    const cfg = MATERIALS[l];
-    const off = l * size * size * 4;
+  for (let li = 0; li < layers; li++) {
+    const l = idx[li];
+    const mat = prepare(MATERIALS[l]);
+    const off = li * size * size * 4;
     for (let y = 0; y < size; y++) {
       const v = 1 - ((y + 0.5) / size) * 2;      // 上が +Y
       for (let x = 0; x < size; x++) {
         const u = ((x + 0.5) / size) * 2 - 1;
         const r2 = u * u + v * v;
+        let nx, ny, nz;
         if (r2 <= 1) {
-          n[0] = u; n[1] = v; n[2] = Math.sqrt(1 - r2);
+          nx = u; ny = v; nz = Math.sqrt(1 - r2);
         } else {
           // 円外はリム（シルエット）の色で埋めてバイリニアの滲みを防ぐ
           const l2 = Math.sqrt(r2);
-          n[0] = u / l2; n[1] = v / l2; n[2] = 0;
+          nx = u / l2; ny = v / l2; nz = 0;
         }
-        const c = shade(cfg, n);
+        const c = shadeP(mat, nx, ny, nz);
         const p = off + (y * size + x) * 4;
         data[p] = srgb(c[0]);
         data[p + 1] = srgb(c[1]);
@@ -231,7 +303,7 @@ export function generateMatcaps(size = 256) {
       }
     }
   }
-  return { data, size, layers };
+  return { data, size, layers, indices: idx };
 }
 
 /** UI のマテリアルサムネイル用に小さい canvas を返す */
@@ -240,8 +312,7 @@ export function materialThumb(index, size = 34) {
   cv.width = size; cv.height = size;
   const ctx = cv.getContext('2d');
   const img = ctx.createImageData(size, size);
-  const cfg = MATERIALS[index];
-  const n = [0, 0, 1];
+  const mat = prepare(MATERIALS[index]);
   for (let y = 0; y < size; y++) {
     const v = 1 - ((y + 0.5) / size) * 2;
     for (let x = 0; x < size; x++) {
@@ -249,8 +320,7 @@ export function materialThumb(index, size = 34) {
       const r2 = u * u + v * v;
       const p = (y * size + x) * 4;
       if (r2 > 1) { img.data[p + 3] = 0; continue; }
-      n[0] = u; n[1] = v; n[2] = Math.sqrt(1 - r2);
-      const c = shade(cfg, n);
+      const c = shadeP(mat, u, v, Math.sqrt(1 - r2));
       img.data[p] = srgb(c[0]);
       img.data[p + 1] = srgb(c[1]);
       img.data[p + 2] = srgb(c[2]);

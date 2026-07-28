@@ -151,9 +151,11 @@ export function dynamesh(mesh, opts = {}) {
   const sy = nx, sz = nx * ny;
   const total = nx * ny * nz;
 
-  const field = new Float32Array(total).fill(LARGE);
-  const closest = transferColor ? new Int32Array(total).fill(-1) : null;
   const band = h * 2.0;                // 少なくとも sqrt(3)*h 必要（セル対角）
+  // 初期値を band にしておくと、下の下界カリングが 1 枚目の三角形から効く。
+  // 帯域外の voxel は符号しか使わないので、正確な距離が入っていなくても問題ない。
+  const field = new Float32Array(total).fill(band);
+  const closest = transferColor ? new Int32Array(total).fill(-1) : null;
   const P = mesh.positions, T = mesh.tris;
 
   // ---- 2. 狭帯域の符号なし距離場 ---------------------------------------
@@ -166,21 +168,35 @@ export function dynamesh(mesh, opts = {}) {
     const bx = P[b], by = P[b + 1], bz = P[b + 2];
     const cx = P[c], cy = P[c + 1], cz = P[c + 2];
 
-    const i0 = Math.max(0, Math.floor((Math.min(ax, bx, cx) - band - ox) / h));
-    const i1 = Math.min(nx - 1, Math.ceil((Math.max(ax, bx, cx) + band - ox) / h));
-    const j0 = Math.max(0, Math.floor((Math.min(ay, by, cy) - band - oy) / h));
-    const j1 = Math.min(ny - 1, Math.ceil((Math.max(ay, by, cy) + band - oy) / h));
-    const k0 = Math.max(0, Math.floor((Math.min(az, bz, cz) - band - oz) / h));
-    const k1 = Math.min(nz - 1, Math.ceil((Math.max(az, bz, cz) + band - oz) / h));
+    const tx0 = Math.min(ax, bx, cx), tx1 = Math.max(ax, bx, cx);
+    const ty0 = Math.min(ay, by, cy), ty1 = Math.max(ay, by, cy);
+    const tz0 = Math.min(az, bz, cz), tz1 = Math.max(az, bz, cz);
 
+    const i0 = Math.max(0, Math.floor((tx0 - band - ox) / h));
+    const i1 = Math.min(nx - 1, Math.ceil((tx1 + band - ox) / h));
+    const j0 = Math.max(0, Math.floor((ty0 - band - oy) / h));
+    const j1 = Math.min(ny - 1, Math.ceil((ty1 + band - oy) / h));
+    const k0 = Math.max(0, Math.floor((tz0 - band - oz) / h));
+    const k1 = Math.min(nz - 1, Math.ceil((tz1 + band - oz) / h));
+
+    // AABB までの距離は三角形までの距離の下界になる。これを軸ごとに外へ括り出して
+    // 「確実に現在値より遠い voxel」を pointTriDist2 を呼ばずに捨てる。
     for (let k = k0; k <= k1; k++) {
       const pz = oz + k * h;
+      const ez = pz < tz0 ? tz0 - pz : (pz > tz1 ? pz - tz1 : 0);
+      const e2z = ez * ez;
+      if (e2z >= band * band) continue;                       // この z 面は丸ごと不要
       for (let j = j0; j <= j1; j++) {
         const py = oy + j * h;
+        const ey = py < ty0 ? ty0 - py : (py > ty1 ? py - ty1 : 0);
+        const e2zy = e2z + ey * ey;
+        if (e2zy >= band * band) continue;                    // この行は丸ごと不要
         let idx = i0 + j * sy + k * sz;
         for (let i = i0; i <= i1; i++, idx++) {
           const px = ox + i * h;
           const cur = field[idx];
+          const ex = px < tx0 ? tx0 - px : (px > tx1 ? px - tx1 : 0);
+          if (e2zy + ex * ex >= cur * cur) continue;          // 下界が既存値以上 → 更新されない
           // 平方で比較して大半の voxel で sqrt を省く
           const d2 = pointTriDist2(px, py, pz, ax, ay, az, bx, by, bz, cx, cy, cz);
           if (d2 < cur * cur) {

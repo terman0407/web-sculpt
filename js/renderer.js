@@ -8,7 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import { clamp } from './math.js';
-import { generateMatcaps, MATERIALS } from './matcap.js';
+import { generateMatcapLayer, MATERIALS } from './matcap.js';
 import {
   UNIFORM_FLOATS, UO,
   BG_WGSL, MESH_WGSL, WIRE_WGSL, GRID_WGSL, SSAO_WGSL, BLUR_WGSL, PRESENT_WGSL, RING_WGSL, PICK_WGSL,
@@ -318,20 +318,19 @@ export class Renderer {
     });
 
     // --- MatCap テクスチャ ---
-    const mc = generateMatcaps(256);
+    // MatCap は 1 枚 9ms かかる。起動時は表示中の 1 枚だけ作り、
+    // 残りは初回描画のあとにアイドル時間で埋める（起動を 80ms ほど短縮）。
+    const MC_SIZE = 256;
+    this.matcapSize = MC_SIZE;
+    this.matcapCount = MATERIALS.length;
+    this.materialNames = MATERIALS.map(m => m.jp);
+    this.matcapReady = new Uint8Array(this.matcapCount);
     this.matcapTex = d.createTexture({
-      size: [mc.size, mc.size, mc.layers],
+      size: [MC_SIZE, MC_SIZE, this.matcapCount],
       format: 'rgba8unorm-srgb',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
-    d.queue.writeTexture(
-      { texture: this.matcapTex },
-      mc.data,
-      { bytesPerRow: mc.size * 4, rowsPerImage: mc.size },
-      { width: mc.size, height: mc.size, depthOrArrayLayers: mc.layers },
-    );
-    this.matcapCount = mc.layers;
-    this.materialNames = MATERIALS.map(m => m.jp);
+    this.ensureMatcap(0);
 
     this.linearSampler = d.createSampler({
       magFilter: 'linear', minFilter: 'linear',
@@ -350,6 +349,29 @@ export class Renderer {
       layout: this.bglRing,
       entries: [{ binding: 0, resource: { buffer: this.ringBuf } }],
     });
+  }
+
+  /** 指定マテリアルの MatCap をまだ作っていなければ生成して該当レイヤへ書く */
+  ensureMatcap(index) {
+    if (index < 0 || index >= this.matcapCount || this.matcapReady[index]) return false;
+    const size = this.matcapSize;
+    const data = generateMatcapLayer(index, size);
+    this.device.queue.writeTexture(
+      { texture: this.matcapTex, origin: { x: 0, y: 0, z: index } },
+      data,
+      { bytesPerRow: size * 4, rowsPerImage: size },
+      { width: size, height: size, depthOrArrayLayers: 1 },
+    );
+    this.matcapReady[index] = 1;
+    return true;
+  }
+
+  /** まだ作っていない MatCap を 1 枚だけ埋める。毎フレーム呼んで少しずつ進める */
+  fillNextMatcap() {
+    for (let i = 0; i < this.matcapCount; i++) {
+      if (!this.matcapReady[i]) return this.ensureMatcap(i);
+    }
+    return false;
   }
 
   // -----------------------------------------------------------------------
@@ -617,7 +639,9 @@ export class Renderer {
     U[UO.camPos + 2] = camera.eye[2]; U[UO.camPos + 3] = 1;
     U[UO.params] = camera.near;
     U[UO.params + 1] = camera.far;
-    U[UO.params + 2] = clamp(state.material | 0, 0, this.matcapCount - 1);
+    const matIdx = clamp(state.material | 0, 0, this.matcapCount - 1);
+    this.ensureMatcap(matIdx);   // 未生成なら即座に作る（切り替え時 9ms）
+    U[UO.params + 2] = matIdx;
     U[UO.params + 3] = state.debugView || 0;
     U[UO.rt] = this.rtW; U[UO.rt + 1] = this.rtH;
     U[UO.rt + 2] = 1 / this.rtW; U[UO.rt + 3] = 1 / this.rtH;

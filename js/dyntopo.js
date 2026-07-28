@@ -137,6 +137,14 @@ export function collapseEdge(mesh, a, b, maxValence = 16) {
 }
 
 const _touchedVerts = [];
+// コラプス候補の辺。ダブごとに確保し直さないようモジュールスコープで使い回す
+let _edgeA = new Int32Array(0);
+let _edgeB = new Int32Array(0);
+let _edgeL = new Float64Array(0);
+let _edgeOrder = new Int32Array(0);
+const _orderList = [];
+const _considerBuf = [];
+const _freshTris = [];
 
 /**
  * ブラシ領域を目標エッジ長に合わせて再分割 / 間引きする。
@@ -153,7 +161,8 @@ export function refineRegion(mesh, regionTris, center, radius, targetLen, opt = 
   const doSplit = opt.subdivide !== false;
   const doCollapse = opt.decimate === true;
   const maxVerts = Math.min(opt.maxVerts || 1200000, MAX_VERTS_HARD);
-  const maxNew = opt.maxNewPerStep || 12000;
+  // 1 ダブの領域は数百頂点なので、1 万を超える生成は明らかに異常系。低めに抑える
+  const maxNew = opt.maxNewPerStep || 4000;
 
   // 分割 / コラプスのしきい値。目標長を挟んでヒステリシスを持たせ、
   // 同じ辺が分割と統合を往復するのを防ぐ。コラプス側は既存ディテールを
@@ -165,92 +174,118 @@ export function refineRegion(mesh, regionTris, center, radius, targetLen, opt = 
   const P = mesh.positions;
   let changed = false;
 
-  let consider = regionTris.slice();
+  // 領域の三角形リストは使い回しの配列にコピーする（ダブごとの slice を避ける）
+  const consider = _considerBuf;
+  consider.length = 0;
+  for (let k = 0; k < regionTris.length; k++) consider.push(regionTris[k]);
 
   // ---- 分割パス --------------------------------------------------------
   if (doSplit && mesh.liveVerts < maxVerts) {
     let created = 0;
+    const sl2 = splitLen * splitLen;
     for (let pass = 0; pass < 5; pass++) {
-      mesh.trackTris = [];
+      _freshTris.length = 0;
+      mesh.trackTris = _freshTris;
       let splits = 0;
       const T = mesh.tris;
       for (let k = 0; k < consider.length; k++) {
         const t = consider[k];
-        if (!mesh.isTriAlive(t)) continue;
         const i = t * 3;
-        const v = [T[i], T[i + 1], T[i + 2]];
-        // 最長辺を選ぶ
-        let bestLen = -1, ba = -1, bb = -1, bmx = 0, bmy = 0, bmz = 0;
-        for (let e = 0; e < 3; e++) {
-          const a = v[e], b = v[(e + 1) % 3];
-          const pa = a * 3, pb = b * 3;
-          const dx = P[pb] - P[pa], dy = P[pb + 1] - P[pa + 1], dz = P[pb + 2] - P[pa + 2];
-          const l = dx * dx + dy * dy + dz * dz;
-          if (l > bestLen) {
-            bestLen = l; ba = a; bb = b;
-            bmx = (P[pa] + P[pb]) * 0.5; bmy = (P[pa + 1] + P[pb + 1]) * 0.5; bmz = (P[pa + 2] + P[pb + 2]) * 0.5;
-          }
+        const i0 = T[i], i1 = T[i + 1], i2 = T[i + 2];
+        if (i0 === i1 && i1 === i2) continue;                 // 死んだ三角形
+        // 最長辺を選ぶ（配列を作らずスカラで持つ。ここは毎ダブ数千回通る）
+        const p0 = i0 * 3, p1 = i1 * 3, p2 = i2 * 3;
+        const x0 = P[p0], y0 = P[p0 + 1], z0 = P[p0 + 2];
+        const x1 = P[p1], y1 = P[p1 + 1], z1 = P[p1 + 2];
+        const x2 = P[p2], y2 = P[p2 + 1], z2 = P[p2 + 2];
+        const d01 = (x1 - x0) ** 2 + (y1 - y0) ** 2 + (z1 - z0) ** 2;
+        const d12 = (x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2;
+        const d20 = (x0 - x2) ** 2 + (y0 - y2) ** 2 + (z0 - z2) ** 2;
+        let bestLen, ba, bb, bmx, bmy, bmz;
+        if (d01 >= d12 && d01 >= d20) {
+          bestLen = d01; ba = i0; bb = i1;
+          bmx = (x0 + x1) * 0.5; bmy = (y0 + y1) * 0.5; bmz = (z0 + z1) * 0.5;
+        } else if (d12 >= d20) {
+          bestLen = d12; ba = i1; bb = i2;
+          bmx = (x1 + x2) * 0.5; bmy = (y1 + y2) * 0.5; bmz = (z1 + z2) * 0.5;
+        } else {
+          bestLen = d20; ba = i2; bb = i0;
+          bmx = (x2 + x0) * 0.5; bmy = (y2 + y0) * 0.5; bmz = (z2 + z0) * 0.5;
         }
-        if (bestLen <= splitLen * splitLen) continue;
+        if (bestLen <= sl2) continue;
         const ddx = bmx - cx, ddy = bmy - cy, ddz = bmz - cz;
         if (ddx * ddx + ddy * ddy + ddz * ddz > r2) continue;
         if (splitEdge(mesh, ba, bb) >= 0) { splits++; created++; }
         if (mesh.liveVerts >= maxVerts || created >= maxNew) break;
       }
-      const fresh = mesh.trackTris;
       mesh.trackTris = null;
       if (splits > 0) changed = true;
       if (splits === 0 || mesh.liveVerts >= maxVerts || created >= maxNew) break;
-      // 分割された三角形も再チェックしたいので既存 + 新規を次パスへ
-      for (let k = 0; k < fresh.length; k++) consider.push(fresh[k]);
+      // 分割で作られた三角形も次パスで再チェックする
+      for (let k = 0; k < _freshTris.length; k++) consider.push(_freshTris[k]);
     }
   }
 
   // ---- コラプスパス ----------------------------------------------------
   if (doCollapse) {
-    const seen = new Set();
-    const edges = [];
+    // 重複除去に Set を使うとダブごとに数千要素の確保が走るのでやめた。
+    // 同じ辺が 2 回入っても、2 回目は生存チェックと長さ再計算で O(1) に弾かれる。
     const T = mesh.tris;
     const cr2 = radius * radius;
+    const cl2 = collapseLen * collapseLen;
+    let ne = 0;
+    if (_edgeA.length < consider.length * 3) {
+      const cap = Math.max(1024, consider.length * 4);
+      _edgeA = new Int32Array(cap);
+      _edgeB = new Int32Array(cap);
+      _edgeL = new Float64Array(cap);
+      _edgeOrder = new Int32Array(cap);
+    }
     for (let k = 0; k < consider.length; k++) {
       const t = consider[k];
       if (!mesh.isTriAlive(t)) continue;
       const i = t * 3;
-      const v = [T[i], T[i + 1], T[i + 2]];
+      const v0 = T[i], v1 = T[i + 1], v2 = T[i + 2];
       for (let e = 0; e < 3; e++) {
-        let a = v[e], b = v[(e + 1) % 3];
+        let a = e === 0 ? v0 : (e === 1 ? v1 : v2);
+        let b = e === 0 ? v1 : (e === 1 ? v2 : v0);
         if (a > b) { const s = a; a = b; b = s; }
-        const key = a * 2097152 + b;
-        if (seen.has(key)) continue;
-        seen.add(key);
         const pa = a * 3, pb = b * 3;
         const dx = P[pb] - P[pa], dy = P[pb + 1] - P[pa + 1], dz = P[pb + 2] - P[pa + 2];
         const l2 = dx * dx + dy * dy + dz * dz;
-        if (l2 >= collapseLen * collapseLen) continue;
+        if (l2 >= cl2) continue;
         // 両端がブラシ球内に入っている辺のみ
-        const max = (P[pa] - cx) ** 2 + (P[pa + 1] - cy) ** 2 + (P[pa + 2] - cz) ** 2;
-        const mbx = (P[pb] - cx) ** 2 + (P[pb + 1] - cy) ** 2 + (P[pb + 2] - cz) ** 2;
-        if (max > cr2 || mbx > cr2) continue;
-        edges.push(a, b, l2);
+        const da = (P[pa] - cx) ** 2 + (P[pa + 1] - cy) ** 2 + (P[pa + 2] - cz) ** 2;
+        if (da > cr2) continue;
+        const db = (P[pb] - cx) ** 2 + (P[pb + 1] - cy) ** 2 + (P[pb + 2] - cz) ** 2;
+        if (db > cr2) continue;
+        if (ne >= _edgeA.length) break;
+        _edgeA[ne] = a; _edgeB[ne] = b; _edgeL[ne] = l2; ne++;
       }
     }
-    // 短い辺から順に
-    const order = [];
-    for (let i = 0; i < edges.length; i += 3) order.push(i);
-    order.sort((x, y) => edges[x + 2] - edges[y + 2]);
+    // 短い辺から順に（インデックスだけ並べ替える）
+    const order = _orderList;
+    order.length = 0;
+    for (let i = 0; i < ne; i++) order.push(i);
+    const EL = _edgeL;
+    order.sort((x, y) => EL[x] - EL[y]);
     for (let k = 0; k < order.length; k++) {
       const i = order[k];
-      const a = edges[i], b = edges[i + 1];
+      const a = _edgeA[i], b = _edgeB[i];
       if (!mesh.isVertAlive(a) || !mesh.isVertAlive(b)) continue;
-      // 再計算（周囲が動いている可能性）
+      // 再計算（周囲が動いている / 既に別の辺で潰れている可能性）
       const pa = a * 3, pb = b * 3;
       const dx = P[pb] - P[pa], dy = P[pb + 1] - P[pa + 1], dz = P[pb + 2] - P[pa + 2];
-      if (dx * dx + dy * dy + dz * dz >= collapseLen * collapseLen) continue;
+      if (dx * dx + dy * dy + dz * dz >= cl2) continue;
       if (collapseEdge(mesh, a, b)) {
         changed = true;
         _touchedVerts.length = 0;
         _touchedVerts.push(a);
         mesh.computeNormalsFor(_touchedVerts);
+        // 位置が動いた頂点を呼び出し側へ知らせる。
+        // 辺分割は形状を変えない（分割後の面法線の和は元と同じ）ので、
+        // 法線を直す必要があるのはコラプスで動いたここだけ。
+        if (opt.moved) opt.moved.push(a);
       }
     }
   }

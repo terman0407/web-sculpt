@@ -77,7 +77,8 @@ export class SculptMesh {
     this.mask = growF32(this.mask, this.nv, cap);
     this.curv = growF32(this.curv, this.nv, cap);
     this.vAlive = growU8(this.vAlive, this.nv, cap);
-    for (let i = this.capV; i < cap; i++) this.ring.push(null);
+    // ring はスロットを使い回す（毎回作り直すと小さい配列の大量確保で GC が重くなる）
+    for (let i = this.ring.length; i < cap; i++) this.ring.push(null);
     this.capV = cap;
   }
 
@@ -124,7 +125,7 @@ export class SculptMesh {
     this.mask[v] = m;
     this.curv[v] = 0;
     this.vAlive[v] = 1;
-    this.ring[v] = [];
+    { const r = this.ring[v]; if (r) r.length = 0; else this.ring[v] = []; }
     this.liveVerts++;
     this.markVert(v);
     if (this.trackVerts) this.trackVerts.push(v);
@@ -158,7 +159,7 @@ export class SculptMesh {
   removeVertex(v) {
     if (!this.vAlive[v]) return;
     this.vAlive[v] = 0;
-    this.ring[v] = [];
+    { const r = this.ring[v]; if (r) r.length = 0; else this.ring[v] = []; }
     this.freeVerts.push(v);
     this.liveVerts--;
     this.topoVersion++;
@@ -291,6 +292,8 @@ export class SculptMesh {
    * 平均エッジ長で割ってスケール不変にする。凹 > 0 / 凸 < 0。
    * キャビティシェーディングと Relax ブラシで使う。
    */
+  // 辺長は二乗和の平方根（RMS）で代用する。平均長との差は正則なメッシュでは小さく、
+  // 陰影用の量なので実用上問題ない。内側ループから sqrt を丸ごと外せる。
   computeCurvatureFor(list, count = list.length) {
     const P = this.positions, N = this.normals, T = this.tris, CV = this.curv;
     for (let k = 0; k < count; k++) {
@@ -299,7 +302,7 @@ export class SculptMesh {
       if (!r || r.length === 0) { CV[v] = 0; continue; }
       const iv = v * 3;
       const px = P[iv], py = P[iv + 1], pz = P[iv + 2];
-      let sx = 0, sy = 0, sz = 0, elen = 0, cnt = 0;
+      let sx = 0, sy = 0, sz = 0, e2 = 0, cnt = 0;
       for (let j = 0; j < r.length; j++) {
         const ti = r[j] * 3;
         for (let e = 0; e < 3; e++) {
@@ -308,15 +311,14 @@ export class SculptMesh {
           const iu = u * 3;
           const dx = P[iu] - px, dy = P[iu + 1] - py, dz = P[iu + 2] - pz;
           sx += dx; sy += dy; sz += dz;
-          elen += Math.sqrt(dx * dx + dy * dy + dz * dz);
+          e2 += dx * dx + dy * dy + dz * dz;
           cnt++;
         }
       }
-      if (cnt === 0) { CV[v] = 0; continue; }
+      if (cnt === 0 || e2 <= 0) { CV[v] = 0; continue; }
       const inv = 1 / cnt;
-      const e = elen * inv;
-      if (e < 1e-12) { CV[v] = 0; continue; }
-      const d = (sx * inv * N[iv] + sy * inv * N[iv + 1] + sz * inv * N[iv + 2]) / e;
+      const e = Math.sqrt(e2 * inv);
+      const d = (sx * N[iv] + sy * N[iv + 1] + sz * N[iv + 2]) * inv / e;
       CV[v] = d < -1 ? -1 : (d > 1 ? 1 : d);
     }
   }
@@ -344,12 +346,67 @@ export class SculptMesh {
     for (let k = 0; k < count; k++) CV[list[k]] = tmp[k];
   }
 
+  /**
+   * 全頂点の曲率。ring[] を辿らず三角形を 1 回走査して隣接和を積む。
+   * 配列間接参照が消えるぶん、頂点ごとに ring を舐める版より数倍速い。
+   */
   computeAllCurvature() {
-    const all = new Int32Array(this.nv);
-    let n = 0;
-    for (let v = 0; v < this.nv; v++) if (this.vAlive[v]) all[n++] = v;
-    this.computeCurvatureFor(all, n);
-    this.smoothCurvatureFor(all, n);
+    const nv = this.nv;
+    if (nv === 0) return;
+    const P = this.positions, N = this.normals, T = this.tris, CV = this.curv;
+
+    if (!this._cvSum || this._cvSum.length < nv * 3) {
+      this._cvSum = new Float32Array(nv * 3);
+      this._cvE2 = new Float32Array(nv);
+      this._cvCnt = new Float32Array(nv);
+    }
+    const S = this._cvSum, E2 = this._cvE2, CN = this._cvCnt;
+    S.fill(0, 0, nv * 3); E2.fill(0, 0, nv); CN.fill(0, 0, nv);
+
+    for (let t = 0; t < this.nt; t++) {
+      const i = t * 3;
+      const ia = T[i], ib = T[i + 1], ic = T[i + 2];
+      if (ia === ib && ib === ic) continue;
+      const a = ia * 3, b = ib * 3, c = ic * 3;
+      const abx = P[b] - P[a], aby = P[b + 1] - P[a + 1], abz = P[b + 2] - P[a + 2];
+      const acx = P[c] - P[a], acy = P[c + 1] - P[a + 1], acz = P[c + 2] - P[a + 2];
+      const bcx = P[c] - P[b], bcy = P[c + 1] - P[b + 1], bcz = P[c + 2] - P[b + 2];
+      const lab = abx * abx + aby * aby + abz * abz;
+      const lac = acx * acx + acy * acy + acz * acz;
+      const lbc = bcx * bcx + bcy * bcy + bcz * bcz;
+      S[a] += abx + acx; S[a + 1] += aby + acy; S[a + 2] += abz + acz;
+      S[b] += bcx - abx; S[b + 1] += bcy - aby; S[b + 2] += bcz - abz;
+      S[c] += -acx - bcx; S[c + 1] += -acy - bcy; S[c + 2] += -acz - bcz;
+      E2[ia] += lab + lac; E2[ib] += lab + lbc; E2[ic] += lac + lbc;
+      CN[ia] += 2; CN[ib] += 2; CN[ic] += 2;
+    }
+
+    for (let v = 0; v < nv; v++) {
+      const cnt = CN[v];
+      if (cnt === 0 || E2[v] <= 0) { CV[v] = 0; continue; }
+      const iv = v * 3;
+      const inv = 1 / cnt;
+      const e = Math.sqrt(E2[v] * inv);
+      const d = (S[iv] * N[iv] + S[iv + 1] * N[iv + 1] + S[iv + 2] * N[iv + 2]) * inv / e;
+      CV[v] = d < -1 ? -1 : (d > 1 ? 1 : d);
+    }
+
+    // 平滑化も同じく三角形走査で
+    S.fill(0, 0, nv); CN.fill(0, 0, nv);
+    for (let t = 0; t < this.nt; t++) {
+      const i = t * 3;
+      const ia = T[i], ib = T[i + 1], ic = T[i + 2];
+      if (ia === ib && ib === ic) continue;
+      const ca = CV[ia], cb = CV[ib], cc = CV[ic];
+      S[ia] += cb + cc; S[ib] += cc + ca; S[ic] += ca + cb;
+      CN[ia] += 2; CN[ib] += 2; CN[ic] += 2;
+    }
+    const amount = 0.55;
+    for (let v = 0; v < nv; v++) {
+      const cnt = CN[v];
+      if (cnt === 0) continue;
+      CV[v] += (S[v] / cnt - CV[v]) * amount;
+    }
     this.markAllDirty();
   }
 
@@ -380,12 +437,17 @@ export class SculptMesh {
   }
 
   rebuildRings() {
-    for (let v = 0; v < this.nv; v++) this.ring[v] = this.vAlive[v] ? [] : [];
-    const T = this.tris;
+    const nv = this.nv, ring = this.ring, T = this.tris;
+    // 既存の配列を length=0 で再利用する（作り直すと nv 個ぶんの確保が発生する）
+    for (let v = 0; v < nv; v++) {
+      const r = ring[v];
+      if (r) r.length = 0; else ring[v] = [];
+    }
     for (let t = 0; t < this.nt; t++) {
       const i = t * 3;
-      if (T[i] === T[i + 1] && T[i + 1] === T[i + 2]) continue;
-      this._link(T[i], t); this._link(T[i + 1], t); this._link(T[i + 2], t);
+      const a = T[i], b = T[i + 1], c = T[i + 2];
+      if (a === b && b === c) continue;
+      ring[a].push(t); ring[b].push(t); ring[c].push(t);
     }
   }
 
@@ -442,7 +504,6 @@ export class SculptMesh {
     this.mask = new Float32Array(0);
     this.vAlive = new Uint8Array(0);
     this.tris = new Int32Array(0);
-    this.ring = [];
     this.nv = 0; this.nt = 0;
     this.freeVerts.length = 0; this.freeTris.length = 0;
     this._allocVerts(Math.max(1024, Math.ceil(nv * 1.5)));
@@ -463,7 +524,6 @@ export class SculptMesh {
     this.vAlive.fill(1, 0, nv);
     this.nv = nv;
     this.liveVerts = nv;
-    for (let v = 0; v < nv; v++) this.ring[v] = [];
 
     this.tris.set(indices);
     this.nt = nt;
@@ -521,7 +581,6 @@ export class SculptMesh {
     this.mask = new Float32Array(0);
     this.vAlive = new Uint8Array(0);
     this.tris = new Int32Array(0);
-    this.ring = [];
     this.nv = 0; this.nt = 0;
     this.freeVerts.length = 0; this.freeTris.length = 0;
     this._allocVerts(Math.max(1024, Math.ceil(nv * 1.4)));
@@ -533,7 +592,6 @@ export class SculptMesh {
     this.curv.set(CV.subarray(0, nv));
     this.vAlive.fill(1, 0, nv);
     this.nv = nv; this.liveVerts = nv;
-    for (let v = 0; v < nv; v++) this.ring[v] = [];
     this.tris.set(idx.subarray(0, nt * 3));
     this.nt = nt; this.liveTris = nt;
     this.rebuildRings();
