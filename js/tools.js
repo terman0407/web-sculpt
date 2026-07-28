@@ -20,6 +20,7 @@ import { Transpose } from './transpose.js';
 import { clipPlane, trimPlane, slicePlane, mirrorWeld, planeFromScreenLine, planeFromAxis } from './clip.js';
 import { STROKES, strokeDefaults } from './alpha.js';
 import { remesh, quadDominant, edgeLengthForTris } from './remesh.js';
+import { initRemeshWorker, remeshInWorker, remeshWorkerState, remeshWorkerError } from './remeshworker.js';
 import { clamp } from './math.js';
 
 /** 変形とマスク操作の既定パラメータ一式（state に置く） */
@@ -403,28 +404,70 @@ export class Tools {
 
   // --- リメッシュ（ZRemesher 相当） ----------------------------------------
 
-  /**
-   * 目標ポリゴン数でリメッシュする。
-   * トポロジが変わるので分割レベル・レイヤー・モーフは破棄される。
-   */
-  applyRemesh() {
+  /** UI の設定から remesh() のオプションを作る */
+  remeshOpts() {
     const st = this.state;
-    const m = this.mesh;
-    const before = m.liveTris;
-    const r = remesh(m, {
+    return {
       targetTris: Math.max(100, Math.round(st.remeshTris || 20000)),
       iterations: Math.max(1, Math.round(st.remeshIterations || 5)),
       adaptive: st.remeshAdaptive || 0,
       relax: st.remeshRelax === undefined ? 0.5 : st.remeshRelax,
       project: st.remeshProject !== false,
       maxVerts: st.maxVerts,
-    });
-    if (!r.ok) { this.toast('リメッシュできませんでした: ' + r.reason, 4000); return; }
-    this.afterTopologyChange();
+    };
+  }
+
+  _remeshToast(before, r, where) {
     this.toast(`リメッシュ: ${before.toLocaleString()} → ${r.tris.toLocaleString()} 面`
-      + ` / 目標辺長 ${r.targetLen.toFixed(4)} / ${r.ms}ms`
+      + ` / 目標辺長 ${r.targetLen.toFixed(4)} / ${r.ms}ms${where}`
       + `（分割 ${r.split} / 統合 ${r.collapse} / 反転 ${r.flip}）`, 5000);
   }
+
+  /**
+   * 目標ポリゴン数でリメッシュする（メインスレッド）。
+   * トポロジが変わるので分割レベル・レイヤー・モーフは破棄される。
+   */
+  applyRemesh() {
+    const m = this.mesh;
+    const before = m.liveTris;
+    const r = remesh(m, this.remeshOpts());
+    if (!r.ok) { this.toast('リメッシュできませんでした: ' + r.reason, 4000); return; }
+    this.afterTopologyChange();
+    this._remeshToast(before, r, '');
+  }
+
+  /**
+   * リメッシュをワーカーで走らせる。
+   *
+   * 520 万面だと 6 秒台かかる。メインスレッドで回すとビジー表示すら描き直されず
+   * ブラウザが固まって見える（実際にそう報告された）ので、別スレッドへ出して
+   * 進捗を出しながら待つ。ワーカーが使えない環境（file://、単一ファイル版、
+   * Worker 無効）では黙ってメインスレッドに落ちる。
+   *
+   * @param {(p: object) => void} [onProgress] { stage, done, total, tris } を受ける
+   * @returns {Promise<boolean>} ワーカーで実行できたか
+   */
+  async applyRemeshAsync(onProgress = null) {
+    const m = this.mesh;
+    const before = m.liveTris;
+    const ok = await initRemeshWorker();
+    if (!ok) { this.applyRemesh(); return false; }
+    const res = await remeshInWorker(m, this.remeshOpts(), onProgress);
+    if (!res) {
+      // ワーカーで失敗した。理由を出してメインスレッドでやり直す。
+      const why = remeshWorkerError();
+      if (why) console.warn('リメッシュのワーカー実行に失敗、メインスレッドで再試行:', why);
+      this.applyRemesh();
+      return false;
+    }
+    m.setGeometry(res.positions, res.indices, res.colors, res.mask);
+    this.afterTopologyChange();
+    this._remeshToast(before, res.stats, ' / 別スレッド');
+    return true;
+  }
+
+  /** リメッシュのワーカーが使える状態か（診断とテスト用） */
+  remeshWorkerInfo() { return { state: remeshWorkerState(), error: remeshWorkerError() }; }
 
   /** 現在の形を四角優勢にしたときの面の内訳（書き出しと表示用） */
   quadStats() {

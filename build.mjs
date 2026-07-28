@@ -135,7 +135,7 @@ let scriptWasm = script;
   if (b64) {
     const marker = "const WASM_B64 = '';";
     if (!script.includes(marker)) throw new Error('WASM_B64 のマーカーが見つかりません');
-    scriptWasm = script.replace(marker, `const WASM_B64 = '${b64}';`);
+    scriptWasm = script.replace(marker, () => `const WASM_B64 = '${b64}';`);
     console.log(`  wasm を埋め込み: ${(b64.length / 1024).toFixed(0)} KB (base64)`);
   }
 }
@@ -144,17 +144,23 @@ let scriptWasm = script;
 const css = readFileSync(join(ROOT, 'css', 'style.css'), 'utf8');
 let html = readFileSync(join(ROOT, 'index.html'), 'utf8');
 
+// 差し替えは必ず「関数の replacement」で行う。文字列で渡すと、埋め込む
+// 生成コード側の $& / $` / $' / $1 が置換パターンとして解釈され、消したはずの
+// タグや周辺の HTML が黙って混ざる。いまのソースには該当する並びが無いが、
+// 気付きにくい壊れ方をするので形で防いでおく。
 html = html.replace(
   /^[ \t]*<link rel="stylesheet"[^>]*>[ \t]*$/m,
-  `<style>\n${css.trimEnd()}\n</style>`,
+  () => `<style>\n${css.trimEnd()}\n</style>`,
 );
 if (html.includes('<link rel="stylesheet"')) throw new Error('CSS の差し替えに失敗しました');
 
 html = html.replace(
   /^[ \t]*<script type="module"[^>]*><\/script>[ \t]*$/m,
-  `<script>\n${scriptWasm}\n</script>`,
+  () => `<script>\n${scriptWasm}\n</script>`,
 );
-if (html.includes('type="module"')) throw new Error('スクリプトの差し替えに失敗しました');
+// タグの形で見る。素の 'type="module"' で見ると、埋め込んだスクリプト側に
+// この文字列（querySelector のセレクタ）があるだけで誤検出する。
+if (/<script\s+type="module"/.test(html)) throw new Error('スクリプトの差し替えに失敗しました');
 
 // file:// でも動く単一ファイルであることを明記
 html = html.replace(

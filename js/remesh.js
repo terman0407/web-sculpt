@@ -19,6 +19,7 @@
 // ---------------------------------------------------------------------------
 
 import { splitEdge, collapseEdge, flipEdge } from './dyntopo.js';
+import { RING_STRIDE } from './mesh.js';
 
 /** 点と三角形の最短距離の 2 乗と最近点（Ericson, Real-Time Collision Detection） */
 function closestOnTri(px, py, pz, ax, ay, az, bx, by, bz, cx, cy, cz, out) {
@@ -79,7 +80,15 @@ function closestOnTri(px, py, pz, ax, ay, az, bx, by, bz, cx, cy, cz, out) {
  * 移動量がセル 1 個ぶんに収まるため。1 セル分の近傍を見れば足りる。
  */
 export class SurfaceRef {
-  constructor(positions, indices, cellSize) {
+  /**
+   * @param {number} cellSize セルの一辺。**元メッシュの平均辺長**を渡すこと。
+   *   目標エッジ長（＝粗い側）を渡すと 1 セルに何十枚も入り、1 回の問い合わせで
+   *   1000 回近い点‐三角形判定になる（520 万面で 1 クエリ 25.5µs、
+   *   260 万頂点 × 5 反復で 330 秒）。
+   * @param {number} maxCells セル数の上限。細かくしすぎるとメモリが爆発するので、
+   *   超える場合はセルを大きくする。
+   */
+  constructor(positions, indices, cellSize, maxCells = 6e6) {
     this.P = positions;
     this.I = indices;
     const n = indices.length / 3;
@@ -93,7 +102,15 @@ export class SurfaceRef {
       if (positions[i + 2] < minZ) minZ = positions[i + 2];
       if (positions[i + 2] > maxZ) maxZ = positions[i + 2];
     }
-    const h = Math.max(cellSize, 1e-6);
+    let h = Math.max(cellSize, 1e-6);
+    // セル数が予算を超えるならセルを大きくする
+    for (let guard = 0; guard < 64; guard++) {
+      const cx = Math.ceil((maxX - minX) / h) + 3;
+      const cy = Math.ceil((maxY - minY) / h) + 3;
+      const cz = Math.ceil((maxZ - minZ) / h) + 3;
+      if (cx * cy * cz <= maxCells) break;
+      h *= 1.25;
+    }
     this.h = h;
     this.ox = minX - h; this.oy = minY - h; this.oz = minZ - h;
     this.nx = Math.max(1, Math.ceil((maxX - minX) / h) + 2);
@@ -143,9 +160,42 @@ export class SurfaceRef {
   _clampZ(i) { return i < 0 ? 0 : (i >= this.nz ? this.nz - 1 : i); }
 
   /**
+   * ヒントの三角形（前回この頂点で当たったもの）だけを試す軽量版。
+   *
+   * 緩和は頂点を接線方向へわずかに動かすだけなので、直前に当たった三角形が
+   * そのまま最近傍であることがほとんど。まずここで済ませると格子を引かずに終わる。
+   * 「その三角形の内部に落ちた」= 辺や頂点にクランプされていない場合だけ採用する
+   * （辺にクランプされたときは隣の三角形のほうが近い可能性がある）。
+   *
+   * ヒントは頂点スロット番号で持つので、分割・統合でスロットが再利用されると
+   * 死んだ頂点のヒントを新しい頂点が引き継いでしまう。そのまま採用すると
+   * 表面の遠い場所へ飛ぶ（実測で単位球のモデルを跨ぐ 1.71 のずれが出た）。
+   * maxD2 を超える距離のヒントは信用しないことで弾く。
+   *
+   * @param {number} maxD2 許容する距離の 2 乗。これを超えたら -1
+   * @returns {number} 採用できたら距離の 2 乗、できなければ -1
+   */
+  tryHint(px, py, pz, t, out, maxD2) {
+    if (t < 0) return -1;
+    const P = this.P, I = this.I;
+    const i = t * 3;
+    const a = I[i] * 3, b = I[i + 1] * 3, c = I[i + 2] * 3;
+    const d = closestOnTri(px, py, pz,
+      P[a], P[a + 1], P[a + 2], P[b], P[b + 1], P[b + 2], P[c], P[c + 1], P[c + 2], out);
+    // 最近点が三角形の内部か辺の内側にあるかを、重心座標を使わず
+    // 「3 頂点のどれとも一致しない」で近似する。頂点にクランプされた場合は
+    // 隣の面のほうが近いことがあるので却下する。
+    if (d > maxD2) return -1;                     // 使い回されたスロットの古いヒント
+    const ex = 1e-12;
+    const nearVert = (vi) => (out[0] - P[vi]) ** 2 + (out[1] - P[vi + 1]) ** 2 + (out[2] - P[vi + 2]) ** 2 < ex;
+    if (nearVert(a) || nearVert(b) || nearVert(c)) return -1;
+    return d;
+  }
+
+  /**
    * 点 (px,py,pz) に最も近い表面上の点を out へ入れる。
    * 見つからなければ false（元の点をそのまま使う）。
-   * ring を 1 から広げ、見つかったらもう 1 段だけ広げて確定する。
+   * @returns {number} 当たった三角形の番号（-1 で見つからず）。次回のヒントに使う。
    */
   closest(px, py, pz, out) {
     const h = this.h, P = this.P, I = this.I, tmp = this._c;
@@ -154,6 +204,7 @@ export class SurfaceRef {
     const ck = this._clampZ(Math.floor((pz - this.oz) / h));
     let best = Infinity;
     let found = false;
+    let bestTri = -1;
     const maxRing = 4;
     for (let ring = 0; ring <= maxRing; ring++) {
       const i0 = Math.max(0, ci - ring), i1 = Math.min(this.nx - 1, ci + ring);
@@ -166,7 +217,8 @@ export class SurfaceRef {
             if (ring > 0 && i > i0 && i < i1 && j > j0 && j < j1 && k > k0 && k < k1) continue;
             const c = i + j * this.nx + k * this.nx * this.ny;
             for (let q = this.off[c]; q < this.off[c + 1]; q++) {
-              const t = this.tri[q] * 3;
+              const ti = this.tri[q];
+              const t = ti * 3;
               const a = I[t] * 3, b = I[t + 1] * 3, cc = I[t + 2] * 3;
               const d = closestOnTri(px, py, pz,
                 P[a], P[a + 1], P[a + 2], P[b], P[b + 1], P[b + 2], P[cc], P[cc + 1], P[cc + 2], tmp);
@@ -174,15 +226,25 @@ export class SurfaceRef {
                 best = d;
                 out[0] = tmp[0]; out[1] = tmp[1]; out[2] = tmp[2];
                 found = true;
+                bestTri = ti;
               }
             }
           }
         }
       }
-      // 見つかったあと 1 段だけ余分に見る（斜めのセルに更に近い面がある場合に備える）
-      if (found && Math.sqrt(best) <= ring * h) break;
+      // この殻の外にはこれより近い面が無いと言えたら打ち切る
+      // 打ち切りの下界。「殻 ring まで見たら、未走査の点は少なくとも ring*h 先」
+      // という見方だと ring=0 で下界が 0 になり、必ず 27 セル（殻 1）まで
+      // 走査してしまう。実測で 1 クエリ 319 回の点-三角形判定になっていた。
+      // 走査済みボックスの面までの実距離を使うと下界が h/2 前後まで上がり、
+      // 表面上の点はほとんど殻 0（1 セル）で確定する。
+      const bound = Math.min(
+        px - (this.ox + (ci - ring) * h), (this.ox + (ci + ring + 1) * h) - px,
+        py - (this.oy + (cj - ring) * h), (this.oy + (cj + ring + 1) * h) - py,
+        pz - (this.oz + (ck - ring) * h), (this.oz + (ck + ring + 1) * h) - pz);
+      if (found && best <= bound * bound) break;
     }
-    return found;
+    return found ? bestTri : -1;
   }
 }
 
@@ -235,27 +297,42 @@ export function edgeLengthForTris(area, nTris) {
   return Math.sqrt((4 * area) / (Math.sqrt(3) * nTris));
 }
 
-/** 全辺を (a,b) の組で列挙する（a < b、重複なし） */
-function collectEdges(mesh, out) {
+/**
+ * 全辺を (a,b) の組で列挙する（a < b、重複なし）。
+ *
+ * Set にキーを入れて重複を弾く形だと 520 万面で 1 回 2.7 秒かかっていた
+ * （反復ごとに 3 回呼ぶので、それだけで 40 秒以上）。
+ * 頂点ごとにリングを舐めて「番号が自分より大きい隣接頂点」だけを出す形に変え、
+ * 重複判定は頂点数ぶんのスタンプ配列で O(1) にした。ハッシュも確保も無い。
+ */
+function collectEdges(mesh, out, stamp, stampId) {
   const T = mesh.tris;
-  const seen = new Set();
+  const RC = mesh.ringCount, RD = mesh.ringData, REX = mesh.ringExt;
   let n = 0;
-  for (let t = 0; t < mesh.nt; t++) {
-    const i = t * 3, a = T[i], b = T[i + 1], c = T[i + 2];
-    if (a === b && b === c) continue;
-    for (let e = 0; e < 3; e++) {
-      let x = e === 0 ? a : (e === 1 ? b : c);
-      let y = e === 0 ? b : (e === 1 ? c : a);
-      if (x > y) { const s = x; x = y; y = s; }
-      const key = x * 8388608 + y;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      if (n * 2 + 1 >= out.length) return n;
-      out[n * 2] = x; out[n * 2 + 1] = y;
-      n++;
+  let id = stampId;
+  const limit = out.length >> 1;
+  for (let v = 0; v < mesh.nv; v++) {
+    const rc = RC[v];
+    if (rc === 0 || !mesh.vAlive[v]) continue;
+    id++;
+    const inline = rc <= RING_STRIDE;
+    const base = inline ? v * RING_STRIDE : 0;
+    const ex = inline ? null : REX[v];
+    for (let j = 0; j < rc; j++) {
+      const ti = (inline ? RD[base + j] : ex[j]) * 3;
+      for (let e = 0; e < 3; e++) {
+        const u = T[ti + e];
+        // 各辺は「番号が小さい側の頂点」から 1 回だけ出す
+        if (u <= v) continue;
+        if (stamp[u] === id) continue;
+        stamp[u] = id;
+        if (n >= limit) return { n, stampId: id };
+        out[n * 2] = v; out[n * 2 + 1] = u;
+        n++;
+      }
     }
   }
-  return n;
+  return { n, stampId: id };
 }
 
 /**
@@ -285,6 +362,17 @@ export function remesh(mesh, opts = {}) {
   const relaxAmt = Math.max(0, Math.min(1, opts.relax ?? 0.5));
   const doProject = opts.project !== false;
   const maxVerts = Math.max(1000, opts.maxVerts || 2000000);
+  // 進捗の通知先（ワーカーから UI へ流すため）。同期処理なので、呼ばれた側で
+  // 描画はできない。ワーカー側で postMessage するのが前提。
+  const report = typeof opts.onProgress === 'function' ? opts.onProgress : null;
+  // 補正ラウンドが何回入るかは終わるまで分からないので、最大まで回ったときの
+  // パス数で割って進捗を出す。実際は途中で抜けるので最後は一気に 100% になる。
+  const estPasses = iterations + (opts.targetTris > 0 ? 6 : 0);
+  let donePasses = 0;
+  const tell = (stage) => {
+    if (!report) return;
+    report({ stage, done: donePasses, total: estPasses, tris: mesh.liveTris, verts: mesh.liveVerts });
+  };
 
   const area = surfaceArea(mesh);
   let L = opts.targetLen > 0 ? opts.targetLen : 0;
@@ -292,19 +380,31 @@ export function remesh(mesh, opts = {}) {
   if (!L) L = mesh.averageEdgeLength();
   if (!(L > 0)) return { ok: false, reason: '目標エッジ長を決められません' };
 
-  // 元の形を控えて投影の基準にする。格子のセルは目標エッジ長に合わせる
+  // 元の形を控えて投影の基準にする。
+  // セルは「元メッシュの平均辺長」に合わせる（目標エッジ長にすると 1 セルへ
+  // 何十枚も入って問い合わせが 1000 回近い判定になる）。
+  const srcEdge = mesh.averageEdgeLength();
+  tell('下準備');
   const ref = doProject ? new SurfaceRef(...(() => {
     const s = snapshot(mesh);
-    return [s.positions, s.indices, L];
+    return [s.positions, s.indices, Math.max(srcEdge, 1e-6)];
   })()) : null;
+  // 頂点ごとに「前回当たった三角形」を覚えておく。緩和の移動量は小さいので
+  // ほとんどの頂点は同じ面に当たり続け、格子を引かずに済む。
+  let projHint = doProject ? new Int32Array(mesh.capV).fill(-1) : null;
 
   // 曲率適応の重み。mesh.curv は -1..1 に正規化した平均曲率なので、
   // 絶対値が大きいほど（溝や稜線ほど）短いエッジを目標にする。
   // 真の曲率半径ではないが、彫刻の「見た目の細かさ」とはよく対応する。
   mesh.computeAllCurvature();
 
-  const stats = { split: 0, collapse: 0, flip: 0, relaxed: 0, projected: 0 };
+  const stats = { split: 0, collapse: 0, flip: 0, relaxed: 0, projected: 0, hinted: 0 };
+  const phase = { edges: 0, split: 0, collapse: 0, flip: 0, relax: 0, project: 0, normals: 0, curv: 0 };
+  const now = () => Date.now();
+  let scratchSum = null, scratchCnt = null;
   const edges = new Int32Array(Math.max(4096, mesh.capT * 6));
+  let edgeStamp = new Int32Array(mesh.capV);
+  let edgeStampId = 0;
   const tmp = new Float64Array(3);
   const target = new Float32Array(mesh.capV);
 
@@ -327,10 +427,11 @@ export function remesh(mesh, opts = {}) {
   for (let it = 0; it < n; it++) {
     // 分割で増えた頂点の curv は 0 のままなので、適応するなら毎回作り直す。
     // 作り直さないと新しい頂点が全部「平ら」扱いになり、適応がほとんど効かない。
-    if (adaptive > 0 && it > 0) mesh.computeAllCurvature();
+    if (adaptive > 0 && it > 0) { const _t = now(); mesh.computeAllCurvature(); phase.curv += now() - _t; }
     // --- 分割: 目標より 4/3 倍長い辺 -----------------------------------
+    tell('分割');
     if (mesh.liveVerts < maxVerts) {
-      const n = collectEdges(mesh, edges);
+      const _te = now(); const cr = collectEdges(mesh, edges, edgeStamp, edgeStampId); const n = cr.n; edgeStampId = cr.stampId; phase.edges += now() - _te; const _tp = now();
       const P = mesh.positions;
       for (let e = 0; e < n; e++) {
         if (mesh.liveVerts >= maxVerts) break;
@@ -341,11 +442,13 @@ export function remesh(mesh, opts = {}) {
         const lt = (localLen(a) + localLen(b)) * 0.5;
         if (d > lt * (4 / 3)) { if (splitEdge(mesh, a, b) >= 0) stats.split++; }
       }
+      phase.split += now() - _tp;
     }
 
     // --- コラプス: 目標より 4/5 倍短い辺 --------------------------------
+    tell('統合');
     {
-      const n = collectEdges(mesh, edges);
+      const _te = now(); const cr = collectEdges(mesh, edges, edgeStamp, edgeStampId); const n = cr.n; edgeStampId = cr.stampId; phase.edges += now() - _te; const _tp = now();
       const P = mesh.positions;
       for (let e = 0; e < n; e++) {
         const a = edges[e * 2], b = edges[e * 2 + 1];
@@ -355,30 +458,49 @@ export function remesh(mesh, opts = {}) {
         const lt = (localLen(a) + localLen(b)) * 0.5;
         if (d < lt * (4 / 5)) { if (collapseEdge(mesh, a, b)) stats.collapse++; }
       }
+      phase.collapse += now() - _tp;
     }
 
     // --- フリップ: 価数を 6 に近づける ----------------------------------
+    tell('整え');
     {
-      const n = collectEdges(mesh, edges);
+      const _te = now(); const cr = collectEdges(mesh, edges, edgeStamp, edgeStampId); const n = cr.n; edgeStampId = cr.stampId; phase.edges += now() - _te; const _tp = now();
       for (let e = 0; e < n; e++) {
         const a = edges[e * 2], b = edges[e * 2 + 1];
         if (!mesh.isVertAlive(a) || !mesh.isVertAlive(b)) continue;
         if (flipEdge(mesh, a, b)) stats.flip++;
       }
+      phase.flip += now() - _tp;
     }
 
     // --- 接線緩和 + 表面へ投影 -----------------------------------------
+    tell('投影');
     if (relaxAmt > 0) {
+      const _tn = now();
       mesh.computeAllNormals();
+      phase.normals += now() - _tn;
+      const _tr = now();
       if (target.length < mesh.capV * 3) {
         // 頂点が増えたので作り直す
         stats.grown = true;
       }
       const tgt = target.length >= mesh.capV * 3 ? target : new Float32Array(mesh.capV * 3);
       const P = mesh.positions, N = mesh.normals, T = mesh.tris;
-      // 1-ring の重心を三角形 1 周で積む（ring を辿るより速い）
-      const sum = new Float32Array(mesh.nv * 3);
-      const cnt = new Float32Array(mesh.nv);
+      // 1-ring の重心を三角形 1 周で積む（ring を辿るより速い）。
+      // スクラッチは使い回す。反復ごとに確保すると 260 万頂点で毎回 40MB になる。
+      if (!scratchSum || scratchSum.length < mesh.nv * 3) {
+        scratchSum = new Float32Array(mesh.capV * 3);
+        scratchCnt = new Float32Array(mesh.capV);
+      } else {
+        scratchSum.fill(0, 0, mesh.nv * 3);
+        scratchCnt.fill(0, 0, mesh.nv);
+      }
+      if (projHint && projHint.length < mesh.capV) {
+        const h2 = new Int32Array(mesh.capV).fill(-1);
+        h2.set(projHint);
+        projHint = h2;
+      }
+      const sum = scratchSum, cnt = scratchCnt;
       for (let t = 0; t < mesh.nt; t++) {
         const i = t * 3, a = T[i], b = T[i + 1], c = T[i + 2];
         if (a === b && b === c) continue;
@@ -402,11 +524,31 @@ export function remesh(mesh, opts = {}) {
         tgt[i + 2] = P[i + 2] + dz * relaxAmt;
         stats.relaxed++;
       }
+      phase.relax += now() - _tr;
+      const _tj = now();
+      // 動いていない頂点は投影しない。しきい値は目標辺長に対する相対値。
+      const moveEps = L * 1e-4;
+      const moveEps2 = moveEps * moveEps;
+      // ヒントとして信用できる距離。緩和で動く量は目標辺長の一部なので、
+      // これより遠い当たりは「別の頂点のヒントを引き継いだ」と判断する。
+      const hintMaxD2 = (L * 0.5) * (L * 0.5);
       for (let v = 0; v < mesh.nv; v++) {
         if (!mesh.vAlive[v] || cnt[v] === 0) continue;
         const i = v * 3;
+        const dx = tgt[i] - P[i], dy = tgt[i + 1] - P[i + 1], dz = tgt[i + 2] - P[i + 2];
+        if (dx * dx + dy * dy + dz * dz < moveEps2) continue;   // 実質動いていない
         if (ref) {
-          if (ref.closest(tgt[i], tgt[i + 1], tgt[i + 2], tmp)) {
+          // まず前回当たった面だけを試す。緩和の移動量は小さいので大半はここで済む。
+          const hint = projHint[v];
+          const dh = ref.tryHint(tgt[i], tgt[i + 1], tgt[i + 2], hint, tmp, hintMaxD2);
+          if (dh >= 0) {
+            P[i] = tmp[0]; P[i + 1] = tmp[1]; P[i + 2] = tmp[2];
+            stats.projected++; stats.hinted++;
+            continue;
+          }
+          const ti = ref.closest(tgt[i], tgt[i + 1], tgt[i + 2], tmp);
+          if (ti >= 0) {
+            projHint[v] = ti;
             P[i] = tmp[0]; P[i + 1] = tmp[1]; P[i + 2] = tmp[2];
             stats.projected++;
             continue;
@@ -414,7 +556,9 @@ export function remesh(mesh, opts = {}) {
         }
         P[i] = tgt[i]; P[i + 1] = tgt[i + 1]; P[i + 2] = tgt[i + 2];
       }
+      phase.project += now() - _tj;
     }
+    donePasses++;
   }
 
   };
@@ -433,6 +577,8 @@ export function remesh(mesh, opts = {}) {
     }
   }
 
+  donePasses = estPasses;
+  tell('仕上げ');
   mesh.compact(true);
   mesh.computeAllNormals();
   mesh.computeAllCurvature();
@@ -444,6 +590,7 @@ export function remesh(mesh, opts = {}) {
     ok: true, ms: Date.now() - t0,
     targetLen: L, area,
     verts: mesh.liveVerts, tris: mesh.liveTris,
+    phase,
     ...stats,
   };
 }

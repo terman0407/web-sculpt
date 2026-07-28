@@ -3650,7 +3650,7 @@ __M['dyntopo.js'] = (function () {
 // 操作をまたいでも有効（生存チェックだけすればよい）。
 // ---------------------------------------------------------------------------
 
-const { MAX_VERTS_HARD } = __M['mesh.js'];
+const { MAX_VERTS_HARD, RING_STRIDE } = __M['mesh.js'];
 
 const _sh = [];
 const _ringA = [];
@@ -3704,6 +3704,30 @@ function triNormal(P, ia, ib, ic, out) {
 const _n0 = new Float64Array(3);
 const _n1 = new Float64Array(3);
 
+// コラプスの作業用バッファ。リメッシュでは 1 回で数百万回呼ばれるので、
+// 呼び出しごとの確保をすべて無くしてある。
+// 以前は ringArray で 1 回に JS 配列を 3 個確保し、link condition を
+// 1-ring を JS 配列へ集めて indexOf で数える O(k^2) で見ていた。
+// 520 万面 → 2 万面のリメッシュでコラプスが 263 万回走るので、ここが支配的だった。
+let _cRingA = new Int32Array(64);
+let _cRingB = new Int32Array(64);
+let _nbStamp = new Int32Array(0);
+let _nbId = 0;
+
+/** 頂点 v の隣接三角形を out へ詰めて件数を返す（確保しない。足りなければ -1） */
+function ringInto(mesh, v, out) {
+  const c = mesh.ringCount[v];
+  if (out.length < c) return -1;
+  if (c <= RING_STRIDE) {
+    const b = v * RING_STRIDE, RD = mesh.ringData;
+    for (let j = 0; j < c; j++) out[j] = RD[b + j];
+  } else {
+    const ex = mesh.ringExt[v];
+    for (let j = 0; j < c; j++) out[j] = ex[j];
+  }
+  return c;
+}
+
 /**
  * 辺 (a,b) をコラプスして b を a に統合する。
  * 多様体性を壊さない link condition と法線反転チェックを通った場合のみ実行。
@@ -3713,16 +3737,45 @@ function collapseEdge(mesh, a, b, maxValence = 16) {
 
   mesh.trianglesWithEdge(a, b, _sh);
   if (_sh.length !== 2) return false;              // 境界 / 非多様体は触らない
-  const shared = [_sh[0], _sh[1]];
+  const s0 = _sh[0], s1 = _sh[1];
 
-  mesh.oneRing(a, _ringA);
-  mesh.oneRing(b, _ringB);
-  let common = 0;
-  for (let i = 0; i < _ringA.length; i++) {
-    if (_ringB.indexOf(_ringA[i]) >= 0) common++;
+  // 隣接三角形リストを確保なしで取る
+  if (_cRingA.length < mesh.ringCount[a]) _cRingA = new Int32Array(mesh.ringCount[a] * 2);
+  if (_cRingB.length < mesh.ringCount[b]) _cRingB = new Int32Array(mesh.ringCount[b] * 2);
+  const na = ringInto(mesh, a, _cRingA);
+  let nb = ringInto(mesh, b, _cRingB);
+  if (na < 0 || nb < 0) return false;
+
+  // link condition: 共通の隣接頂点がちょうど 2 個。
+  // 頂点数ぶんのスタンプ配列で O(k) にしてある。a 側を idA で、b 側を idB で
+  // マークし、b 側を走るときに「上書きする前に idA だったか」で共通数を数える。
+  if (_nbStamp.length < mesh.capV) _nbStamp = new Int32Array(mesh.capV);
+  const T = mesh.tris;
+  const idA = ++_nbId;
+  let valA = 0;
+  for (let k = 0; k < na; k++) {
+    const i = _cRingA[k] * 3;
+    for (let j = 0; j < 3; j++) {
+      const w = T[i + j];
+      if (w === a || _nbStamp[w] === idA) continue;
+      _nbStamp[w] = idA;
+      valA++;
+    }
+  }
+  const idB = ++_nbId;
+  let valB = 0, common = 0;
+  for (let k = 0; k < nb; k++) {
+    const i = _cRingB[k] * 3;
+    for (let j = 0; j < 3; j++) {
+      const w = T[i + j];
+      if (w === b || _nbStamp[w] === idB) continue;
+      if (_nbStamp[w] === idA) common++;
+      _nbStamp[w] = idB;
+      valB++;
+    }
   }
   if (common !== 2) return false;                  // link condition
-  if (_ringA.length + _ringB.length - 4 > maxValence) return false;
+  if (valA + valB - 4 > maxValence) return false;
 
   const P = mesh.positions;
   const ia = a * 3, ib = b * 3;
@@ -3731,12 +3784,11 @@ function collapseEdge(mesh, a, b, maxValence = 16) {
   const px = (nax + nbx) * 0.5, py = (nay + nby) * 0.5, pz = (naz + nbz) * 0.5;
 
   // --- 反転 / 退化チェック（実際に動かす前に予測法線で判定） ---
-  const ringA = mesh.ringArray(a), ringB = mesh.ringArray(b);
-  const check = (tris, moved) => {
-    for (let k = 0; k < tris.length; k++) {
+  const check = (tris, n, moved) => {
+    for (let k = 0; k < n; k++) {
       const t = tris[k];
-      if (t === shared[0] || t === shared[1]) continue;
-      const i = t * 3, T = mesh.tris;
+      if (t === s0 || t === s1) continue;
+      const i = t * 3;
       triNormal(P, T[i], T[i + 1], T[i + 2], _n0);
       const v0 = T[i] === moved ? a : T[i];
       const v1 = T[i + 1] === moved ? a : T[i + 1];
@@ -3754,8 +3806,8 @@ function collapseEdge(mesh, a, b, maxValence = 16) {
     }
     return true;
   };
-  if (!check(ringB, b)) return false;
-  if (!check(ringA, a)) return false;
+  if (!check(_cRingB, nb, b)) return false;
+  if (!check(_cRingA, na, a)) return false;
 
   // --- 実行 ---
   P[ia] = px; P[ia + 1] = py; P[ia + 2] = pz;
@@ -3766,19 +3818,18 @@ function collapseEdge(mesh, a, b, maxValence = 16) {
   mesh.mask[a] = (mesh.mask[a] + mesh.mask[b]) * 0.5;
   mesh.markVert(a);
 
-  mesh.removeTriangle(shared[0]);
-  mesh.removeTriangle(shared[1]);
+  mesh.removeTriangle(s0);
+  mesh.removeTriangle(s1);
 
-  const bt = mesh.ringArray(b);
-  const T = mesh.tris;
-  for (let k = 0; k < bt.length; k++) {
-    const t = bt[k], i = t * 3;
+  // b の隣接三角形は removeTriangle で変わっているので取り直す
+  nb = ringInto(mesh, b, _cRingB);
+  for (let k = 0; k < nb; k++) {
+    const t = _cRingB[k], i = t * 3;
     mesh.setTriangle(t, T[i] === b ? a : T[i], T[i + 1] === b ? a : T[i + 1], T[i + 2] === b ? a : T[i + 2]);
   }
   mesh.removeVertex(b);
   return true;
 }
-
 /**
  * 辺 (a,b) を反対側の対角線へ張り替える（エッジフリップ）。
  *
@@ -14997,6 +15048,7 @@ __M['remesh.js'] = (function () {
 // ---------------------------------------------------------------------------
 
 const { splitEdge, collapseEdge, flipEdge } = __M['dyntopo.js'];
+const { RING_STRIDE } = __M['mesh.js'];
 
 /** 点と三角形の最短距離の 2 乗と最近点（Ericson, Real-Time Collision Detection） */
 function closestOnTri(px, py, pz, ax, ay, az, bx, by, bz, cx, cy, cz, out) {
@@ -15057,7 +15109,15 @@ function closestOnTri(px, py, pz, ax, ay, az, bx, by, bz, cx, cy, cz, out) {
  * 移動量がセル 1 個ぶんに収まるため。1 セル分の近傍を見れば足りる。
  */
 class SurfaceRef {
-  constructor(positions, indices, cellSize) {
+  /**
+   * @param {number} cellSize セルの一辺。**元メッシュの平均辺長**を渡すこと。
+   *   目標エッジ長（＝粗い側）を渡すと 1 セルに何十枚も入り、1 回の問い合わせで
+   *   1000 回近い点‐三角形判定になる（520 万面で 1 クエリ 25.5µs、
+   *   260 万頂点 × 5 反復で 330 秒）。
+   * @param {number} maxCells セル数の上限。細かくしすぎるとメモリが爆発するので、
+   *   超える場合はセルを大きくする。
+   */
+  constructor(positions, indices, cellSize, maxCells = 6e6) {
     this.P = positions;
     this.I = indices;
     const n = indices.length / 3;
@@ -15071,7 +15131,15 @@ class SurfaceRef {
       if (positions[i + 2] < minZ) minZ = positions[i + 2];
       if (positions[i + 2] > maxZ) maxZ = positions[i + 2];
     }
-    const h = Math.max(cellSize, 1e-6);
+    let h = Math.max(cellSize, 1e-6);
+    // セル数が予算を超えるならセルを大きくする
+    for (let guard = 0; guard < 64; guard++) {
+      const cx = Math.ceil((maxX - minX) / h) + 3;
+      const cy = Math.ceil((maxY - minY) / h) + 3;
+      const cz = Math.ceil((maxZ - minZ) / h) + 3;
+      if (cx * cy * cz <= maxCells) break;
+      h *= 1.25;
+    }
     this.h = h;
     this.ox = minX - h; this.oy = minY - h; this.oz = minZ - h;
     this.nx = Math.max(1, Math.ceil((maxX - minX) / h) + 2);
@@ -15121,9 +15189,42 @@ class SurfaceRef {
   _clampZ(i) { return i < 0 ? 0 : (i >= this.nz ? this.nz - 1 : i); }
 
   /**
+   * ヒントの三角形（前回この頂点で当たったもの）だけを試す軽量版。
+   *
+   * 緩和は頂点を接線方向へわずかに動かすだけなので、直前に当たった三角形が
+   * そのまま最近傍であることがほとんど。まずここで済ませると格子を引かずに終わる。
+   * 「その三角形の内部に落ちた」= 辺や頂点にクランプされていない場合だけ採用する
+   * （辺にクランプされたときは隣の三角形のほうが近い可能性がある）。
+   *
+   * ヒントは頂点スロット番号で持つので、分割・統合でスロットが再利用されると
+   * 死んだ頂点のヒントを新しい頂点が引き継いでしまう。そのまま採用すると
+   * 表面の遠い場所へ飛ぶ（実測で単位球のモデルを跨ぐ 1.71 のずれが出た）。
+   * maxD2 を超える距離のヒントは信用しないことで弾く。
+   *
+   * @param {number} maxD2 許容する距離の 2 乗。これを超えたら -1
+   * @returns {number} 採用できたら距離の 2 乗、できなければ -1
+   */
+  tryHint(px, py, pz, t, out, maxD2) {
+    if (t < 0) return -1;
+    const P = this.P, I = this.I;
+    const i = t * 3;
+    const a = I[i] * 3, b = I[i + 1] * 3, c = I[i + 2] * 3;
+    const d = closestOnTri(px, py, pz,
+      P[a], P[a + 1], P[a + 2], P[b], P[b + 1], P[b + 2], P[c], P[c + 1], P[c + 2], out);
+    // 最近点が三角形の内部か辺の内側にあるかを、重心座標を使わず
+    // 「3 頂点のどれとも一致しない」で近似する。頂点にクランプされた場合は
+    // 隣の面のほうが近いことがあるので却下する。
+    if (d > maxD2) return -1;                     // 使い回されたスロットの古いヒント
+    const ex = 1e-12;
+    const nearVert = (vi) => (out[0] - P[vi]) ** 2 + (out[1] - P[vi + 1]) ** 2 + (out[2] - P[vi + 2]) ** 2 < ex;
+    if (nearVert(a) || nearVert(b) || nearVert(c)) return -1;
+    return d;
+  }
+
+  /**
    * 点 (px,py,pz) に最も近い表面上の点を out へ入れる。
    * 見つからなければ false（元の点をそのまま使う）。
-   * ring を 1 から広げ、見つかったらもう 1 段だけ広げて確定する。
+   * @returns {number} 当たった三角形の番号（-1 で見つからず）。次回のヒントに使う。
    */
   closest(px, py, pz, out) {
     const h = this.h, P = this.P, I = this.I, tmp = this._c;
@@ -15132,6 +15233,7 @@ class SurfaceRef {
     const ck = this._clampZ(Math.floor((pz - this.oz) / h));
     let best = Infinity;
     let found = false;
+    let bestTri = -1;
     const maxRing = 4;
     for (let ring = 0; ring <= maxRing; ring++) {
       const i0 = Math.max(0, ci - ring), i1 = Math.min(this.nx - 1, ci + ring);
@@ -15144,7 +15246,8 @@ class SurfaceRef {
             if (ring > 0 && i > i0 && i < i1 && j > j0 && j < j1 && k > k0 && k < k1) continue;
             const c = i + j * this.nx + k * this.nx * this.ny;
             for (let q = this.off[c]; q < this.off[c + 1]; q++) {
-              const t = this.tri[q] * 3;
+              const ti = this.tri[q];
+              const t = ti * 3;
               const a = I[t] * 3, b = I[t + 1] * 3, cc = I[t + 2] * 3;
               const d = closestOnTri(px, py, pz,
                 P[a], P[a + 1], P[a + 2], P[b], P[b + 1], P[b + 2], P[cc], P[cc + 1], P[cc + 2], tmp);
@@ -15152,15 +15255,25 @@ class SurfaceRef {
                 best = d;
                 out[0] = tmp[0]; out[1] = tmp[1]; out[2] = tmp[2];
                 found = true;
+                bestTri = ti;
               }
             }
           }
         }
       }
-      // 見つかったあと 1 段だけ余分に見る（斜めのセルに更に近い面がある場合に備える）
-      if (found && Math.sqrt(best) <= ring * h) break;
+      // この殻の外にはこれより近い面が無いと言えたら打ち切る
+      // 打ち切りの下界。「殻 ring まで見たら、未走査の点は少なくとも ring*h 先」
+      // という見方だと ring=0 で下界が 0 になり、必ず 27 セル（殻 1）まで
+      // 走査してしまう。実測で 1 クエリ 319 回の点-三角形判定になっていた。
+      // 走査済みボックスの面までの実距離を使うと下界が h/2 前後まで上がり、
+      // 表面上の点はほとんど殻 0（1 セル）で確定する。
+      const bound = Math.min(
+        px - (this.ox + (ci - ring) * h), (this.ox + (ci + ring + 1) * h) - px,
+        py - (this.oy + (cj - ring) * h), (this.oy + (cj + ring + 1) * h) - py,
+        pz - (this.oz + (ck - ring) * h), (this.oz + (ck + ring + 1) * h) - pz);
+      if (found && best <= bound * bound) break;
     }
-    return found;
+    return found ? bestTri : -1;
   }
 }
 
@@ -15213,27 +15326,42 @@ function edgeLengthForTris(area, nTris) {
   return Math.sqrt((4 * area) / (Math.sqrt(3) * nTris));
 }
 
-/** 全辺を (a,b) の組で列挙する（a < b、重複なし） */
-function collectEdges(mesh, out) {
+/**
+ * 全辺を (a,b) の組で列挙する（a < b、重複なし）。
+ *
+ * Set にキーを入れて重複を弾く形だと 520 万面で 1 回 2.7 秒かかっていた
+ * （反復ごとに 3 回呼ぶので、それだけで 40 秒以上）。
+ * 頂点ごとにリングを舐めて「番号が自分より大きい隣接頂点」だけを出す形に変え、
+ * 重複判定は頂点数ぶんのスタンプ配列で O(1) にした。ハッシュも確保も無い。
+ */
+function collectEdges(mesh, out, stamp, stampId) {
   const T = mesh.tris;
-  const seen = new Set();
+  const RC = mesh.ringCount, RD = mesh.ringData, REX = mesh.ringExt;
   let n = 0;
-  for (let t = 0; t < mesh.nt; t++) {
-    const i = t * 3, a = T[i], b = T[i + 1], c = T[i + 2];
-    if (a === b && b === c) continue;
-    for (let e = 0; e < 3; e++) {
-      let x = e === 0 ? a : (e === 1 ? b : c);
-      let y = e === 0 ? b : (e === 1 ? c : a);
-      if (x > y) { const s = x; x = y; y = s; }
-      const key = x * 8388608 + y;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      if (n * 2 + 1 >= out.length) return n;
-      out[n * 2] = x; out[n * 2 + 1] = y;
-      n++;
+  let id = stampId;
+  const limit = out.length >> 1;
+  for (let v = 0; v < mesh.nv; v++) {
+    const rc = RC[v];
+    if (rc === 0 || !mesh.vAlive[v]) continue;
+    id++;
+    const inline = rc <= RING_STRIDE;
+    const base = inline ? v * RING_STRIDE : 0;
+    const ex = inline ? null : REX[v];
+    for (let j = 0; j < rc; j++) {
+      const ti = (inline ? RD[base + j] : ex[j]) * 3;
+      for (let e = 0; e < 3; e++) {
+        const u = T[ti + e];
+        // 各辺は「番号が小さい側の頂点」から 1 回だけ出す
+        if (u <= v) continue;
+        if (stamp[u] === id) continue;
+        stamp[u] = id;
+        if (n >= limit) return { n, stampId: id };
+        out[n * 2] = v; out[n * 2 + 1] = u;
+        n++;
+      }
     }
   }
-  return n;
+  return { n, stampId: id };
 }
 
 /**
@@ -15263,6 +15391,17 @@ function remesh(mesh, opts = {}) {
   const relaxAmt = Math.max(0, Math.min(1, opts.relax ?? 0.5));
   const doProject = opts.project !== false;
   const maxVerts = Math.max(1000, opts.maxVerts || 2000000);
+  // 進捗の通知先（ワーカーから UI へ流すため）。同期処理なので、呼ばれた側で
+  // 描画はできない。ワーカー側で postMessage するのが前提。
+  const report = typeof opts.onProgress === 'function' ? opts.onProgress : null;
+  // 補正ラウンドが何回入るかは終わるまで分からないので、最大まで回ったときの
+  // パス数で割って進捗を出す。実際は途中で抜けるので最後は一気に 100% になる。
+  const estPasses = iterations + (opts.targetTris > 0 ? 6 : 0);
+  let donePasses = 0;
+  const tell = (stage) => {
+    if (!report) return;
+    report({ stage, done: donePasses, total: estPasses, tris: mesh.liveTris, verts: mesh.liveVerts });
+  };
 
   const area = surfaceArea(mesh);
   let L = opts.targetLen > 0 ? opts.targetLen : 0;
@@ -15270,19 +15409,31 @@ function remesh(mesh, opts = {}) {
   if (!L) L = mesh.averageEdgeLength();
   if (!(L > 0)) return { ok: false, reason: '目標エッジ長を決められません' };
 
-  // 元の形を控えて投影の基準にする。格子のセルは目標エッジ長に合わせる
+  // 元の形を控えて投影の基準にする。
+  // セルは「元メッシュの平均辺長」に合わせる（目標エッジ長にすると 1 セルへ
+  // 何十枚も入って問い合わせが 1000 回近い判定になる）。
+  const srcEdge = mesh.averageEdgeLength();
+  tell('下準備');
   const ref = doProject ? new SurfaceRef(...(() => {
     const s = snapshot(mesh);
-    return [s.positions, s.indices, L];
+    return [s.positions, s.indices, Math.max(srcEdge, 1e-6)];
   })()) : null;
+  // 頂点ごとに「前回当たった三角形」を覚えておく。緩和の移動量は小さいので
+  // ほとんどの頂点は同じ面に当たり続け、格子を引かずに済む。
+  let projHint = doProject ? new Int32Array(mesh.capV).fill(-1) : null;
 
   // 曲率適応の重み。mesh.curv は -1..1 に正規化した平均曲率なので、
   // 絶対値が大きいほど（溝や稜線ほど）短いエッジを目標にする。
   // 真の曲率半径ではないが、彫刻の「見た目の細かさ」とはよく対応する。
   mesh.computeAllCurvature();
 
-  const stats = { split: 0, collapse: 0, flip: 0, relaxed: 0, projected: 0 };
+  const stats = { split: 0, collapse: 0, flip: 0, relaxed: 0, projected: 0, hinted: 0 };
+  const phase = { edges: 0, split: 0, collapse: 0, flip: 0, relax: 0, project: 0, normals: 0, curv: 0 };
+  const now = () => Date.now();
+  let scratchSum = null, scratchCnt = null;
   const edges = new Int32Array(Math.max(4096, mesh.capT * 6));
+  let edgeStamp = new Int32Array(mesh.capV);
+  let edgeStampId = 0;
   const tmp = new Float64Array(3);
   const target = new Float32Array(mesh.capV);
 
@@ -15305,10 +15456,11 @@ function remesh(mesh, opts = {}) {
   for (let it = 0; it < n; it++) {
     // 分割で増えた頂点の curv は 0 のままなので、適応するなら毎回作り直す。
     // 作り直さないと新しい頂点が全部「平ら」扱いになり、適応がほとんど効かない。
-    if (adaptive > 0 && it > 0) mesh.computeAllCurvature();
+    if (adaptive > 0 && it > 0) { const _t = now(); mesh.computeAllCurvature(); phase.curv += now() - _t; }
     // --- 分割: 目標より 4/3 倍長い辺 -----------------------------------
+    tell('分割');
     if (mesh.liveVerts < maxVerts) {
-      const n = collectEdges(mesh, edges);
+      const _te = now(); const cr = collectEdges(mesh, edges, edgeStamp, edgeStampId); const n = cr.n; edgeStampId = cr.stampId; phase.edges += now() - _te; const _tp = now();
       const P = mesh.positions;
       for (let e = 0; e < n; e++) {
         if (mesh.liveVerts >= maxVerts) break;
@@ -15319,11 +15471,13 @@ function remesh(mesh, opts = {}) {
         const lt = (localLen(a) + localLen(b)) * 0.5;
         if (d > lt * (4 / 3)) { if (splitEdge(mesh, a, b) >= 0) stats.split++; }
       }
+      phase.split += now() - _tp;
     }
 
     // --- コラプス: 目標より 4/5 倍短い辺 --------------------------------
+    tell('統合');
     {
-      const n = collectEdges(mesh, edges);
+      const _te = now(); const cr = collectEdges(mesh, edges, edgeStamp, edgeStampId); const n = cr.n; edgeStampId = cr.stampId; phase.edges += now() - _te; const _tp = now();
       const P = mesh.positions;
       for (let e = 0; e < n; e++) {
         const a = edges[e * 2], b = edges[e * 2 + 1];
@@ -15333,30 +15487,49 @@ function remesh(mesh, opts = {}) {
         const lt = (localLen(a) + localLen(b)) * 0.5;
         if (d < lt * (4 / 5)) { if (collapseEdge(mesh, a, b)) stats.collapse++; }
       }
+      phase.collapse += now() - _tp;
     }
 
     // --- フリップ: 価数を 6 に近づける ----------------------------------
+    tell('整え');
     {
-      const n = collectEdges(mesh, edges);
+      const _te = now(); const cr = collectEdges(mesh, edges, edgeStamp, edgeStampId); const n = cr.n; edgeStampId = cr.stampId; phase.edges += now() - _te; const _tp = now();
       for (let e = 0; e < n; e++) {
         const a = edges[e * 2], b = edges[e * 2 + 1];
         if (!mesh.isVertAlive(a) || !mesh.isVertAlive(b)) continue;
         if (flipEdge(mesh, a, b)) stats.flip++;
       }
+      phase.flip += now() - _tp;
     }
 
     // --- 接線緩和 + 表面へ投影 -----------------------------------------
+    tell('投影');
     if (relaxAmt > 0) {
+      const _tn = now();
       mesh.computeAllNormals();
+      phase.normals += now() - _tn;
+      const _tr = now();
       if (target.length < mesh.capV * 3) {
         // 頂点が増えたので作り直す
         stats.grown = true;
       }
       const tgt = target.length >= mesh.capV * 3 ? target : new Float32Array(mesh.capV * 3);
       const P = mesh.positions, N = mesh.normals, T = mesh.tris;
-      // 1-ring の重心を三角形 1 周で積む（ring を辿るより速い）
-      const sum = new Float32Array(mesh.nv * 3);
-      const cnt = new Float32Array(mesh.nv);
+      // 1-ring の重心を三角形 1 周で積む（ring を辿るより速い）。
+      // スクラッチは使い回す。反復ごとに確保すると 260 万頂点で毎回 40MB になる。
+      if (!scratchSum || scratchSum.length < mesh.nv * 3) {
+        scratchSum = new Float32Array(mesh.capV * 3);
+        scratchCnt = new Float32Array(mesh.capV);
+      } else {
+        scratchSum.fill(0, 0, mesh.nv * 3);
+        scratchCnt.fill(0, 0, mesh.nv);
+      }
+      if (projHint && projHint.length < mesh.capV) {
+        const h2 = new Int32Array(mesh.capV).fill(-1);
+        h2.set(projHint);
+        projHint = h2;
+      }
+      const sum = scratchSum, cnt = scratchCnt;
       for (let t = 0; t < mesh.nt; t++) {
         const i = t * 3, a = T[i], b = T[i + 1], c = T[i + 2];
         if (a === b && b === c) continue;
@@ -15380,11 +15553,31 @@ function remesh(mesh, opts = {}) {
         tgt[i + 2] = P[i + 2] + dz * relaxAmt;
         stats.relaxed++;
       }
+      phase.relax += now() - _tr;
+      const _tj = now();
+      // 動いていない頂点は投影しない。しきい値は目標辺長に対する相対値。
+      const moveEps = L * 1e-4;
+      const moveEps2 = moveEps * moveEps;
+      // ヒントとして信用できる距離。緩和で動く量は目標辺長の一部なので、
+      // これより遠い当たりは「別の頂点のヒントを引き継いだ」と判断する。
+      const hintMaxD2 = (L * 0.5) * (L * 0.5);
       for (let v = 0; v < mesh.nv; v++) {
         if (!mesh.vAlive[v] || cnt[v] === 0) continue;
         const i = v * 3;
+        const dx = tgt[i] - P[i], dy = tgt[i + 1] - P[i + 1], dz = tgt[i + 2] - P[i + 2];
+        if (dx * dx + dy * dy + dz * dz < moveEps2) continue;   // 実質動いていない
         if (ref) {
-          if (ref.closest(tgt[i], tgt[i + 1], tgt[i + 2], tmp)) {
+          // まず前回当たった面だけを試す。緩和の移動量は小さいので大半はここで済む。
+          const hint = projHint[v];
+          const dh = ref.tryHint(tgt[i], tgt[i + 1], tgt[i + 2], hint, tmp, hintMaxD2);
+          if (dh >= 0) {
+            P[i] = tmp[0]; P[i + 1] = tmp[1]; P[i + 2] = tmp[2];
+            stats.projected++; stats.hinted++;
+            continue;
+          }
+          const ti = ref.closest(tgt[i], tgt[i + 1], tgt[i + 2], tmp);
+          if (ti >= 0) {
+            projHint[v] = ti;
             P[i] = tmp[0]; P[i + 1] = tmp[1]; P[i + 2] = tmp[2];
             stats.projected++;
             continue;
@@ -15392,7 +15585,9 @@ function remesh(mesh, opts = {}) {
         }
         P[i] = tgt[i]; P[i + 1] = tgt[i + 1]; P[i + 2] = tgt[i + 2];
       }
+      phase.project += now() - _tj;
     }
+    donePasses++;
   }
 
   };
@@ -15411,6 +15606,8 @@ function remesh(mesh, opts = {}) {
     }
   }
 
+  donePasses = estPasses;
+  tell('仕上げ');
   mesh.compact(true);
   mesh.computeAllNormals();
   mesh.computeAllCurvature();
@@ -15422,6 +15619,7 @@ function remesh(mesh, opts = {}) {
     ok: true, ms: Date.now() - t0,
     targetLen: L, area,
     verts: mesh.liveVerts, tris: mesh.liveTris,
+    phase,
     ...stats,
   };
 }
@@ -15531,6 +15729,237 @@ function quadDominant(mesh) {
   return { SurfaceRef, edgeLengthForTris, remesh, quadDominant };
 })();
 
+/* ===== remeshworker.js ===== */
+__M['remeshworker.js'] = (function () {
+// ---------------------------------------------------------------------------
+// remeshworker.js
+// リメッシュを Web Worker で走らせる。
+//
+// 6 秒かかる処理をメインスレッドで回すと、ビジー表示すら描き直されずに
+// ブラウザが固まる（実際にそう報告された）。ワーカーへ出せば UI は 144fps を
+// 保ったまま進捗を出せる。
+//
+// メッシュそのもの（SculptMesh）は送れないので (positions, indices) を渡し、
+// 結果の (positions, indices) を受け取って setGeometry で差し替える。
+// リメッシュはトポロジを作り直す操作なので、この粒度でちょうどよい。
+//
+// ワーカー本体は「モジュール URL を受け取って動的 import する薄い殻」にしてある。
+// remesh の実装を文字列へ埋めると同じアルゴリズムを 2 か所に持つことになり、
+// 片方だけ直してずれる。殻だけならずれようがない。
+//
+// ワーカーが使えない環境（file://、単一ファイル版、Worker 無効）では
+// initRemeshWorker() が false を返し、呼び出し側がメインスレッドで実行する。
+// ---------------------------------------------------------------------------
+
+// ワーカーは「モジュール URL を受け取って import する」だけの薄い殻にする。
+// これなら remesh の実装はワーカー側でも本体と同じものが 1 つだけになる。
+const WORKER_SRC = `
+let remeshMod = null, meshMod = null;
+let jid = 0;
+self.onmessage = async (ev) => {
+  const m = ev.data;
+  jid = m.id || 0;
+  try {
+    if (m.type === 'init') {
+      remeshMod = await import(m.url);
+      meshMod = await import(m.meshUrl);
+      self.postMessage({ type: 'ready' });
+      return;
+    }
+    if (m.type === 'remesh') {
+      const { positions, indices, opts } = m;
+      // ワーカー側で SculptMesh を組んでリメッシュし、結果を返す
+      const mesh = new meshMod.SculptMesh();
+      mesh.setGeometry(positions, indices, m.colors || null, m.mask || null);
+      const r = remeshMod.remesh(mesh, Object.assign({}, opts, {
+        onProgress: (p) => { self.postMessage({ type: 'progress', id: m.id, p }); },
+      }));
+      if (!r.ok) { self.postMessage({ type: 'done', id: m.id, ok: false, reason: r.reason }); return; }
+      // 生きているものだけ詰め直して返す
+      const nv = mesh.liveVerts;
+      const remap = new Int32Array(mesh.nv).fill(-1);
+      let w = 0;
+      for (let v = 0; v < mesh.nv; v++) if (mesh.vAlive[v]) remap[v] = w++;
+      const P = new Float32Array(nv * 3);
+      const C = new Float32Array(nv * 3);
+      const MK = new Float32Array(nv);
+      for (let v = 0; v < mesh.nv; v++) {
+        const rr = remap[v];
+        if (rr < 0) continue;
+        P[rr * 3] = mesh.positions[v * 3];
+        P[rr * 3 + 1] = mesh.positions[v * 3 + 1];
+        P[rr * 3 + 2] = mesh.positions[v * 3 + 2];
+        C[rr * 3] = mesh.colors[v * 3];
+        C[rr * 3 + 1] = mesh.colors[v * 3 + 1];
+        C[rr * 3 + 2] = mesh.colors[v * 3 + 2];
+        MK[rr] = mesh.mask[v];
+      }
+      const I = new Uint32Array(mesh.liveTris * 3);
+      let q = 0;
+      for (let t = 0; t < mesh.nt; t++) {
+        const i = t * 3, a = mesh.tris[i], b = mesh.tris[i + 1], c = mesh.tris[i + 2];
+        if (a === b && b === c) continue;
+        I[q++] = remap[a]; I[q++] = remap[b]; I[q++] = remap[c];
+      }
+      self.postMessage({
+        type: 'done', id: m.id, ok: true, stats: r,
+        positions: P, indices: I, colors: C, mask: MK,
+      }, [P.buffer, I.buffer, C.buffer, MK.buffer]);
+      return;
+    }
+  } catch (err) {
+    self.postMessage({ type: 'error', id: jid, message: String((err && err.stack) || err) });
+  }
+};
+`;
+
+let worker = null;
+let blobUrl = null;
+let meshModUrl = '';
+let state = 'idle';      // idle | ready | failed
+let failReason = '';
+let initPromise = null;
+let jobId = 0;
+
+function remeshWorkerState() { return state; }
+function remeshWorkerError() { return failReason; }
+
+/**
+ * ワーカーを用意する。読み込めなければ静かに失敗して false を返す
+ * （呼び出し側はメインスレッドで実行する）。
+ */
+function initRemeshWorker() {
+  if (state === 'ready') return Promise.resolve(true);
+  if (state === 'failed') return Promise.resolve(false);
+  // 初期化中に二度呼ばれたら同じ約束を返す。作りかけのワーカーを捨てて
+  // もう 1 個作ってしまうと、前のがそのまま残って漏れる。
+  if (!initPromise) initPromise = _init().finally(() => { initPromise = null; });
+  return initPromise;
+}
+
+async function _init() {
+  try {
+    if (typeof Worker !== 'function' || typeof Blob !== 'function'
+      || typeof URL === 'undefined' || typeof document === 'undefined') {
+      throw new Error('Worker が使えません');
+    }
+    // モジュールの場所を出す。
+    // import.meta.url は使えない：単一ファイル版はクラシックスクリプトなので
+    // import.meta があるとファイル全体が構文エラーになる。代わりに
+    // エントリの module スクリプトタグ（src="js/main.js"）の src から引く。
+    // 単一ファイル版ではこのタグがインライン化されて src を持たないので、
+    // そのままワーカーを諦める判定にもなる（固めた JS はどうせ import できない）。
+    const tag = document.querySelector('script[type="module"][src]');
+    if (!tag) throw new Error('モジュールの場所が分かりません（単一ファイル版）');
+    const base = new URL(tag.src, location.href);
+    // file:// では Blob ワーカーからの import が CORS で失敗する
+    if (!/^https?:$/.test(base.protocol)) throw new Error('http 経由でないため import できません');
+    const remeshUrl = new URL('./remesh.js', base).href;
+    const meshUrl = new URL('./mesh.js', base).href;
+
+    blobUrl = URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' }));
+    worker = new Worker(blobUrl, { type: 'module' });
+    await new Promise((res, rej) => {
+      const to = setTimeout(() => rej(new Error('ワーカー初期化がタイムアウト')), 10000);
+      worker.onmessage = (ev) => {
+        if (ev.data && ev.data.type === 'ready') { clearTimeout(to); res(); }
+        else if (ev.data && ev.data.type === 'error') { clearTimeout(to); rej(new Error(ev.data.message)); }
+      };
+      worker.onerror = (e) => { clearTimeout(to); rej(new Error(e.message || 'ワーカーエラー')); };
+      worker.postMessage({ type: 'init', url: remeshUrl, meshUrl });
+    });
+    meshModUrl = meshUrl;
+    state = 'ready';
+    return true;
+  } catch (err) {
+    disposeRemeshWorker();
+    // 「使えない」の確定は dispose のあとで。dispose が state を idle に戻すので、
+    // 先に failed を立てると打ち消されて毎回作り直しに行ってしまう。
+    failReason = String((err && err.message) || err);
+    state = 'failed';
+    return false;
+  }
+}
+
+function disposeRemeshWorker() {
+  if (worker) { try { worker.terminate(); } catch { /* ignore */ } }
+  worker = null;
+  if (blobUrl) { try { URL.revokeObjectURL(blobUrl); } catch { /* ignore */ } blobUrl = null; }
+  state = 'idle';
+}
+
+/**
+ * ワーカーでリメッシュする。
+ * @returns {Promise<object|null>} 成功なら { positions, indices, colors, mask, stats }。
+ *   ワーカーが使えない / 失敗したら null（呼び出し側がメインスレッドで実行する）
+ */
+async function remeshInWorker(mesh, opts, onProgress = null) {
+  if (state !== 'ready' || !worker) return null;
+  // 生きているものだけ詰めて送る
+  const nv = mesh.liveVerts;
+  const remap = new Int32Array(mesh.nv).fill(-1);
+  let w = 0;
+  for (let v = 0; v < mesh.nv; v++) if (mesh.vAlive[v]) remap[v] = w++;
+  const P = new Float32Array(nv * 3);
+  const C = new Float32Array(nv * 3);
+  const MK = new Float32Array(nv);
+  for (let v = 0; v < mesh.nv; v++) {
+    const r = remap[v];
+    if (r < 0) continue;
+    P[r * 3] = mesh.positions[v * 3];
+    P[r * 3 + 1] = mesh.positions[v * 3 + 1];
+    P[r * 3 + 2] = mesh.positions[v * 3 + 2];
+    C[r * 3] = mesh.colors[v * 3];
+    C[r * 3 + 1] = mesh.colors[v * 3 + 1];
+    C[r * 3 + 2] = mesh.colors[v * 3 + 2];
+    MK[r] = mesh.mask[v];
+  }
+  const I = new Uint32Array(mesh.liveTris * 3);
+  let q = 0;
+  for (let t = 0; t < mesh.nt; t++) {
+    const i = t * 3, a = mesh.tris[i], b = mesh.tris[i + 1], c = mesh.tris[i + 2];
+    if (a === b && b === c) continue;
+    I[q++] = remap[a]; I[q++] = remap[b]; I[q++] = remap[c];
+  }
+
+  // 仕事ごとに番号を振り、返事の番号が合わないものは捨てる。
+  // 打ち切ったあとも前の仕事は走り続けていることがあり、その 'done' が
+  // 次の仕事の待ち受けに届くと、まったく別のジオメトリで差し替えてしまう。
+  const id = ++jobId;
+  const wk = worker;
+  try {
+    return await new Promise((res, rej) => {
+      // 520 万面で 7 秒台、2000 万面で 53 秒。余裕を持って 5 分で打ち切る
+      const to = setTimeout(() => {
+        // 止まったワーカーは信用できないので捨てる（次回は作り直しになる）
+        disposeRemeshWorker();
+        rej(new Error('リメッシュがタイムアウトしました'));
+      }, 300000);
+      wk.onmessage = (ev) => {
+        const d = ev.data;
+        if (!d || d.id !== id) return;
+        if (d.type === 'error') { clearTimeout(to); rej(new Error(d.message)); return; }
+        if (d.type === 'progress') { if (onProgress) onProgress(d.p); return; }
+        if (d.type !== 'done') return;
+        clearTimeout(to);
+        if (!d.ok) { rej(new Error(d.reason || 'リメッシュできませんでした')); return; }
+        res(d);
+      };
+      wk.onerror = (e) => { clearTimeout(to); rej(new Error(e.message || 'ワーカーエラー')); };
+      // バッファの所有権ごと渡す（構造化複製のコピーを避ける）
+      wk.postMessage({
+        type: 'remesh', id, meshUrl: meshModUrl, opts,
+        positions: P, indices: I, colors: C, mask: MK,
+      }, [P.buffer, I.buffer, C.buffer, MK.buffer]);
+    });
+  } catch (err) {
+    failReason = String((err && err.message) || err);
+    return null;
+  }
+}
+  return { remeshWorkerState, remeshWorkerError, initRemeshWorker, disposeRemeshWorker, remeshInWorker };
+})();
+
 /* ===== tools.js ===== */
 __M['tools.js'] = (function () {
 // ---------------------------------------------------------------------------
@@ -15555,6 +15984,7 @@ const { Transpose } = __M['transpose.js'];
 const { clipPlane, trimPlane, slicePlane, mirrorWeld, planeFromScreenLine, planeFromAxis } = __M['clip.js'];
 const { STROKES, strokeDefaults } = __M['alpha.js'];
 const { remesh, quadDominant, edgeLengthForTris } = __M['remesh.js'];
+const { initRemeshWorker, remeshInWorker, remeshWorkerState, remeshWorkerError } = __M['remeshworker.js'];
 const { clamp } = __M['math.js'];
 
 /** 変形とマスク操作の既定パラメータ一式（state に置く） */
@@ -15938,28 +16368,70 @@ class Tools {
 
   // --- リメッシュ（ZRemesher 相当） ----------------------------------------
 
-  /**
-   * 目標ポリゴン数でリメッシュする。
-   * トポロジが変わるので分割レベル・レイヤー・モーフは破棄される。
-   */
-  applyRemesh() {
+  /** UI の設定から remesh() のオプションを作る */
+  remeshOpts() {
     const st = this.state;
-    const m = this.mesh;
-    const before = m.liveTris;
-    const r = remesh(m, {
+    return {
       targetTris: Math.max(100, Math.round(st.remeshTris || 20000)),
       iterations: Math.max(1, Math.round(st.remeshIterations || 5)),
       adaptive: st.remeshAdaptive || 0,
       relax: st.remeshRelax === undefined ? 0.5 : st.remeshRelax,
       project: st.remeshProject !== false,
       maxVerts: st.maxVerts,
-    });
-    if (!r.ok) { this.toast('リメッシュできませんでした: ' + r.reason, 4000); return; }
-    this.afterTopologyChange();
+    };
+  }
+
+  _remeshToast(before, r, where) {
     this.toast(`リメッシュ: ${before.toLocaleString()} → ${r.tris.toLocaleString()} 面`
-      + ` / 目標辺長 ${r.targetLen.toFixed(4)} / ${r.ms}ms`
+      + ` / 目標辺長 ${r.targetLen.toFixed(4)} / ${r.ms}ms${where}`
       + `（分割 ${r.split} / 統合 ${r.collapse} / 反転 ${r.flip}）`, 5000);
   }
+
+  /**
+   * 目標ポリゴン数でリメッシュする（メインスレッド）。
+   * トポロジが変わるので分割レベル・レイヤー・モーフは破棄される。
+   */
+  applyRemesh() {
+    const m = this.mesh;
+    const before = m.liveTris;
+    const r = remesh(m, this.remeshOpts());
+    if (!r.ok) { this.toast('リメッシュできませんでした: ' + r.reason, 4000); return; }
+    this.afterTopologyChange();
+    this._remeshToast(before, r, '');
+  }
+
+  /**
+   * リメッシュをワーカーで走らせる。
+   *
+   * 520 万面だと 6 秒台かかる。メインスレッドで回すとビジー表示すら描き直されず
+   * ブラウザが固まって見える（実際にそう報告された）ので、別スレッドへ出して
+   * 進捗を出しながら待つ。ワーカーが使えない環境（file://、単一ファイル版、
+   * Worker 無効）では黙ってメインスレッドに落ちる。
+   *
+   * @param {(p: object) => void} [onProgress] { stage, done, total, tris } を受ける
+   * @returns {Promise<boolean>} ワーカーで実行できたか
+   */
+  async applyRemeshAsync(onProgress = null) {
+    const m = this.mesh;
+    const before = m.liveTris;
+    const ok = await initRemeshWorker();
+    if (!ok) { this.applyRemesh(); return false; }
+    const res = await remeshInWorker(m, this.remeshOpts(), onProgress);
+    if (!res) {
+      // ワーカーで失敗した。理由を出してメインスレッドでやり直す。
+      const why = remeshWorkerError();
+      if (why) console.warn('リメッシュのワーカー実行に失敗、メインスレッドで再試行:', why);
+      this.applyRemesh();
+      return false;
+    }
+    m.setGeometry(res.positions, res.indices, res.colors, res.mask);
+    this.afterTopologyChange();
+    this._remeshToast(before, res.stats, ' / 別スレッド');
+    return true;
+  }
+
+  /** リメッシュのワーカーが使える状態か（診断とテスト用） */
+  remeshWorkerInfo() { return { state: remeshWorkerState(), error: remeshWorkerError() }; }
 
   /** 現在の形を四角優勢にしたときの面の内訳（書き出しと表示用） */
   quadStats() {
@@ -16823,7 +17295,10 @@ const app = {
   listProjects: () => store.listProjects(),
   estimateUsage: () => store.estimateUsage(),
   saveSettingsNow() { store.saveSettings(state); },
-  /** リメッシュ。数百 ms かかるのでオーバーレイを出してから実行する */
+  /**
+   * リメッシュ。数百 ms〜数秒かかるのでオーバーレイを出してから実行する。
+   * 本体はワーカーで走るので、待っている間も画面は動き進捗が出る。
+   */
   async remeshAdaptive() {
     if (busy) return;
     busy = true;
@@ -16831,7 +17306,10 @@ const app = {
     await new Promise(requestAnimationFrame);
     await new Promise(requestAnimationFrame);
     try {
-      tools.applyRemesh();
+      await tools.applyRemeshAsync((p) => {
+        const pct = Math.min(99, Math.round(p.done / Math.max(1, p.total) * 100));
+        ui.showBusy(`リメッシュ中… ${pct}%（${p.stage} / ${p.tris.toLocaleString()} 面）`);
+      });
       frameCameraKeepView();
     } catch (e) {
       ui.toast('リメッシュでエラー: ' + e.message, 5000);
@@ -17317,6 +17795,12 @@ function bindInput() {
   canvas.addEventListener('contextmenu', e => e.preventDefault());
 
   canvas.addEventListener('pointerdown', (e) => {
+    // 重い処理中は入力を受けない。
+    // 以前はメインスレッドが止まっていたので勝手に弾かれていたが、リメッシュを
+    // ワーカーへ出して UI が動くようになったため、明示的に弾かないと処理中に
+    // 彫り始められる。その状態で結果を setGeometry すると、進行中のストロークが
+    // 別のトポロジを掴んだままになる。
+    if (busy) { e.preventDefault(); return; }
     canvas.setPointerCapture(e.pointerId);
     const r = canvas.getBoundingClientRect();
     ptr.x = e.clientX - r.left; ptr.y = e.clientY - r.top;

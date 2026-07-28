@@ -98,6 +98,71 @@ try {
   ok(r.on < r.off,
     `曲率適応で鋭い所が相対的に細かくなる (辺長比 ${r.off.toFixed(3)} → ${r.on.toFixed(3)})`);
 
+  // --- ワーカー実行 --------------------------------------------------------
+  // ここは Node のテストでは絶対に通らない経路（Worker が無い）。
+  // 並列ダイナメッシュでポリペイントが壊れたときの原因が「ワーカー経路を
+  // 誰も試していなかった」ことだったので、必ずブラウザで踏んでおく。
+  r = await runA(`const W = window.WebSculpt;
+    W.state.dynTopo = false;
+    W.app.newMesh('sphere');
+    for (let i = 0; i < 3; i++) W.sculptor.divide();
+    // 頂点色を付けて、ワーカー往復で色が保たれるかも見る
+    const m0 = W.mesh;
+    for (let v = 0; v < m0.nv; v++) {
+      if (!m0.vAlive[v]) continue;
+      const y = m0.positions[v*3+1];
+      m0.colors[v*3] = y > 0 ? 1 : 0; m0.colors[v*3+1] = 0.25; m0.colors[v*3+2] = y > 0 ? 0 : 1;
+    }
+    W.state.remeshTris = 8000; W.state.remeshAdaptive = 0.5; W.state.remeshIterations = 5;
+    const prog = [];
+    const used = await W.tools.applyRemeshAsync(p => prog.push(p));
+    const m = W.mesh;
+    // 色が転写されているか（上が赤、下が青のまま？）
+    let up = 0, upRed = 0, dn = 0, dnBlue = 0;
+    for (let v = 0; v < m.nv; v++) {
+      if (!m.vAlive[v]) continue;
+      const y = m.positions[v*3+1];
+      if (y > 0.3) { up++; if (m.colors[v*3] > m.colors[v*3+2]) upRed++; }
+      else if (y < -0.3) { dn++; if (m.colors[v*3+2] > m.colors[v*3]) dnBlue++; }
+    }
+    // 閉多様体か
+    const em = new Map(); const T = m.tris;
+    for (let t = 0; t < m.nt; t++) { const i=t*3,a=T[i],b=T[i+1],c=T[i+2]; if(a===b&&b===c)continue;
+      const vv=[a,b,c];
+      for(let e=0;e<3;e++){const x=vv[e],y=vv[(e+1)%3];const k=x<y?x+':'+y:y+':'+x;em.set(k,(em.get(k)||0)+1);}}
+    let bad=0,bnd=0; for(const n of em.values()){if(n===1)bnd++;else if(n!==2)bad++;}
+    return { used, info: W.tools.remeshWorkerInfo(), nprog: prog.length,
+      stages: [...new Set(prog.map(p => p.stage))],
+      tris: m.liveTris, bad, bnd, chi: m.liveVerts - em.size + m.liveTris,
+      upRatio: up ? upRed / up : 0, dnRatio: dn ? dnBlue / dn : 0 };`);
+  ok(r.used === true, `ワーカーで実行される (state=${r.info.state} ${r.info.error || ''})`);
+  ok(r.nprog >= 4, `進捗が届く (${r.nprog} 回 / ${r.stages.join(',')})`);
+  ok(Math.abs(r.tris - 8000) / 8000 < 0.15, `ワーカーでも目標面数に近づく (${r.tris})`);
+  ok(r.bad === 0 && r.bnd === 0 && r.chi === 2,
+    `ワーカーの結果も閉多様体 χ=2 (非多様体 ${r.bad} / 境界 ${r.bnd} / χ=${r.chi})`);
+  ok(r.upRatio > 0.95 && r.dnRatio > 0.95,
+    `頂点色がワーカー往復で保たれる (上 ${(r.upRatio*100).toFixed(1)}% / 下 ${(r.dnRatio*100).toFixed(1)}%)`);
+
+  // ワーカーで走っている間、メインスレッドが止まらないこと。
+  // 「250 万ポリゴンのリメッシュでハングする」という報告そのものの検証。
+  r = await runA(`const W = window.WebSculpt;
+    W.state.dynTopo = false;
+    W.app.newMesh('sphere');
+    for (let i = 0; i < 4; i++) W.sculptor.divide();
+    W.state.remeshTris = 20000; W.state.remeshIterations = 5;
+    let frames = 0, stop = false;
+    const tick = () => { frames++; if (!stop) requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+    const t0 = performance.now();
+    const used = await W.app.remeshAdaptive();
+    const ms = performance.now() - t0;
+    stop = true;
+    return { used, ms, frames, tris: W.mesh.liveTris };`);
+  ok(r.ms > 150, `検証に足る長さの処理になっている (${r.ms.toFixed(0)}ms / ${r.tris} 面)`);
+  // 止まっていれば 0〜2 フレームしか進まない。10fps 以上出ていれば動いている。
+  ok(r.frames / (r.ms / 1000) > 10,
+    `処理中も画面が動く (${r.frames} フレーム / ${r.ms.toFixed(0)}ms = ${(r.frames/(r.ms/1000)).toFixed(0)}fps)`);
+
   const errs = await cdp.eval('JSON.stringify(window.__errs || [])');
   ok(errs === '[]', 'ページ例外なし ' + errs);
 } catch (e) {

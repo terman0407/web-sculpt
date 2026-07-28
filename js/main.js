@@ -305,7 +305,10 @@ const app = {
   listProjects: () => store.listProjects(),
   estimateUsage: () => store.estimateUsage(),
   saveSettingsNow() { store.saveSettings(state); },
-  /** リメッシュ。数百 ms かかるのでオーバーレイを出してから実行する */
+  /**
+   * リメッシュ。数百 ms〜数秒かかるのでオーバーレイを出してから実行する。
+   * 本体はワーカーで走るので、待っている間も画面は動き進捗が出る。
+   */
   async remeshAdaptive() {
     if (busy) return;
     busy = true;
@@ -313,7 +316,10 @@ const app = {
     await new Promise(requestAnimationFrame);
     await new Promise(requestAnimationFrame);
     try {
-      tools.applyRemesh();
+      await tools.applyRemeshAsync((p) => {
+        const pct = Math.min(99, Math.round(p.done / Math.max(1, p.total) * 100));
+        ui.showBusy(`リメッシュ中… ${pct}%（${p.stage} / ${p.tris.toLocaleString()} 面）`);
+      });
       frameCameraKeepView();
     } catch (e) {
       ui.toast('リメッシュでエラー: ' + e.message, 5000);
@@ -799,6 +805,12 @@ function bindInput() {
   canvas.addEventListener('contextmenu', e => e.preventDefault());
 
   canvas.addEventListener('pointerdown', (e) => {
+    // 重い処理中は入力を受けない。
+    // 以前はメインスレッドが止まっていたので勝手に弾かれていたが、リメッシュを
+    // ワーカーへ出して UI が動くようになったため、明示的に弾かないと処理中に
+    // 彫り始められる。その状態で結果を setGeometry すると、進行中のストロークが
+    // 別のトポロジを掴んだままになる。
+    if (busy) { e.preventDefault(); return; }
     canvas.setPointerCapture(e.pointerId);
     const r = canvas.getBoundingClientRect();
     ptr.x = e.clientX - r.left; ptr.y = e.clientY - r.top;

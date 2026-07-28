@@ -7,7 +7,7 @@
 // 操作をまたいでも有効（生存チェックだけすればよい）。
 // ---------------------------------------------------------------------------
 
-import { MAX_VERTS_HARD } from './mesh.js';
+import { MAX_VERTS_HARD, RING_STRIDE } from './mesh.js';
 
 const _sh = [];
 const _ringA = [];
@@ -61,6 +61,30 @@ function triNormal(P, ia, ib, ic, out) {
 const _n0 = new Float64Array(3);
 const _n1 = new Float64Array(3);
 
+// コラプスの作業用バッファ。リメッシュでは 1 回で数百万回呼ばれるので、
+// 呼び出しごとの確保をすべて無くしてある。
+// 以前は ringArray で 1 回に JS 配列を 3 個確保し、link condition を
+// 1-ring を JS 配列へ集めて indexOf で数える O(k^2) で見ていた。
+// 520 万面 → 2 万面のリメッシュでコラプスが 263 万回走るので、ここが支配的だった。
+let _cRingA = new Int32Array(64);
+let _cRingB = new Int32Array(64);
+let _nbStamp = new Int32Array(0);
+let _nbId = 0;
+
+/** 頂点 v の隣接三角形を out へ詰めて件数を返す（確保しない。足りなければ -1） */
+function ringInto(mesh, v, out) {
+  const c = mesh.ringCount[v];
+  if (out.length < c) return -1;
+  if (c <= RING_STRIDE) {
+    const b = v * RING_STRIDE, RD = mesh.ringData;
+    for (let j = 0; j < c; j++) out[j] = RD[b + j];
+  } else {
+    const ex = mesh.ringExt[v];
+    for (let j = 0; j < c; j++) out[j] = ex[j];
+  }
+  return c;
+}
+
 /**
  * 辺 (a,b) をコラプスして b を a に統合する。
  * 多様体性を壊さない link condition と法線反転チェックを通った場合のみ実行。
@@ -70,16 +94,45 @@ export function collapseEdge(mesh, a, b, maxValence = 16) {
 
   mesh.trianglesWithEdge(a, b, _sh);
   if (_sh.length !== 2) return false;              // 境界 / 非多様体は触らない
-  const shared = [_sh[0], _sh[1]];
+  const s0 = _sh[0], s1 = _sh[1];
 
-  mesh.oneRing(a, _ringA);
-  mesh.oneRing(b, _ringB);
-  let common = 0;
-  for (let i = 0; i < _ringA.length; i++) {
-    if (_ringB.indexOf(_ringA[i]) >= 0) common++;
+  // 隣接三角形リストを確保なしで取る
+  if (_cRingA.length < mesh.ringCount[a]) _cRingA = new Int32Array(mesh.ringCount[a] * 2);
+  if (_cRingB.length < mesh.ringCount[b]) _cRingB = new Int32Array(mesh.ringCount[b] * 2);
+  const na = ringInto(mesh, a, _cRingA);
+  let nb = ringInto(mesh, b, _cRingB);
+  if (na < 0 || nb < 0) return false;
+
+  // link condition: 共通の隣接頂点がちょうど 2 個。
+  // 頂点数ぶんのスタンプ配列で O(k) にしてある。a 側を idA で、b 側を idB で
+  // マークし、b 側を走るときに「上書きする前に idA だったか」で共通数を数える。
+  if (_nbStamp.length < mesh.capV) _nbStamp = new Int32Array(mesh.capV);
+  const T = mesh.tris;
+  const idA = ++_nbId;
+  let valA = 0;
+  for (let k = 0; k < na; k++) {
+    const i = _cRingA[k] * 3;
+    for (let j = 0; j < 3; j++) {
+      const w = T[i + j];
+      if (w === a || _nbStamp[w] === idA) continue;
+      _nbStamp[w] = idA;
+      valA++;
+    }
+  }
+  const idB = ++_nbId;
+  let valB = 0, common = 0;
+  for (let k = 0; k < nb; k++) {
+    const i = _cRingB[k] * 3;
+    for (let j = 0; j < 3; j++) {
+      const w = T[i + j];
+      if (w === b || _nbStamp[w] === idB) continue;
+      if (_nbStamp[w] === idA) common++;
+      _nbStamp[w] = idB;
+      valB++;
+    }
   }
   if (common !== 2) return false;                  // link condition
-  if (_ringA.length + _ringB.length - 4 > maxValence) return false;
+  if (valA + valB - 4 > maxValence) return false;
 
   const P = mesh.positions;
   const ia = a * 3, ib = b * 3;
@@ -88,12 +141,11 @@ export function collapseEdge(mesh, a, b, maxValence = 16) {
   const px = (nax + nbx) * 0.5, py = (nay + nby) * 0.5, pz = (naz + nbz) * 0.5;
 
   // --- 反転 / 退化チェック（実際に動かす前に予測法線で判定） ---
-  const ringA = mesh.ringArray(a), ringB = mesh.ringArray(b);
-  const check = (tris, moved) => {
-    for (let k = 0; k < tris.length; k++) {
+  const check = (tris, n, moved) => {
+    for (let k = 0; k < n; k++) {
       const t = tris[k];
-      if (t === shared[0] || t === shared[1]) continue;
-      const i = t * 3, T = mesh.tris;
+      if (t === s0 || t === s1) continue;
+      const i = t * 3;
       triNormal(P, T[i], T[i + 1], T[i + 2], _n0);
       const v0 = T[i] === moved ? a : T[i];
       const v1 = T[i + 1] === moved ? a : T[i + 1];
@@ -111,8 +163,8 @@ export function collapseEdge(mesh, a, b, maxValence = 16) {
     }
     return true;
   };
-  if (!check(ringB, b)) return false;
-  if (!check(ringA, a)) return false;
+  if (!check(_cRingB, nb, b)) return false;
+  if (!check(_cRingA, na, a)) return false;
 
   // --- 実行 ---
   P[ia] = px; P[ia + 1] = py; P[ia + 2] = pz;
@@ -123,19 +175,18 @@ export function collapseEdge(mesh, a, b, maxValence = 16) {
   mesh.mask[a] = (mesh.mask[a] + mesh.mask[b]) * 0.5;
   mesh.markVert(a);
 
-  mesh.removeTriangle(shared[0]);
-  mesh.removeTriangle(shared[1]);
+  mesh.removeTriangle(s0);
+  mesh.removeTriangle(s1);
 
-  const bt = mesh.ringArray(b);
-  const T = mesh.tris;
-  for (let k = 0; k < bt.length; k++) {
-    const t = bt[k], i = t * 3;
+  // b の隣接三角形は removeTriangle で変わっているので取り直す
+  nb = ringInto(mesh, b, _cRingB);
+  for (let k = 0; k < nb; k++) {
+    const t = _cRingB[k], i = t * 3;
     mesh.setTriangle(t, T[i] === b ? a : T[i], T[i + 1] === b ? a : T[i + 1], T[i + 2] === b ? a : T[i + 2]);
   }
   mesh.removeVertex(b);
   return true;
 }
-
 /**
  * 辺 (a,b) を反対側の対角線へ張り替える（エッジフリップ）。
  *
