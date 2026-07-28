@@ -3610,7 +3610,20 @@ async function dynamesh(mesh, opts = {}) {
   const ez = bb.max[2] - bb.min[2];
   const maxExt = Math.max(ex, ey, ez, 1e-6);
 
-  let h = maxExt / res;
+  // ボクセルサイズ h を「一番長い軸を res 分割する」で決めると、細長い形で
+  // 短い軸のボクセルまで一緒に粗くなる。実測（球を 3 回分割してから +Y に
+  // 突起を引き出した場合）:
+  //   bbox 2×2×2 → グリッド 103×103×103  h=0.0208  出力 43,268 頂点
+  //   bbox 2×4×2 → グリッド  55×103×55   h=0.0417  出力 13,474 頂点
+  // 伸ばした軸以外も含めてモデル全体のディテールが 3 分の 1 に落ちていた。
+  //
+  // 3 軸の相乗平均で決めると総ボクセル数が形に関係なく res³ 前後に保たれる
+  // （ex/h · ey/h · ez/h = ex·ey·ez / h³ = res³）。立方体の bbox では
+  // 相乗平均 = 最長軸なので、これまでと完全に同じ h になる。
+  const eMin = maxExt / 24;      // 板のように潰れた軸で h が 0 に落ちないための下限
+  const gmExt = Math.cbrt(Math.max(ex, eMin) * Math.max(ey, eMin) * Math.max(ez, eMin));
+
+  let h = gmExt / res;
   let nx, ny, nz, ox, oy, oz;
   // 軸に平行な平面がグリッド頂点に「ちょうど乗る」と内外判定が不定になるため、
   // 原点を h の無理数倍だけずらして退化を避ける（軸整列した板や箱で効く）。
