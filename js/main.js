@@ -14,6 +14,7 @@ import * as store from './store.js';
 import { initWasmField, wasmFieldState, wasmFieldError, wasmFieldModule } from './wasmfield.js';
 import { dynamesh } from './dynamesh.js';
 import { initParallelField, parallelState, parallelWorkers } from './parallelfield.js';
+import { Tools, defaultToolState } from './tools.js';
 
 const BG_PRESETS = {
   dark: { top: [0.032, 0.036, 0.046, 1], bot: [0.0065, 0.0075, 0.011, 1], ring: [1, 1, 1, 0.92] },
@@ -50,6 +51,15 @@ const state = {
   symmetry: { x: true, y: false, z: false },
   radial: { on: false, count: 6, axis: 1 },   // ラジアルシンメトリ（軸まわりの回転コピー）
   localSymmetry: false,                        // 原点ではなくモデル中心を基準にする
+  // 追加ツール（デフォーム / マスクツールのパラメータは defaultToolState が埋める）
+  deform: null,
+  mask: null,
+  groupAngle: 35,          // 法線角でグループ分けするときのしきい値（度）
+  groupView: false,        // グループ色で表示するか
+  clipMode: 'off',         // 'off' | 'clip' | 'trim' | 'slice'（ドラッグで平面カット）
+  clipFalloff: 0,          // クリップの減衰（0 で完全な平面）
+  transposeMode: false,    // トランスポーズ中か（W キーで切り替え）
+  transposeLocal: false,   // ギズモの軸を選択領域の主成分に合わせる
   // 表示
   material: 0,
   wireframe: false,
@@ -75,12 +85,17 @@ const state = {
   ringColor: BG_PRESETS.dark.ring,
 };
 
+// デフォーム / マスクツールの既定パラメータを流し込む。
+// モジュールが持つメタデータから作るので、機能を足しても main.js を触らなくてよい。
+Object.assign(state, defaultToolState());
+
 const canvas = document.getElementById('gpu');
 const camera = new OrbitCamera();
 const mesh = new SculptMesh();
 let renderer = null;
 let sculptor = null;
 let ui = null;
+let tools = null;
 
 // --- 入力状態 --------------------------------------------------------------
 const ptr = {
@@ -119,6 +134,7 @@ const app = {
     const g = gen();
     mesh.setGeometry(g.positions, g.indices);
     if (sculptor) { sculptor.setMesh(mesh); }
+    if (tools) { tools.onMeshReplaced(); applyTransposeMode(false); }
     frameCamera();
     if (ui) ui.toast('新しいメッシュを作成しました');
   },
@@ -160,6 +176,7 @@ const app = {
       if (s.failed) {
         ui.toast('ダイナメッシュに失敗しました（形状が空か解像度が低すぎます）', 4000);
       } else {
+        if (tools) tools.onMeshReplaced();
         frameCameraKeepView();
         const shell = s.openMesh ? '（境界があるためシェル化）' : '';
         ui.toast(
@@ -194,6 +211,7 @@ const app = {
       ui.toast('分割レベルを使うため動的トポロジをオフにしました', 3200);
     }
     const s = sculptor.divide();
+    if (tools) tools.onMeshReplaced();
     frameCameraKeepView();
     ui.refreshLevels();
     scheduleAutosave();
@@ -231,6 +249,7 @@ const app = {
       const rec = await store.loadProject(name);
       if (!rec) { ui.toast('見つかりません: ' + name, 3000); return; }
       sculptor.loadGeometry(rec.positions, rec.indices, rec.colors, rec.mask);
+      if (tools) tools.onMeshReplaced();
       if (rec.settings) {
         store.loadSettings(Object.assign(state, {}));   // 既定を壊さないよう state に直接
         for (const k of Object.keys(rec.settings)) {
@@ -263,6 +282,8 @@ const app = {
   listProjects: () => store.listProjects(),
   estimateUsage: () => store.estimateUsage(),
   saveSettingsNow() { store.saveSettings(state); },
+  setTranspose(on) { applyTransposeMode(on); },
+  toggleTranspose() { applyTransposeMode(!state.transposeMode); },
   resetSettings() {
     store.clearSettings();
     ui.toast('設定を初期化しました。再読み込みで反映されます', 3500);
@@ -294,6 +315,7 @@ const app = {
         const g = importOBJ(await f.text());
         mesh.setGeometry(g.positions, g.indices);
         sculptor.setMesh(mesh);
+        if (tools) tools.onMeshReplaced();
         frameCamera();
         ui.toast(`読み込み: ${mesh.liveVerts.toLocaleString()} 頂点 / ${mesh.liveTris.toLocaleString()} 面`);
       } catch (e) {
@@ -444,6 +466,123 @@ function resolveBrush(e) {
   return { brush, dir };
 }
 
+// ---------------------------------------------------------------------------
+// トランスポーズ（ギズモ）と平面カットのドラッグ
+// ---------------------------------------------------------------------------
+
+// --- トランスポーズ ---------------------------------------------------------
+// ZBrush の W キー相当のモーダル。有効な間はビューのドラッグがギズモ操作になる。
+let gizmoHover = null;      // いまホバーしているハンドル { kind, axis }
+let gizmoScale = 1;         // ハンドルの大きさ
+
+/**
+ * ハンドルの大きさをピボットまでの距離に比例させる。
+ * モデルの大小や寄り引きで矢印の見た目が変わると掴みにくいので、
+ * 画面上のサイズがほぼ一定に見えるようにしておく。
+ */
+function updateGizmoScale() {
+  if (!tools || !tools.gizmo.active) return;
+  gizmoScale = Math.max(1e-4, V3.dist(tools.gizmo.pivot(), camera.eye) * 0.16);
+}
+
+/** ハンドルの当たり判定の許容距離（画面 14px 相当をワールド長へ換算） */
+function gizmoTolerance() {
+  const d = V3.dist(tools.gizmo.pivot(), camera.eye);
+  const h = Math.max(1, canvas.clientHeight);
+  // 画角から「画面 1px が何ワールド長か」を出す
+  const perPixel = (2 * d * Math.tan(camera.fov * 0.5)) / h;
+  return Math.max(1e-6, perPixel * 14);
+}
+
+function applyTransposeMode(on) {
+  if (!tools) return;
+  if (on) {
+    if (!tools.gizmoActivate()) { if (ui) ui.syncTranspose(false); return; }
+    state.transposeMode = true;
+    updateGizmoScale();
+    tools.gizmoDrawHandles(gizmoScale, null);
+  } else {
+    state.transposeMode = false;
+    tools.gizmoDeactivate();
+    gizmoHover = null;
+  }
+  if (ui) ui.syncTranspose(state.transposeMode);
+}
+
+/** ホバー中のハンドルを更新して線を描き直す */
+function updateGizmoHover(cssX, cssY) {
+  if (!tools || !tools.gizmo.active) return;
+  updateGizmoScale();
+  screenRay(cssX, cssY);
+  gizmoHover = tools.gizmo.hitTest(rayO, rayD, gizmoTolerance(), gizmoScale);
+  tools.gizmoDrawHandles(gizmoScale, gizmoHover);
+}
+
+// --- 平面カット（クリップ / トリム / スライス） -----------------------------
+// ドラッグの始点と終点をワールドへ落とし、その 2 点と視線方向で平面を作る。
+// ZBrush の ClipCurve と同じ操作感で、線の表側が残る。
+const clipDrag = {
+  on: false, x0: 0, y0: 0,
+  a: V3.create(), b: V3.create(), center: V3.create(), vd: V3.create(),
+};
+
+function clipDragBegin(cssX, cssY) {
+  const c = mesh.bounds().center;
+  V3.set(clipDrag.center, c[0], c[1], c[2]);
+  if (!rayPlanePoint(cssX, cssY, clipDrag.center, clipDrag.a)) return false;
+  V3.copy(clipDrag.b, clipDrag.a);
+  clipDrag.on = true;
+  clipDrag.x0 = cssX; clipDrag.y0 = cssY;
+  // 平面の押し出し方向は視線。ドラッグ中は動かさないので 1 回だけ取る
+  V3.sub(clipDrag.vd, camera.target, camera.eye);
+  V3.normalize(clipDrag.vd, clipDrag.vd);
+  drawClipGuide();
+  return true;
+}
+
+function clipDragMove(cssX, cssY) {
+  if (!clipDrag.on) return;
+  if (rayPlanePoint(cssX, cssY, clipDrag.center, clipDrag.b)) drawClipGuide();
+}
+
+/** ドラッグ中の平面を線で見せる（切る前に位置と向きが分かるように） */
+const _clipGuide = new Float32Array(10 * 7);
+function drawClipGuide() {
+  if (!renderer || !clipDrag.on) return;
+  const a = clipDrag.a, b = clipDrag.b, vd = clipDrag.vd;
+  const r = mesh.bounds().radius * 1.8;
+  const p = [
+    [a[0] - vd[0] * r, a[1] - vd[1] * r, a[2] - vd[2] * r],
+    [a[0] + vd[0] * r, a[1] + vd[1] * r, a[2] + vd[2] * r],
+    [b[0] + vd[0] * r, b[1] + vd[1] * r, b[2] + vd[2] * r],
+    [b[0] - vd[0] * r, b[1] - vd[1] * r, b[2] - vd[2] * r],
+  ];
+  // 外周 4 本 + ドラッグ線そのもの
+  const segs = [[0, 1], [1, 2], [2, 3], [3, 0], [0, 3]];
+  const out = _clipGuide;
+  let w = 0;
+  for (const [i, j] of segs) {
+    for (const k of [i, j]) {
+      out[w] = p[k][0]; out[w + 1] = p[k][1]; out[w + 2] = p[k][2];
+      out[w + 3] = 1.0; out[w + 4] = 0.52; out[w + 5] = 0.18; out[w + 6] = 0.92;
+      w += 7;
+    }
+  }
+  renderer.setOverlayLines(out, segs.length * 2, true);
+}
+
+function clipDragEnd() {
+  if (!clipDrag.on) return;
+  clipDrag.on = false;
+  if (renderer) renderer.setOverlayLines(null, 0);
+  if (V3.dist(clipDrag.a, clipDrag.b) < mesh.bounds().radius * 0.02) {
+    ui.toast('ドラッグが短すぎます');
+    return;
+  }
+  const plane = tools.planeFromDrag(clipDrag.a, clipDrag.b, clipDrag.vd);
+  tools.applyPlane(state.clipMode, plane);
+}
+
 function bindInput() {
   canvas.addEventListener('contextmenu', e => e.preventDefault());
 
@@ -463,6 +602,20 @@ function bindInput() {
       ptr.mode = 'pan';
     } else if (e.button === 2) {
       ptr.mode = 'orbit';
+    } else if (e.button === 0 && state.transposeMode && tools.gizmo.active) {
+      // ギズモのハンドルを掴んでいればトランスポーズ、外していれば視点回転
+      screenRay(ptr.x, ptr.y);
+      const hit = tools.gizmo.hitTest(rayO, rayD, gizmoTolerance(), gizmoScale);
+      if (hit && tools.gizmo.beginDrag(mesh, hit, rayO, rayD)) {
+        tools.gizmoBeginRecord();
+        ptr.mode = 'gizmo';
+        gizmoHover = hit;
+        tools.gizmoDrawHandles(gizmoScale, gizmoHover);
+      } else {
+        ptr.mode = 'orbit';
+      }
+    } else if (e.button === 0 && state.clipMode !== 'off') {
+      ptr.mode = clipDragBegin(ptr.x, ptr.y) ? 'clip' : 'orbit';
     } else if (e.button === 0) {
       if (renderer.pick.ok) {
         const rb = resolveBrush(e);
@@ -492,9 +645,36 @@ function bindInput() {
       ptr.isPen = true;
       ptr.pressure = e.pressure || ptr.pressure;
     }
+    if (ptr.mode === 'gizmo') {
+      screenRay(ptr.x, ptr.y);
+      tools.gizmo.updateDrag(mesh, rayO, rayD, { snap: e.shiftKey });
+      tools.gizmoDrawHandles(gizmoScale, gizmoHover);
+    } else if (ptr.mode === 'clip') {
+      clipDragMove(ptr.x, ptr.y);
+    } else if (!ptr.down && state.transposeMode && tools && tools.gizmo.active) {
+      // 掴んでいないときはホバー表示だけ更新する
+      updateGizmoHover(ptr.x, ptr.y);
+    }
   });
 
   const endPointer = () => {
+    if (ptr.mode === 'gizmo') {
+      const r = tools.gizmo.endDrag(mesh);
+      tools.gizmoEndRecord();
+      if (r.changed > 0) {
+        sculptor.hoverSeed = -1;
+        sculptor.dropPendingCurvature();
+        mesh.computeAllCurvature();
+        sculptor.history.commit(mesh);
+        scheduleAutosave();
+      }
+      // 動かしたぶんピボットがずれるので立て直す
+      tools.gizmoActivate();
+      updateGizmoScale();
+      tools.gizmoDrawHandles(gizmoScale, gizmoHover);
+    } else if (ptr.mode === 'clip') {
+      clipDragEnd();
+    }
     if (ptr.mode === 'sculpt') {
       sculptor.endStroke();
       sculptor.checkLevels();
@@ -543,7 +723,20 @@ function bindInput() {
         state.symmetry.x = !state.symmetry.x; ui.syncFromState();
         ui.toast('X ミラー: ' + (state.symmetry.x ? 'ON' : 'OFF')); break;
       case 'KeyW':
-        state.wireframe = !state.wireframe; ui.syncFromState(); break;
+        // ZBrush と同じで W はトランスポーズ。ワイヤフレームは Shift+W に移した
+        if (e.shiftKey) { state.wireframe = !state.wireframe; ui.syncFromState(); }
+        else app.toggleTranspose();
+        break;
+      case 'KeyC':
+        // クリップのモードを順に切り替える（オフ → クリップ → トリム → スライス）
+        {
+          const order = ['off', 'clip', 'trim', 'slice'];
+          state.clipMode = order[(order.indexOf(state.clipMode) + 1) % order.length];
+          ui.syncFromState();
+          const jp = { off: 'オフ', clip: 'クリップ', trim: 'トリム', slice: 'スライス' };
+          ui.toast('平面カット: ' + jp[state.clipMode]);
+        }
+        break;
       case 'KeyA':
         state.ao = !state.ao; ui.syncFromState();
         ui.toast('AO: ' + (state.ao ? 'ON' : 'OFF')); break;
@@ -748,6 +941,16 @@ async function boot() {
   const g = PRIMITIVES.sphere();
   mesh.setGeometry(g.positions, g.indices);
   sculptor = new Sculptor(mesh, state);
+  tools = new Tools({
+    state,
+    getMesh: () => mesh,
+    getSculptor: () => sculptor,
+    getRenderer: () => renderer,
+    getUI: () => ui,
+    redraw: () => { /* 毎フレーム描いているので即時の再描画要求は不要 */ },
+    autosave: scheduleAutosave,
+  });
+  app.tools = tools;
   ui = buildUI(app);
   renderer.setRenderScale(state.renderScale);
   frameCamera();
@@ -804,4 +1007,5 @@ window.WebSculpt = {
   get renderer() { return renderer; },
   get sculptor() { return sculptor; },
   get ui() { return ui; },
+  get tools() { return tools; },
 };

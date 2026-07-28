@@ -180,10 +180,24 @@ async function main() {
     await shot('13-mask-drag.png');
 
     // ---- 8) キーボードショートカット ----------------------------------
+    // ZBrush と同じで W はトランスポーズに割り当てたので、ワイヤフレームは Shift+W
+    await key('keyDown', 'KeyW', 'w', 8); await key('keyUp', 'KeyW', 'w', 8);
+    await frames(2);
+    ok((await st('WebSculpt.state.wireframe')) === true, 'Shift+W キーでワイヤフレーム切り替え');
+    // W 単独はトランスポーズ。マスクを塗ってあるので領域が取れる
     await key('keyDown', 'KeyW', 'w'); await key('keyUp', 'KeyW', 'w');
     await frames(2);
-    ok((await st('WebSculpt.state.wireframe')) === true, 'W キーでワイヤフレーム切り替え');
+    ok((await st('WebSculpt.state.transposeMode')) === true, 'W キーでトランスポーズに入る');
+    ok((await st('WebSculpt.tools.gizmo.active')) === true, 'ギズモが立っている');
+    ok((await st('WebSculpt.renderer.overlayCount')) > 0, 'ハンドルの線が送られている');
     await key('keyDown', 'KeyW', 'w'); await key('keyUp', 'KeyW', 'w');
+    await frames(2);
+    ok((await st('WebSculpt.state.transposeMode')) === false, 'W キーでトランスポーズを抜ける');
+    ok((await st('WebSculpt.renderer.overlayCount')) === 0, '抜けたらハンドルの線が消える');
+    // ワイヤフレームを元に戻す（Shift+W）。W 単独はトランスポーズなので使えない
+    await key('keyDown', 'KeyW', 'w', 8); await key('keyUp', 'KeyW', 'w', 8);
+    await frames(1);
+    ok((await st('WebSculpt.state.wireframe')) === false, 'Shift+W でワイヤフレームを戻せる');
     await key('keyDown', 'Digit3', '3'); await key('keyUp', 'Digit3', '3');
     await frames(2);
     ok((await st('WebSculpt.state.brush')) === 'inflate', `3 キーでインフレート (${await st('WebSculpt.state.brush')})`);

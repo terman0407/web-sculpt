@@ -234,6 +234,11 @@ export class Sculptor {
     this._step = V3.create();
     this._avgDabMs = 0;         // 1 ダブの実測コスト（EMA）
     this._walk = V3.create();
+    // 彫刻の差分を記録したい人（スカルプトレイヤー）を挿すための穴。
+    // { before(mesh, verts, count), after(mesh, verts, count) } を持つオブジェクト。
+    // sculptor が layers.js を直接 import すると依存が逆流するので、
+    // 外から差してもらう形にしてある。
+    this.recorder = null;
 
     this.history.reset(mesh);
   }
@@ -691,6 +696,8 @@ export class Sculptor {
         V3.add(ms.center, ms.center, delta);
       }
       if (ms.lockedCount === 0) return;
+      const rec = this.recorder;
+      if (rec) rec.before(m, ms.lockedVerts, ms.lockedCount);
       this.engine.apply(m, {
         type: 'move',
         verts: ms.lockedVerts, count: ms.lockedCount,
@@ -699,6 +706,7 @@ export class Sculptor {
         delta, color: st.paintColor, ignoreMask: false,
         focal: st.focalShift, toCamera: st.toCamera, backface: st.backfaceMask,
       });
+      if (rec) rec.after(m, ms.lockedVerts, ms.lockedCount);
       this._updateNormals(ms.lockedVerts, ms.lockedCount);
       return;
     }
@@ -738,6 +746,8 @@ export class Sculptor {
 
     if (ms.count === 0) return;
 
+    const rec = this.recorder;
+    if (rec) rec.before(m, ms.verts, ms.count);
     this.engine.apply(m, {
       type: brush,
       verts: ms.verts, count: ms.count,
@@ -747,6 +757,8 @@ export class Sculptor {
       ignoreMask: brush === 'mask',
       focal: st.focalShift, toCamera: st.toCamera, backface: st.backfaceMask,
     });
+
+    if (rec) rec.after(m, ms.verts, ms.count);
 
     if (brush !== 'paint' && brush !== 'mask') {
       this._updateNormals(ms.verts, ms.count, ms.tris, ms.triCount);

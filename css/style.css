@@ -664,3 +664,14 @@ input.text:focus { border-color: var(--accent); }
   text-transform: uppercase;
   margin: 2px 0 -3px;
 }
+
+/* デフォーム / マスクツールの 1 項目ぶんのまとまり */
+.ctl-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #14161a;
+}

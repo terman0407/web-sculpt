@@ -5,6 +5,9 @@
 import { BRUSHES, falloff } from './brushes.js';
 import { MATERIALS, materialThumb } from './matcap.js';
 import { clamp } from './math.js';
+import { DEFORMS } from './deform.js';
+import { MASK_OPS } from './masktools.js';
+import { GROUP_METHODS } from './polygroups.js';
 
 const el = (tag, cls, parent) => {
   const n = document.createElement(tag);
@@ -196,6 +199,79 @@ export function buildUI(app) {
   const meshBar = document.getElementById('meshBar');
   const statsEl = document.getElementById('stats');
   const toastEl = document.getElementById('toast');
+
+  // --- 追加ツールのパネル用に持ち回る参照 --------------------------------
+  // section() を作る順で参照が必要になるので、先に宣言しておく。
+  let deformAxisSeg = null;
+  let layerList = null, layerIcons = null, layerInt = null;
+  let groupList = null, groupAngleSlider = null, groupViewToggle = null;
+  let morphAmount = null, morphFactor = null, morphInfo = null;
+  let clipModeSeg = null, transposeToggle = null;
+
+  /** 選択中のレイヤーに対して何かする。無ければ促す */
+  const withLayer = (fn) => {
+    const t = app.tools;
+    const i = t.layers.recording;
+    if (i < 0) { toast('先にレイヤーを選んでください'); return; }
+    fn(i);
+  };
+
+  function refreshLayers() {
+    if (!layerList) return;
+    const t = app.tools;
+    const rec = t.layers.recording;
+    layerList.render(t.layers.list().map((L) => ({
+      id: L.index, label: L.name, num: L.verts ? L.verts.toLocaleString() : '',
+      visible: L.visible, selected: L.index === rec,
+    })));
+    const has = rec >= 0;
+    layerIcons.enable('dup', has);
+    layerIcons.enable('bake', has);
+    layerIcons.enable('del', has);
+    if (has) layerInt.set(t.layers.list()[rec].intensity);
+    layerInt.el.style.opacity = has ? '' : '.45';
+  }
+
+  function refreshGroups() {
+    if (!groupList || !app.tools) return;
+    const t = app.tools;
+    const mesh = t.mesh;
+    if (!mesh) return;
+    t.groups.sync(mesh);
+    const sizes = t.groups.groupSizes(mesh);
+    // 「グループごとに可視面があるか」を三角形 1 周で数える。
+    // グループ数 × 面数 で回すと 300 万面 × 数十グループになるので必ず 1 パスで。
+    const vis = new Int32Array(sizes.length);
+    const groups = t.groups.groupsOf(mesh);
+    const T = mesh.tris;
+    for (let tri = 0; tri < mesh.nt; tri++) {
+      const i = tri * 3;
+      if (T[i] === T[i + 1] && T[i + 1] === T[i + 2]) continue;
+      if (!t.groups.isVisible(tri)) continue;
+      const g = groups[tri];
+      if (g >= 0 && g < vis.length) vis[g]++;
+    }
+    const rows = [];
+    for (let g = 0; g < sizes.length; g++) {
+      if (sizes[g] === 0) continue;
+      rows.push({
+        id: g, label: `グループ ${g + 1}`, num: sizes[g].toLocaleString(),
+        color: t.groups.groupColor(g), visible: vis[g] > 0, selected: false,
+      });
+    }
+    groupList.render(rows);
+  }
+
+  function refreshMorph() {
+    if (!morphInfo) return;
+    const t = app.tools;
+    if (!t.morph.has) { morphInfo.textContent = 'モーフターゲットは未記憶です。'; return; }
+    const d = t.morphDiff();
+    if (!d || !d.valid) { morphInfo.textContent = 'モーフターゲットはトポロジ変更で無効になりました。'; return; }
+    morphInfo.textContent = `記憶済み: ${d.changed.toLocaleString()} / ${d.verts.toLocaleString()} 頂点が変化`
+      + `（最大 ${d.maxDist.toFixed(4)} / 平均 ${d.avgChanged.toFixed(4)}）`;
+  }
+
 
   // --- 左：ブラシパレット ------------------------------------------------
   const brushBtns = new Map();
@@ -460,6 +536,237 @@ export function buildUI(app) {
   ]);
   el('p', 'note', mk).textContent = 'Ctrl+ドラッグでマスクを塗る / Ctrl+Alt+ドラッグで消す。マスク部分は彫刻されません。';
 
+  // --- デフォーメーション -----------------------------------------------
+  // ZBrush の Deformation パレット相当。スライダーは値を決めるだけで、
+  // 「適用」を押した瞬間に 1 回だけ効く破壊的操作（Undo で戻す）。
+  // onInput で毎回掛けるとドラッグ中に何十回も適用されてしまう。
+  const df = section(right, 'デフォーム', true);
+  {
+    const axisRow = el('div', null, df);
+    el('div', 'subhead', axisRow).textContent = '軸';
+    const axisSeg = axisPicker(axisRow, state.deform.axis, (v) => { state.deform.axis = v; });
+    deformAxisSeg = axisSeg;
+    for (const d of DEFORMS) {
+      const box = el('div', 'ctl-group', df);
+      const head = el('div', 'subhead', box);
+      head.textContent = `${d.jp}　${d.name}`;
+      head.title = d.hint;
+      const o = state.deform.params[d.id];
+      for (const q of (d.params || [])) {
+        slider(box, {
+          label: q.jp, min: q.min, max: q.max, step: q.step, value: o[q.key],
+          title: d.hint,
+          fmt: (v) => (q.step >= 1 ? String(Math.round(v)) : v.toFixed(2)),
+          onInput: (v) => { o[q.key] = v; },
+        });
+      }
+      btnRow(box, [{
+        label: '適用', cls: d.axis ? '' : 'wide',
+        title: d.hint + (d.axis ? '' : '（軸は使いません）'),
+        onClick: () => app.tools.applyDeform(d.id),
+      }]);
+      if (!d.axis) box.dataset.noaxis = '1';
+    }
+    el('p', 'note', df).textContent =
+      '選んだ軸に沿ってモデル全体を変形します。マスクした部分は保護されます。'
+      + 'スライダーを 0 に戻しても形は戻りません（Undo で戻します）。'
+      + '膨張・球化・ノイズ・スムーズは軸を使いません。';
+  }
+
+  // --- マスクツール -----------------------------------------------------
+  const mkt = section(right, 'マスクツール', true);
+  {
+    el('div', 'subhead', mkt).textContent = '合成方法';
+    segmented(mkt, [
+      { label: '置換', value: 'replace', title: '既存のマスクを置き換える' },
+      { label: '加算', value: 'add', title: '既存のマスクに足す' },
+      { label: '減算', value: 'sub', title: '既存のマスクから引く' },
+    ], state.mask.mode, (v) => { state.mask.mode = v; });
+
+    for (const op of MASK_OPS) {
+      const ps = (op.params || []).filter((q) => q.type === 'float' || q.type === 'int'
+        || (q.min !== undefined && q.max !== undefined));
+      if (ps.length === 0) continue;
+      const box = el('div', 'ctl-group', mkt);
+      const head = el('div', 'subhead', box);
+      head.textContent = op.jp;
+      head.title = op.hint;
+      const o = state.mask.params[op.id];
+      for (const q of ps) {
+        slider(box, {
+          label: q.jp, min: q.min, max: q.max, step: q.step || 1, value: o[q.key],
+          title: op.hint,
+          fmt: (v) => ((q.step || 1) >= 1 ? String(Math.round(v)) : v.toFixed(2)),
+          onInput: (v) => { o[q.key] = v; },
+        });
+      }
+      // 凹凸の選択があるものだけ（キャビティ）
+      if ((op.params || []).some((q) => q.key === 'side')) {
+        segmented(box, [
+          { label: '溝', value: 'concave' }, { label: '稜線', value: 'convex' }, { label: '両方', value: 'both' },
+        ], o.side, (v) => { o.side = v; });
+      }
+      btnRow(box, [{ label: '適用', cls: 'wide', title: op.hint, onClick: () => app.tools.applyMaskOp(op.id) }]);
+    }
+    // パラメータのない単純な操作はまとめてボタン列に
+    const simple = MASK_OPS.filter((op) => (op.params || []).length === 0);
+    if (simple.length) {
+      el('div', 'subhead', mkt).textContent = '単純操作';
+      btnRow(mkt, simple.map((op) => ({
+        label: op.jp, title: op.hint, onClick: () => app.tools.applyMaskOp(op.id),
+      })));
+    }
+    el('p', 'note', mkt).textContent =
+      '色で選択は現在のペイント色を、法線で選択は現在の視線方向を基準にします。';
+  }
+
+  // --- スカルプトレイヤー -----------------------------------------------
+  const ly = section(right, 'スカルプトレイヤー', true);
+  {
+    layerList = listBox(ly, {
+      empty: '（レイヤーなし。「＋」で追加）',
+      refresh: () => refreshLayers(),
+      onSelect: (i) => app.tools.layerSelect(i),
+      onToggle: (i, on) => app.tools.layerSetVisible(i, on),
+      onRename: (i, name) => app.tools.layerRename(i, name),
+    });
+    layerIcons = iconRow(ly, [
+      { id: 'add', label: '＋', title: 'レイヤーを追加して記録を始める', onClick: () => app.tools.layerAdd() },
+      { id: 'dup', label: '複製', title: '選択中のレイヤーを複製', onClick: () => withLayer((i) => app.tools.layerDuplicate(i)) },
+      { id: 'bake', label: '焼込', title: '選択中のレイヤーをベース形状へ焼き込む', onClick: () => withLayer((i) => app.tools.layerBake(i)) },
+      { id: 'del', label: '削除', title: '選択中のレイヤーを削除', onClick: () => withLayer((i) => app.tools.layerRemove(i)) },
+    ]);
+    layerInt = slider(ly, {
+      label: '強度', min: -1, max: 1, step: 0.01, value: 1,
+      title: '選択中のレイヤーの効き（マイナスで反転）',
+      onInput: (v) => withLayer((i) => app.tools.layerSetIntensity(i, v)),
+    });
+    layerInt.el.addEventListener('pointerup', () => withLayer((i) => app.tools.layerSetIntensity(i, layerInt.get(), true)));
+    el('p', 'note', ly).textContent =
+      '記録中のレイヤーに彫刻の差分が入り、強度を下げるとその彫刻だけ弱まります。'
+      + 'トポロジが変わると使えないので、動的トポロジ・ダイナメッシュ・Divide とは併用できません。';
+  }
+
+  // --- ポリグループ / 部分表示 ------------------------------------------
+  const pg = section(right, 'ポリグループ', true);
+  {
+    el('div', 'subhead', pg).textContent = 'グループを作る';
+    btnRow(pg, GROUP_METHODS.map((g) => ({
+      label: g.jp, title: g.hint, onClick: () => app.tools.groupAssign(g.id),
+    })));
+    groupAngleSlider = slider(pg, {
+      label: '法線角のしきい値', min: 5, max: 90, step: 1, value: state.groupAngle,
+      fmt: (v) => Math.round(v) + '°',
+      title: '「法線角」でグループ分けするときの折れ目の角度',
+      onInput: (v) => { state.groupAngle = v; },
+    });
+    groupViewToggle = toggle(pg, {
+      label: 'グループ色で表示', value: state.groupView,
+      title: 'ポリグループを色分けして表示（ポリペイントは一時的に隠れます）',
+      onChange: (on) => app.tools.setGroupView(on),
+    });
+    el('div', 'subhead', pg).textContent = '表示 / 非表示';
+    groupList = listBox(pg, {
+      empty: '（グループなし）',
+      refresh: () => refreshGroups(),
+      onSelect: (i) => app.tools.groupVisibility('showGroupOnly', i),
+      onToggle: (i, on) => app.tools.groupVisibility(on ? 'showGroup' : 'hideGroup', i),
+    });
+    btnRow(pg, [
+      { label: '全表示', onClick: () => app.tools.groupVisibility('showAll') },
+      { label: '反転', onClick: () => app.tools.groupVisibility('invertVisible') },
+    ]);
+    btnRow(pg, [
+      { label: 'マスクを隠す', title: 'マスクした部分を非表示にする', onClick: () => app.tools.groupVisibility('hideMasked') },
+      { label: 'マスクだけ', title: 'マスクした部分だけ表示する', onClick: () => app.tools.groupVisibility('showMaskedOnly') },
+    ]);
+    btnRow(pg, [
+      { label: '広げる', onClick: () => app.tools.groupVisibility('growVisible', 1) },
+      { label: '縮める', onClick: () => app.tools.groupVisibility('shrinkVisible', 1) },
+    ]);
+    el('p', 'note', pg).textContent =
+      '非表示にした部分は描画とピッキングから外れるので、隠れた側を彫らずに済みます。'
+      + 'トポロジが変わるとグループは作り直しになります。';
+  }
+
+  // --- モーフターゲット --------------------------------------------------
+  const mo = section(right, 'モーフターゲット', true);
+  {
+    btnRow(mo, [
+      { label: '記憶', cls: 'primary', title: 'いまの形をモーフターゲットとして記憶する', onClick: () => app.tools.morphStore() },
+      { label: '入れ替え', title: '記憶した形といまの形を入れ替える（ZBrush の Switch）', onClick: () => app.tools.morphSwitch() },
+    ]);
+    morphAmount = slider(mo, {
+      label: '戻す量', min: 0, max: 1, step: 0.01, value: 1,
+      title: '記憶した形へどれだけ戻すか',
+      onInput: () => {},
+    });
+    btnRow(mo, [{ label: '戻す', cls: 'wide', onClick: () => app.tools.morphRestore(morphAmount.get()) }]);
+    morphFactor = slider(mo, {
+      label: '差分の倍率', min: 0, max: 3, step: 0.05, value: 1,
+      title: '記憶した形からの差分を何倍にするか（1 で変化なし、2 で強調）',
+      onInput: () => {},
+    });
+    btnRow(mo, [{ label: '差分を増幅', cls: 'wide', onClick: () => app.tools.morphAmplify(morphFactor.get()) }]);
+    morphInfo = el('p', 'note', mo);
+    el('p', 'note', mo).textContent =
+      '彫る前に記憶しておくと、あとで部分的に戻したりディテールを強調したりできます。'
+      + 'モーフブラシ（左のパレット）で塗った所だけ戻すこともできます。';
+  }
+
+  // --- クリップ / トリム -------------------------------------------------
+  const cl = section(right, 'クリップ / トリム', true);
+  {
+    el('div', 'subhead', cl).textContent = 'ドラッグで切る';
+    clipModeSeg = segmented(cl, [
+      { label: 'オフ', value: 'off', title: '通常の彫刻に戻る' },
+      { label: 'クリップ', value: 'clip', title: '平面の裏側を平面上へ押しつける（トポロジは変わらない）' },
+      { label: 'トリム', value: 'trim', title: '平面の裏側を切り落として切り口を塞ぐ' },
+      { label: 'スライス', value: 'slice', title: '切らずに平面上に辺だけ作る' },
+    ], state.clipMode, (v) => { state.clipMode = v; });
+    slider(cl, {
+      label: 'クリップの減衰', min: 0, max: 1, step: 0.01, value: state.clipFalloff,
+      title: '0 で完全な平面。上げると平面から離れるほど押しつけを弱める',
+      onInput: (v) => { state.clipFalloff = v; },
+    });
+    el('div', 'subhead', cl).textContent = '軸平面で切る';
+    for (const [ai, an] of [[0, 'X'], [1, 'Y'], [2, 'Z']]) {
+      btnRow(cl, [
+        { label: `${an}+ を残す`, title: `${an} が正の側を残す`, onClick: () => app.tools.applyAxisPlane(state.clipMode === 'off' ? 'trim' : state.clipMode, ai, 0, 1) },
+        { label: `${an}- を残す`, title: `${an} が負の側を残す`, onClick: () => app.tools.applyAxisPlane(state.clipMode === 'off' ? 'trim' : state.clipMode, ai, 0, -1) },
+      ]);
+    }
+    el('div', 'subhead', cl).textContent = 'ミラー & ウェルド';
+    for (const [ai, an] of [[0, 'X'], [1, 'Y'], [2, 'Z']]) {
+      btnRow(cl, [
+        { label: `${an}+ を鏡像`, title: `${an} が正の側を残して反対側へ鏡像コピーし、接合部を溶接する`, onClick: () => app.tools.mirrorWeld(ai, 1) },
+        { label: `${an}- を鏡像`, onClick: () => app.tools.mirrorWeld(ai, -1) },
+      ]);
+    }
+    el('p', 'note', cl).textContent =
+      'モードを選んでからビューをドラッグすると、その線と視線で決まる平面で切ります。'
+      + 'トリムとミラー&ウェルドはトポロジを変えるので分割レベルとレイヤーは破棄されます。';
+  }
+
+  // --- トランスポーズ ----------------------------------------------------
+  const tr = section(right, 'トランスポーズ', true);
+  {
+    transposeToggle = toggle(tr, {
+      label: 'トランスポーズ（W キー）', value: false,
+      title: 'マスクされていない領域を移動・回転・スケールする',
+      onChange: (on) => app.setTranspose(on),
+    });
+    toggle(tr, {
+      label: '軸を選択領域に合わせる', value: state.transposeLocal,
+      title: '選択領域の主成分方向を軸にする（オフならワールド軸）',
+      onChange: (on) => { state.transposeLocal = on; if (app.tools.gizmo.active) app.tools.gizmoActivate(); },
+    });
+    el('p', 'note', tr).textContent =
+      'マスクを塗った部分が保護され、塗っていない部分が動きます。'
+      + '赤緑青の矢印で移動、リングで回転、外側の四角でスケール。'
+      + 'マスクの濃さで効き方が変わるので、ぼかしたマスクを使うと柔らかく変形します。';
+  }
+
   // --- マテリアル -------------------------------------------------------
   const mt = section(right, 'マテリアル');
   const matGrid = el('div', 'matgrid', mt);
@@ -696,9 +1003,17 @@ export function buildUI(app) {
     if (h !== statHtml) { statsEl.innerHTML = h; statHtml = h; }
   }
 
+  // 初回描画
+  refreshLayers();
+  refreshGroups();
+  refreshMorph();
+
   return {
     setBrush, setMaterial, toast, refreshStats, showBusy, hideBusy,
     askRestore, refreshLevels, refreshProjects, setAutosaveMark,
+    refreshLayers, refreshGroups, refreshMorph,
+    /** トランスポーズのトグル表示を state に合わせる（キー操作から呼ばれる） */
+    syncTranspose(on) { if (transposeToggle) transposeToggle.set(on); },
     syncFromState() {
       sRadius.set(state.radiusPx);
       sStrength.set(state.strength);
@@ -717,6 +1032,13 @@ export function buildUI(app) {
       matBtns.forEach((b, k) => b.classList.toggle('on', k === state.material));
       if (paintRow) paintRow.style.display = (state.brush === 'paint') ? '' : 'none';
       for (const ax of ['x', 'y', 'z']) symBtns[ax].classList.toggle('on', state.symmetry[ax]);
+      if (deformAxisSeg) deformAxisSeg.set(state.deform.axis);
+      if (groupAngleSlider) groupAngleSlider.set(state.groupAngle);
+      if (groupViewToggle) groupViewToggle.set(state.groupView);
+      if (clipModeSeg) clipModeSeg.set(state.clipMode);
+      refreshLayers();
+      refreshGroups();
+      refreshMorph();
     },
   };
 }

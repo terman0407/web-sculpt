@@ -1,0 +1,510 @@
+// ---------------------------------------------------------------------------
+// tools.js
+// 各機能モジュール（デフォーム / マスクツール / スカルプトレイヤー / ポリグループ /
+// トランスポーズ / クリップ / モーフ）をアプリへ束ねる層。
+//
+// モジュール側は「メッシュを操作する純粋なロジック」だけを持ち、DOM も WebGPU も
+// 知らない。ここが state と履歴と描画更新を面倒みる担当。
+// main.js に全部書くと 1200 行を超えるので切り出してある。
+//
+// 履歴（Undo）はモジュールではなくここで commit する。モジュールは「何頂点変えたか」
+// を返すので、0 なら commit しない（空の Undo ステップができてしまう）。
+// ---------------------------------------------------------------------------
+
+import { DEFORMS, DEFORM_BY_ID, defaultOpts as deformDefaults, applyDeform } from './deform.js';
+import { MASK_OPS, MASK_OP_BY_ID, applyMaskOp } from './masktools.js';
+import { SculptLayers } from './layers.js';
+import { PolyGroups, GROUP_METHODS } from './polygroups.js';
+import { MorphTarget } from './morph.js';
+import { Transpose } from './transpose.js';
+import { clipPlane, trimPlane, slicePlane, mirrorWeld, planeFromScreenLine, planeFromAxis } from './clip.js';
+
+/** 変形とマスク操作の既定パラメータ一式（state に置く） */
+export function defaultToolState() {
+  const deform = { axis: 1, params: {} };
+  for (const d of DEFORMS) deform.params[d.id] = deformDefaults(d.id);
+  const mask = { id: MASK_OPS[0].id, mode: 'replace', params: {} };
+  for (const op of MASK_OPS) {
+    const p = {};
+    for (const q of (op.params || [])) p[q.key] = q.def;
+    mask.params[op.id] = p;
+  }
+  return { deform, mask };
+}
+
+export class Tools {
+  /**
+   * @param {object} ctx { state, getMesh, getSculptor, getRenderer, getUI, redraw, autosave }
+   *   メッシュとレンダラは差し替わる（newMesh / 起動順）ので getter で受ける。
+   */
+  constructor(ctx) {
+    this.ctx = ctx;
+    this.layers = new SculptLayers();
+    this.groups = new PolyGroups();
+    this.morph = new MorphTarget();
+    this.gizmo = new Transpose();
+
+    // 表示に反映済みのポリグループ可視バージョン。変わったときだけ GPU へ送る。
+    this._visVersion = -1;
+    // グループ色プレビュー用に退避した本来の頂点カラー
+    this._savedColors = null;
+  }
+
+  get state() { return this.ctx.state; }
+  get mesh() { return this.ctx.getMesh(); }
+  get sculptor() { return this.ctx.getSculptor(); }
+  get renderer() { return this.ctx.getRenderer(); }
+  get ui() { return this.ctx.getUI(); }
+
+  toast(msg, ms) { const u = this.ui; if (u) u.toast(msg, ms); }
+  redraw() { if (this.ctx.redraw) this.ctx.redraw(); }
+  autosave() { if (this.ctx.autosave) this.ctx.autosave(); }
+
+  // --- 彫刻をレイヤーへ記録する仕掛け --------------------------------------
+
+  /**
+   * sculptor の recorder フックを、いまのレイヤー状態に合わせて張り替える。
+   * 記録対象のレイヤーが無いときは null にして、ブラシ経路のオーバーヘッドを消す。
+   */
+  syncRecorder() {
+    const s = this.sculptor;
+    if (!s) return;
+    if (this.layers.recording < 0) { s.recorder = null; return; }
+    if (!s.recorder) {
+      s.recorder = {
+        before: (mesh, verts, count) => this.layers.captureBefore(mesh, verts, count),
+        after: (mesh, verts, count) => this.layers.commitAfter(mesh, verts, count),
+      };
+    }
+  }
+
+  /**
+   * デフォームやギズモのようにメッシュ全体を動かす操作を、記録中のレイヤーへ入れる。
+   * ZBrush でもデフォーメーションはアクティブなレイヤーに乗るので、それに合わせる。
+   * 記録していなければそのまま実行する。
+   */
+  withLayerRecording(fn) {
+    const rec = this.layers.recording;
+    if (rec < 0 || !this.layers.validate(this.mesh)) return fn();
+    const all = this._aliveList();
+    this.layers.captureBefore(this.mesh, all, all.length);
+    const r = fn();
+    this.layers.commitAfter(this.mesh, all, all.length);
+    return r;
+  }
+
+  /** 生存頂点の一覧（パレット操作で 1 回だけ使うので毎回作る） */
+  _aliveList() {
+    const m = this.mesh;
+    const out = new Int32Array(m.liveVerts);
+    let n = 0;
+    for (let v = 0; v < m.nv; v++) if (m.vAlive[v]) out[n++] = v;
+    return n === out.length ? out : out.subarray(0, n);
+  }
+
+  /** メッシュが差し替わった（新規作成 / 読み込み / ダイナメッシュ）ときに呼ぶ */
+  onMeshReplaced() {
+    this.layers.clear();
+    this.morph.clear();
+    this.gizmo.clear();
+    this.syncRecorder();
+    this.groups.sync(this.mesh);
+    this.restoreColors();
+    this.syncVisibility(true);
+  }
+
+  // --- デフォーメーション --------------------------------------------------
+
+  /** デフォームを 1 回適用する。ZBrush と同じで破壊的（Undo で戻す） */
+  applyDeform(id) {
+    const meta = DEFORM_BY_ID.get(id);
+    if (!meta) return;
+    const st = this.state;
+    const opts = Object.assign({}, st.deform.params[id], { axis: st.deform.axis });
+    const r = this.withLayerRecording(() => applyDeform(this.mesh, id, opts));
+    if (!r.ok) { this.toast(`${meta.jp}: 適用できませんでした`); return; }
+    if (r.skipped === r.verts && r.changed === 0) {
+      this.toast(`${meta.jp}: パラメータが不正です（NaN が入っていませんか）`, 3500);
+      return;
+    }
+    if (r.changed === 0) {
+      // 異常ではない。amount=0、既に球へ spherize、平面への軸方向 taper などは正しく 0。
+      this.toast(`${meta.jp}: 変化なし`);
+      return;
+    }
+    // 曲率は applyDeform 内で全再計算済みなので、溜まっている差分更新は捨てる
+    this.sculptor.dropPendingCurvature();
+    this.afterGeometryChange();
+    let msg = `${meta.jp}: ${r.changed.toLocaleString()} / ${r.verts.toLocaleString()} 頂点 (${r.ms}ms)`;
+    if (r.masked > 0) msg += ` / マスク保護 ${r.masked.toLocaleString()}`;
+    this.toast(msg, 3000);
+  }
+
+  // --- マスクツール --------------------------------------------------------
+
+  applyMaskOp(id) {
+    const meta = MASK_OP_BY_ID.get(id);
+    if (!meta) return;
+    const st = this.state;
+    const opts = Object.assign({}, st.mask.params[id] || {}, { mode: st.mask.mode });
+    // 色は現在のペイント色、法線は視線方向を既定にする。
+    // どちらもパレット側に別途スライダーを持たせるより、いま使っている値を
+    // そのまま拾うほうが ZBrush の使い方に近い。
+    if (id === 'color') opts.rgb = st.paintColor;
+    if (id === 'normal') opts.dir = st.toCamera;
+    const r = applyMaskOp(this.mesh, id, opts);
+    this.sculptor.history.commit(this.mesh);
+    this.redraw();
+    this.toast(`${meta.jp}: マスク ${r.masked.toLocaleString()} / ${r.live.toLocaleString()} 頂点`);
+  }
+
+  // --- スカルプトレイヤー --------------------------------------------------
+
+  /** レイヤーが使える状態か。使えないなら理由を toast で出す */
+  layersReady(quiet = false) {
+    if (this.layers.count === 0 && !this.layers.validate(this.mesh)) {
+      // まだベースが無い
+      return false;
+    }
+    if (!this.layers.validate(this.mesh)) {
+      this.layers.clear();
+      this.syncRecorder();
+      if (!quiet) this.toast('トポロジが変わったためレイヤーを破棄しました（動的トポロジ / ダイナメッシュとは併用できません）', 4500);
+      if (this.ui) this.ui.refreshLayers();
+      return false;
+    }
+    return true;
+  }
+
+  layerAdd() {
+    if (this.state.dynTopo) {
+      this.state.dynTopo = false;
+      if (this.ui) this.ui.syncFromState();
+      this.toast('レイヤーを使うため動的トポロジをオフにしました', 3200);
+    }
+    if (this.layers.count === 0 || !this.layers.validate(this.mesh)) this.layers.setBase(this.mesh);
+    const i = this.layers.add(`レイヤー ${this.layers.count + 1}`);
+    this.syncRecorder();
+    if (this.ui) this.ui.refreshLayers();
+    this.toast(`レイヤーを追加しました（記録中: ${this.layers.list()[i].name}）`);
+    return i;
+  }
+
+  layerRemove(index) {
+    if (!this.layersReady()) return;
+    const info = this.layers.list()[index];
+    if (!info) return;
+    if (!this.layers.remove(index)) return;
+    this.syncRecorder();
+    this.layers.rebuild(this.mesh);
+    this.afterGeometryChange();
+    if (this.ui) this.ui.refreshLayers();
+    this.toast(`レイヤー「${info.name}」を削除しました`);
+  }
+
+  layerDuplicate(index) {
+    if (!this.layersReady()) return;
+    const i = this.layers.duplicate(index);
+    if (i < 0) return;
+    this.layers.rebuild(this.mesh);
+    this.afterGeometryChange();
+    if (this.ui) this.ui.refreshLayers();
+    this.toast('レイヤーを複製しました');
+  }
+
+  layerRename(index, name) {
+    this.layers.rename(index, name);
+    if (this.ui) this.ui.refreshLayers();
+  }
+
+  layerSelect(index) {
+    this.layers.select(index);
+    this.syncRecorder();
+    if (this.ui) this.ui.refreshLayers();
+  }
+
+  layerSetVisible(index, on) {
+    if (!this.layersReady()) return;
+    this.layers.setVisible(index, on);
+    this.layers.rebuild(this.mesh);
+    this.afterGeometryChange();
+    if (this.ui) this.ui.refreshLayers();
+  }
+
+  /** 強度スライダー。ドラッグ中に毎回呼ばれるので履歴には積まない */
+  layerSetIntensity(index, v, commit = false) {
+    if (!this.layersReady()) return;
+    this.layers.setIntensity(index, v);
+    this.layers.rebuild(this.mesh);
+    this.sculptor.dropPendingCurvature();
+    this.mesh.computeAllNormals();
+    this.mesh.computeAllCurvature();
+    this.mesh.markAllDirty();
+    if (commit) this.sculptor.history.commit(this.mesh);
+    this.redraw();
+    if (this.ui) this.ui.refreshLayers();
+  }
+
+  layerBake(index) {
+    if (!this.layersReady()) return;
+    const r = this.layers.bake(index, this.mesh);
+    if (!r) return;
+    if (this.ui) this.ui.refreshLayers();
+    this.toast(`レイヤー「${r.name}」を焼き込みました（${r.verts.toLocaleString()} 頂点）`);
+  }
+
+  // --- ポリグループと部分表示 ----------------------------------------------
+
+  groupAssign(method) {
+    const meta = GROUP_METHODS.find((m) => m.id === method);
+    const opts = {};
+    if (method === 'byNormalAngle') opts.angle = this.state.groupAngle || 35;
+    const r = this.groups.assign(this.mesh, method, opts);
+    if (!r.ok) { this.toast('グループを作れませんでした'); return; }
+    this.syncVisibility(true);
+    if (this.state.groupView) this.applyGroupColors();
+    this.redraw();
+    if (this.ui) this.ui.refreshGroups();
+    this.toast(`${meta ? meta.jp : method}: ${r.groups} グループ / ${r.tris.toLocaleString()} 面`);
+  }
+
+  /** 表示・非表示の操作をまとめて受ける。name は PolyGroups のメソッド名 */
+  groupVisibility(name, ...args) {
+    const fn = this.groups[name];
+    if (typeof fn !== 'function') return;
+    const r = fn.call(this.groups, this.mesh, ...args);
+    this.syncVisibility();
+    this.redraw();
+    if (this.ui) this.ui.refreshGroups();
+    if (r && r.hidden !== undefined) {
+      this.toast(r.allVisible ? '全体を表示しました'
+        : `表示 ${r.visible.toLocaleString()} 面 / 非表示 ${r.hidden.toLocaleString()} 面`);
+    }
+  }
+
+  /** 可視インデックスを GPU へ送る。変わっていなければ何もしない */
+  syncVisibility(force = false) {
+    const r = this.renderer;
+    if (!r) return;
+    this.groups.sync(this.mesh);
+    if (this.groups.allVisible) {
+      if (force || this._visVersion !== -1) { r.setVisibleIndices(null, 0); this._visVersion = -1; }
+      return;
+    }
+    const v = this.groups.buildVisibleIndices(this.mesh);
+    if (!force && v.version === this._visVersion) return;
+    r.setVisibleIndices(v.indices, v.count);
+    this._visVersion = v.version;
+  }
+
+  /** グループ色を頂点カラーへ焼いてプレビューする（元の色は退避しておく） */
+  applyGroupColors() {
+    const m = this.mesh;
+    if (!this._savedColors) this._savedColors = m.colors.slice(0, m.nv * 3);
+    const r = this.groups.buildVertexGroupColors(m);
+    m.colors.set(r.colors.subarray(0, m.nv * 3));
+    m.markAllDirty();
+    this.redraw();
+  }
+
+  /** グループ色プレビューを解除して元の頂点カラーへ戻す */
+  restoreColors() {
+    if (!this._savedColors) return;
+    const m = this.mesh;
+    const n = Math.min(this._savedColors.length, m.colors.length);
+    m.colors.set(this._savedColors.subarray(0, n));
+    this._savedColors = null;
+    m.markAllDirty();
+    this.redraw();
+  }
+
+  setGroupView(on) {
+    this.state.groupView = on;
+    if (on) this.applyGroupColors(); else this.restoreColors();
+  }
+
+  // --- モーフターゲット ----------------------------------------------------
+
+  morphStore() {
+    const r = this.morph.store(this.mesh);
+    if (this.ui) this.ui.refreshMorph();
+    this.toast(`モーフターゲットを記憶しました（${r.verts.toLocaleString()} 頂点 / ${(r.bytes / 1048576).toFixed(1)} MB）`);
+  }
+
+  morphSwitch() {
+    if (!this.morph.has) { this.toast('モーフターゲットがありません'); return; }
+    const r = this.morph.switchTo(this.mesh);
+    if (!r.valid) { this.morphInvalid(); return; }
+    this.afterGeometryChange();
+    this.toast('モーフターゲットと入れ替えました');
+  }
+
+  morphRestore(amount) {
+    if (!this.morph.has) { this.toast('モーフターゲットがありません'); return; }
+    const r = this.withLayerRecording(() => this.morph.restore(this.mesh, amount));
+    if (!r.valid) { this.morphInvalid(); return; }
+    if (r.changed === 0) { this.toast('変化なし'); return; }
+    this.afterGeometryChange();
+    this.toast(`モーフへ ${Math.round(amount * 100)}% 戻しました（${r.changed.toLocaleString()} 頂点）`);
+  }
+
+  morphAmplify(factor) {
+    if (!this.morph.has) { this.toast('モーフターゲットがありません'); return; }
+    const r = this.withLayerRecording(() => this.morph.amplify(this.mesh, factor));
+    if (!r.valid) { this.morphInvalid(); return; }
+    if (r.changed === 0) { this.toast('変化なし'); return; }
+    this.afterGeometryChange();
+    this.toast(`差分を ${factor.toFixed(2)} 倍にしました（${r.changed.toLocaleString()} 頂点）`);
+  }
+
+  morphDiff() {
+    if (!this.morph.has) return null;
+    return this.morph.createDiff(this.mesh);
+  }
+
+  morphInvalid() {
+    this.morph.clear();
+    if (this.ui) this.ui.refreshMorph();
+    this.toast('トポロジが変わったためモーフターゲットを破棄しました', 4000);
+  }
+
+  // --- クリップ / トリム / スライス / ミラー&ウェルド -----------------------
+
+  /**
+   * 画面のドラッグから作った平面で切る。
+   * @param {string} kind 'clip' | 'trim' | 'slice'
+   */
+  applyPlane(kind, plane) {
+    if (!plane) { this.toast('平面を作れませんでした（ドラッグが短すぎます）'); return; }
+    const m = this.mesh;
+    let r;
+    if (kind === 'trim') r = trimPlane(m, plane, {});
+    else if (kind === 'slice') r = slicePlane(m, plane, {});
+    else r = clipPlane(m, plane, { falloff: this.state.clipFalloff || 0 });
+    if (r.refused) { this.toast(`実行できませんでした: ${r.refused}`, 4000); return; }
+    if (!r.changed) { this.toast('平面の裏側に形がありませんでした'); return; }
+    this.afterTopologyChange();
+    if (kind === 'trim') {
+      this.toast(`トリム: ${r.removed.toLocaleString()} 頂点を削除 / ${r.added.toLocaleString()} 頂点を追加（切り口 ${r.loops} 個）`, 3500);
+    } else if (kind === 'slice') {
+      this.toast(`スライス: ${r.added.toLocaleString()} 頂点を追加`);
+    } else {
+      this.toast(`クリップ: ${r.moved.toLocaleString()} 頂点を平面上へ`);
+    }
+  }
+
+  applyAxisPlane(kind, axis, offset, keep) {
+    this.applyPlane(kind, planeFromAxis(axis, offset, keep));
+  }
+
+  planeFromDrag(a, b, viewDir) { return planeFromScreenLine(a, b, viewDir); }
+
+  mirrorWeld(axis, keep) {
+    const r = mirrorWeld(this.mesh, axis, { keep });
+    if (r.refused) { this.toast(`ミラー&ウェルド: ${r.refused}`, 4000); return; }
+    if (!r.changed) { this.toast('変化なし'); return; }
+    this.afterTopologyChange();
+    this.toast(`ミラー&ウェルド: ${r.removed.toLocaleString()} 頂点を削除 / 接合 ${r.welded.toLocaleString()} 頂点`, 3500);
+  }
+
+  // --- トランスポーズ ------------------------------------------------------
+
+  /** マスクされていない領域からギズモを立てる */
+  gizmoActivate() {
+    const ok = this.gizmo.setFromMask(this.mesh, { local: !!this.state.transposeLocal });
+    if (!ok) {
+      this.toast('マスクされていない領域がありません（マスクを塗ってから使います）', 4000);
+      return false;
+    }
+    const s = this.gizmo.stats();
+    this.toast(`トランスポーズ: ${s.verts.toLocaleString()} 頂点が対象`);
+    return true;
+  }
+
+  /** ギズモのドラッグ開始時に呼ぶ。レイヤー記録の「前」を押さえる */
+  gizmoBeginRecord() {
+    const rec = this.layers.recording;
+    if (rec < 0 || !this.layers.validate(this.mesh)) { this._gizmoRecList = null; return; }
+    this._gizmoRecList = this._aliveList();
+    this.layers.captureBefore(this.mesh, this._gizmoRecList, this._gizmoRecList.length);
+  }
+
+  /** ギズモのドラッグ終了時に呼ぶ */
+  gizmoEndRecord() {
+    const list = this._gizmoRecList;
+    this._gizmoRecList = null;
+    if (!list) return;
+    this.layers.commitAfter(this.mesh, list, list.length);
+  }
+
+  gizmoDeactivate() {
+    this.gizmo.clear();
+    if (this.renderer) this.renderer.setOverlayLines(null, 0);
+  }
+
+  /** ハンドルの線をレンダラへ送る。ホバー中のハンドルだけ明るくする */
+  gizmoDrawHandles(scale, hover) {
+    const r = this.renderer;
+    if (!r) return;
+    if (!this.gizmo.active) { r.setOverlayLines(null, 0); return; }
+    const hs = this.gizmo.handles(scale);
+    let n = 0;
+    for (const h of hs) n += h.points.length / 3;
+    if (n === 0) { r.setOverlayLines(null, 0); return; }
+    if (!this._ovBuf || this._ovBuf.length < n * 7) this._ovBuf = new Float32Array(n * 7);
+    const out = this._ovBuf;
+    let w = 0;
+    for (const h of hs) {
+      const on = hover && hover.kind === h.kind && hover.axis === h.axis;
+      const c = h.color;
+      // ホバーしていないハンドルは少し暗く・薄くして、狙っている軸を目立たせる
+      const k = on ? 1.0 : 0.62;
+      const a = on ? 1.0 : 0.78;
+      const p = h.points;
+      for (let i = 0; i < p.length; i += 3) {
+        out[w] = p[i]; out[w + 1] = p[i + 1]; out[w + 2] = p[i + 2];
+        out[w + 3] = c[0] * k; out[w + 4] = c[1] * k; out[w + 5] = c[2] * k; out[w + 6] = a;
+        w += 7;
+      }
+    }
+    r.setOverlayLines(out, n, true);
+  }
+
+  // --- 共通の後処理 --------------------------------------------------------
+
+  /** 形だけ変わったとき（トポロジ不変）。法線と曲率はモジュール側で済んでいる前提 */
+  afterGeometryChange() {
+    this.sculptor.history.commit(this.mesh);
+    this.redraw();
+    this.autosave();
+  }
+
+  /** トポロジが変わったとき。シード・レベル・レイヤー・モーフを無効化する */
+  afterTopologyChange() {
+    const s = this.sculptor;
+    s.hoverSeed = -1;
+    s.dropPendingCurvature();
+    s.levels.clear();
+    this.layers.clear();
+    this.morph.clear();
+    this.gizmo.clear();
+    this.syncRecorder();
+    this.groups.sync(this.mesh);
+    this.restoreColors();
+    this.syncVisibility(true);
+    s.history.commit(this.mesh);
+    this.redraw();
+    this.autosave();
+    const u = this.ui;
+    if (u) {
+      if (u.refreshLevels) u.refreshLevels();
+      if (u.refreshLayers) u.refreshLayers();
+      if (u.refreshGroups) u.refreshGroups();
+      if (u.refreshMorph) u.refreshMorph();
+    }
+  }
+
+  bytes() {
+    return this.layers.bytes() + this.groups.bytes() + this.morph.bytes();
+  }
+}
