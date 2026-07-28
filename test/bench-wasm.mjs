@@ -77,9 +77,9 @@ function splatJS(G, field, closest){
     const tx0=Math.min(ax,bx,cx),tx1=Math.max(ax,bx,cx);
     const ty0=Math.min(ay,by,cy),ty1=Math.max(ay,by,cy);
     const tz0=Math.min(az,bz,cz),tz1=Math.max(az,bz,cz);
-    const i0=Math.max(0,Math.floor((tx0-band-ox)/h)), i1=Math.min(nx-1,Math.ceil((tx1+band-ox)/h));
-    const j0=Math.max(0,Math.floor((ty0-band-oy)/h)), j1=Math.min(ny-1,Math.ceil((ty1+band-oy)/h));
-    const k0=Math.max(0,Math.floor((tz0-band-oz)/h)), k1=Math.min(nz-1,Math.ceil((tz1+band-oz)/h));
+    const i0=Math.max(0,Math.ceil((tx0-band-ox)/h)), i1=Math.min(nx-1,Math.floor((tx1+band-ox)/h));
+    const j0=Math.max(0,Math.ceil((ty0-band-oy)/h)), j1=Math.min(ny-1,Math.floor((ty1+band-oy)/h));
+    const k0=Math.max(0,Math.ceil((tz0-band-oz)/h)), k1=Math.min(nz-1,Math.floor((tz1+band-oz)/h));
     for(let k=k0;k<=k1;k++){
       const pz=oz+k*h, ez=pz<tz0?tz0-pz:(pz>tz1?pz-tz1:0), e2z=ez*ez;
       if(e2z>=band*band) continue;

@@ -11,6 +11,7 @@ import { BRUSH_IDS, BRUSHES, usesGrabPlane } from './brushes.js';
 import { buildUI } from './ui.js';
 import { exportOBJ, exportSTL, exportPLY, importOBJ, download } from './io.js';
 import * as store from './store.js';
+import { initWasmField, wasmFieldState, wasmFieldError } from './wasmfield.js';
 
 const BG_PRESETS = {
   dark: { top: [0.032, 0.036, 0.046, 1], bot: [0.0065, 0.0075, 0.011, 1], ring: [1, 1, 1, 0.92] },
@@ -747,6 +748,11 @@ async function boot() {
   ui.refreshLevels();
   ui.refreshProjects();
 
+  // 距離場の WASM を裏で読み込む（失敗しても JS 版で動くので待たない）
+  initWasmField().then((ok) => {
+    if (!ok) console.info('WASM 距離場は使えないため JS 版で動作します: ' + wasmFieldError());
+  });
+
   renderer.onDeviceLost = (info) => {
     fatal('GPU デバイスが失われました', info && info.message ? info.message : 'ページを再読み込みしてください。');
   };
@@ -779,6 +785,7 @@ async function boot() {
 boot();
 
 // デバッグ / 自動テスト用
+window.__wasmState = wasmFieldState;
 window.WebSculpt = {
   state, mesh, camera, app, BRUSHES,
   pointer: ptr,

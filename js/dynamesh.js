@@ -14,6 +14,7 @@
 // ---------------------------------------------------------------------------
 
 import { clamp } from './math.js';
+import { wasmSplat, wasmFieldReady } from './wasmfield.js';
 
 const LARGE = 1e9;
 
@@ -120,6 +121,10 @@ export function hasBoundary(mesh) {
  */
 export function dynamesh(mesh, opts = {}) {
   const t0 = Date.now();
+  // 段階別の所要時間（どこが重いかを実測できるようにしておく）
+  const phase = {};
+  let _tp = Date.now();
+  const mark = (name) => { const n = Date.now(); phase[name] = (phase[name] || 0) + (n - _tp); _tp = n; };
   const res = clamp(Math.round(opts.resolution || 96), 16, 512);
   const smoothIters = clamp(Math.round(opts.smooth ?? 1), 0, 5);
   const transferColor = opts.transferColor !== false;
@@ -158,8 +163,16 @@ export function dynamesh(mesh, opts = {}) {
   const closest = transferColor ? new Int32Array(total).fill(-1) : null;
   const P = mesh.positions, T = mesh.tris;
 
+  mark('grid');
   // ---- 2. 狭帯域の符号なし距離場 ---------------------------------------
-  for (let t = 0; t < mesh.nt; t++) {
+  // 全体の 9 割を占める部分。WASM が使えればそちらへ（結果は JS 版と完全一致）。
+  let usedWasm = false;
+  if (opts.wasm !== false && wasmFieldReady()) {
+    usedWasm = wasmSplat(mesh, field, closest, { nx, ny, nz, ox, oy, oz, h, band });
+  }
+
+  // WASM が使えなかったときの JS 版（アルゴリズムは同一）
+  if (!usedWasm) for (let t = 0; t < mesh.nt; t++) {
     const ti = t * 3;
     const ia = T[ti], ib = T[ti + 1], ic = T[ti + 2];
     if (ia === ib && ib === ic) continue;
@@ -172,12 +185,15 @@ export function dynamesh(mesh, opts = {}) {
     const ty0 = Math.min(ay, by, cy), ty1 = Math.max(ay, by, cy);
     const tz0 = Math.min(az, bz, cz), tz1 = Math.max(az, bz, cz);
 
-    const i0 = Math.max(0, Math.floor((tx0 - band - ox) / h));
-    const i1 = Math.min(nx - 1, Math.ceil((tx1 + band - ox) / h));
-    const j0 = Math.max(0, Math.floor((ty0 - band - oy) / h));
-    const j1 = Math.min(ny - 1, Math.ceil((ty1 + band - oy) / h));
-    const k0 = Math.max(0, Math.floor((tz0 - band - oz) / h));
-    const k1 = Math.min(nz - 1, Math.ceil((tz1 + band - oz) / h));
+    // 走査すべきは「三角形から band 以内にある格子点」。格子点 i の座標は ox + i*h
+    // なので下限は ceil、上限は floor が正しい。floor/ceil を逆に取ると軸ごとに
+    // 2 セル余分に回ることになり、点に近い三角形では 7^3 と 5^3 で 2.7 倍の差が出る。
+    const i0 = Math.max(0, Math.ceil((tx0 - band - ox) / h));
+    const i1 = Math.min(nx - 1, Math.floor((tx1 + band - ox) / h));
+    const j0 = Math.max(0, Math.ceil((ty0 - band - oy) / h));
+    const j1 = Math.min(ny - 1, Math.floor((ty1 + band - oy) / h));
+    const k0 = Math.max(0, Math.ceil((tz0 - band - oz) / h));
+    const k1 = Math.min(nz - 1, Math.floor((tz1 + band - oz) / h));
 
     // AABB までの距離は三角形までの距離の下界になる。これを軸ごとに外へ括り出して
     // 「確実に現在値より遠い voxel」を pointTriDist2 を呼ばずに捨てる。
@@ -208,18 +224,18 @@ export function dynamesh(mesh, opts = {}) {
     }
   }
 
+  mark('distance');
   // ---- 3. 内外判定 ------------------------------------------------------
-  const openMesh = hasBoundary(mesh);
+  //
+  // 境界の有無は「全辺を Map に入れて 1 面しかない辺を探す」のが素直だが、
+  // 300 万面だと 900 万件の Map 操作で 1.4 秒かかっていた。
+  // 実際に知りたいのは「巻き数が信用できるか」なので、スキャンラインを
+  // 走査し終えたときに巻き数が 0 に戻るかどうかで判定する（追加コストなし）。
+  // 閉じたメッシュならレイは必ず外側で始まり外側で終わるので必ず 0 に戻る。
   const far = band + h;
+  let openMesh = false;
 
-  if (openMesh) {
-    // 境界があるメッシュは巻き数が使えないので、厚みを持つシェルとして扱う。
-    // （平面をダイナメッシュすると板になる）
-    const thickness = h * 1.25;
-    for (let i = 0; i < total; i++) {
-      field[i] = Math.min(field[i], far) - thickness;
-    }
-  } else {
+  {
     // Z 方向のスキャンラインごとに符号付き交差（巻き数）を集める
     const lines = new Array(nx * ny);
     for (let t = 0; t < mesh.nt; t++) {
@@ -263,34 +279,65 @@ export function dynamesh(mesh, opts = {}) {
       }
     }
 
-    for (let j = 0; j < ny; j++) {
-      for (let i = 0; i < nx; i++) {
-        const L = lines[i + j * nx];
-        if (!L) continue;
-        // (z, dir) のペアを z 昇順に並べ替える
-        const n = L.length / 2;
-        const order = new Array(n);
-        for (let q = 0; q < n; q++) order[q] = q;
-        order.sort((p, r) => L[p * 2] - L[r * 2]);
+    // まず全ラインの巻き数が 0 に戻るか確認する（= 境界がないか）
+    const orders = new Array(nx * ny);
+    for (let li = 0; li < lines.length; li++) {
+      const L = lines[li];
+      if (!L) continue;
+      const n = L.length / 2;
+      const order = new Int32Array(n);
+      for (let q = 0; q < n; q++) order[q] = q;
+      const sorted = Array.prototype.sort.call(order, (p, r) => L[p * 2] - L[r * 2]);
+      orders[li] = sorted;
+      let wind = 0;
+      for (let q = 0; q < n; q++) wind += L[q * 2 + 1];
+      if (wind !== 0) { openMesh = true; break; }
+    }
 
-        let wind = 0, q = 0;
-        const colBase = i + j * sy;
-        for (let k = 0; k < nz; k++) {
-          const pz = oz + k * h;
-          while (q < n && L[order[q] * 2] <= pz) { wind += L[order[q] * 2 + 1]; q++; }
-          if (wind !== 0) {
-            const idx = colBase + k * sz;
-            field[idx] = -Math.min(field[idx], far);
+    let insideCount = 0;
+    if (!openMesh) {
+      for (let j = 0; j < ny; j++) {
+        for (let i = 0; i < nx; i++) {
+          const li = i + j * nx;
+          const L = lines[li];
+          if (!L) continue;
+          const order = orders[li];
+          const n = order.length;
+          let wind = 0, q = 0;
+          const colBase = i + j * sy;
+          for (let k = 0; k < nz; k++) {
+            const pz = oz + k * h;
+            while (q < n && L[order[q] * 2] <= pz) { wind += L[order[q] * 2 + 1]; q++; }
+            if (wind !== 0) {
+              const idx = colBase + k * sz;
+              field[idx] = -Math.min(field[idx], far);
+              insideCount++;
+            }
           }
         }
       }
+      // 内側が 1 つも無い = Z レイから見て中身がない。
+      // 面が XZ 平面に乗っている板（射影面積 0 で交差を生まない）や、
+      // 1 ボクセル未満の薄い閉殻がこれに当たる。どちらもシェル化が正しい。
+      if (insideCount === 0) openMesh = true;
     }
-    // 内側にならなかった voxel は外側として帯域外をクランプする
-    for (let i = 0; i < total; i++) {
-      if (field[i] > 0) field[i] = Math.min(field[i], far);
+
+    if (openMesh) {
+      // 境界があるメッシュは巻き数が使えないので、厚みを持つシェルとして扱う。
+      // （平面をダイナメッシュすると板になる）
+      const thickness = h * 1.25;
+      for (let i = 0; i < total; i++) {
+        field[i] = Math.min(Math.abs(field[i]), far) - thickness;
+      }
+    } else {
+      // 内側にならなかった voxel は外側として帯域外をクランプする
+      for (let i = 0; i < total; i++) {
+        if (field[i] > 0) field[i] = Math.min(field[i], far);
+      }
     }
   }
 
+  mark('inside');
   // ---- 4. Surface Nets --------------------------------------------------
   const verts = [];
   const idxOut = [];
@@ -364,16 +411,19 @@ export function dynamesh(mesh, opts = {}) {
     const tmp = bufB; bufB = bufA; bufA = tmp;
   }
 
+  mark('surfaceNets');
   // ---- 5. 多様体修復（1 ボクセル未満の薄い部分で必要になる） ------------
   const rep = repairManifold(new Float32Array(verts), new Uint32Array(idxOut));
   const positions = rep.positions;
   const indices = rep.indices;
 
+  mark('repair');
   // ---- 6. Taubin スムージング ------------------------------------------
   if (smoothIters > 0 && positions.length > 0) {
     taubinSmooth(positions, indices, smoothIters, 0.55, 0.58);
   }
 
+  mark('smooth');
   // ---- 7. 色の転写 ------------------------------------------------------
   let colors = null;
   if (transferColor && cellTri) {
@@ -393,9 +443,14 @@ export function dynamesh(mesh, opts = {}) {
     }
   }
 
+  mark('color');
+
   return {
     positions, indices, colors,
     stats: {
+      phase,
+      inputTris: mesh.liveTris,
+      wasm: usedWasm,
       resolution: res,
       grid: [nx, ny, nz],
       voxelSize: h,

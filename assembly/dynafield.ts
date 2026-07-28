@@ -108,12 +108,12 @@ export function splat(
     const ty0 = Math.min(ay, Math.min(by, cy)), ty1 = Math.max(ay, Math.max(by, cy));
     const tz0 = Math.min(az, Math.min(bz, cz)), tz1 = Math.max(az, Math.max(bz, cz));
 
-    let i0 = <i32>Math.floor((tx0 - band - ox) * invH); if (i0 < 0) i0 = 0;
-    let i1 = <i32>Math.ceil((tx1 + band - ox) * invH); if (i1 > nx - 1) i1 = nx - 1;
-    let j0 = <i32>Math.floor((ty0 - band - oy) * invH); if (j0 < 0) j0 = 0;
-    let j1 = <i32>Math.ceil((ty1 + band - oy) * invH); if (j1 > ny - 1) j1 = ny - 1;
-    let k0 = <i32>Math.floor((tz0 - band - oz) * invH); if (k0 < 0) k0 = 0;
-    let k1 = <i32>Math.ceil((tz1 + band - oz) * invH); if (k1 > nz - 1) k1 = nz - 1;
+    let i0 = <i32>Math.ceil((tx0 - band - ox) * invH); if (i0 < 0) i0 = 0;
+    let i1 = <i32>Math.floor((tx1 + band - ox) * invH); if (i1 > nx - 1) i1 = nx - 1;
+    let j0 = <i32>Math.ceil((ty0 - band - oy) * invH); if (j0 < 0) j0 = 0;
+    let j1 = <i32>Math.floor((ty1 + band - oy) * invH); if (j1 > ny - 1) j1 = ny - 1;
+    let k0 = <i32>Math.ceil((tz0 - band - oz) * invH); if (k0 < 0) k0 = 0;
+    let k1 = <i32>Math.floor((tz1 + band - oz) * invH); if (k1 > nz - 1) k1 = nz - 1;
 
     for (let k = k0; k <= k1; k++) {
       const pz = oz + <f64>k * h;

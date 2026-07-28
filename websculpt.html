@@ -2783,6 +2783,145 @@ function refineRegion(mesh, regionTris, center, radius, targetLen, opt = {}) {
   return { splitEdge, collapseEdge, refineRegion };
 })();
 
+/* ===== wasmfield.js ===== */
+__M['wasmfield.js'] = (function () {
+// ---------------------------------------------------------------------------
+// wasmfield.js
+// ダイナメッシュの距離場スプラットを WebAssembly で実行する（js/dynamesh.js の
+// フォールバック付き高速版）。読み込めなければ静かに JS 版へ戻るので、
+// このモジュールが失敗しても機能は落ちない。
+//
+// 3M ポリゴンのダイナメッシュでは距離場が全体の約 9 割を占めるため、
+// ここだけ WASM 化すると全体で 1.4〜1.5 倍になる。
+//
+// スレッドも SharedArrayBuffer も使わない単一スレッド WASM なので、
+// COOP/COEP ヘッダを付けられない GitHub Pages でもそのまま動く。
+// 単一ファイル版では下の WASM_B64 をビルド時に埋め込むため、
+// fetch を一切使わず file:// からも動く。
+// ---------------------------------------------------------------------------
+
+// build.mjs が単一ファイル版を作るとき、この行を base64 文字列に差し替える。
+const WASM_B64 = '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';
+
+// wasm/ の場所はページからの相対。GitHub Pages のサブパス配信でも正しく解決される。
+const WASM_URL = 'wasm/dynafield.wasm';
+
+let W = null;             // instance.exports
+let state = 'idle';       // idle | loading | ready | failed
+let failReason = '';
+
+function wasmFieldState() { return state; }
+function wasmFieldReady() { return state === 'ready'; }
+function wasmFieldError() { return failReason; }
+
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/**
+ * すでに手元にあるバイト列から初期化する（Node のテスト / ベンチ用）。
+ */
+async function initWasmFieldFromBytes(bytes) {
+  try {
+    const { instance } = await WebAssembly.instantiate(bytes, {
+      env: { abort() { throw new Error('wasm abort'); } },
+    });
+    W = instance.exports;
+    state = 'ready';
+    return true;
+  } catch (err) {
+    failReason = String(err && err.message || err);
+    state = 'failed';
+    W = null;
+    return false;
+  }
+}
+
+/**
+ * WASM を読み込む。起動時に一度だけ呼べばよい（await しなくてもよい）。
+ * 失敗しても例外は投げず、JS 版フォールバックのままになる。
+ */
+async function initWasmField() {
+  if (state !== 'idle') return state === 'ready';
+  state = 'loading';
+  try {
+    let bytes;
+    if (WASM_B64) {
+      bytes = base64ToBytes(WASM_B64);
+    } else {
+      if (typeof fetch !== 'function') throw new Error('fetch が使えません');
+      const res = await fetch(WASM_URL);
+      if (!res.ok) throw new Error(`${WASM_URL} が ${res.status}`);
+      bytes = new Uint8Array(await res.arrayBuffer());
+    }
+    const { instance } = await WebAssembly.instantiate(bytes, {
+      env: { abort() { throw new Error('wasm abort'); } },
+    });
+    const e = instance.exports;
+    for (const fn of ['alloc', 'release', 'splat', 'fillField', 'fillClosest', 'memory']) {
+      if (!e[fn]) throw new Error(`export ${fn} がありません`);
+    }
+    W = e;
+    state = 'ready';
+    return true;
+  } catch (err) {
+    failReason = String(err && err.message || err);
+    state = 'failed';
+    W = null;
+    return false;
+  }
+}
+
+/**
+ * 距離場スプラットを WASM で実行して field / closest を埋める。
+ * @returns {boolean} 実行できたか（false なら呼び出し側が JS 版を走らせる）
+ */
+function wasmSplat(mesh, field, closest, g) {
+  if (state !== 'ready' || !W) return false;
+  const nv = mesh.nv, nt = mesh.nt;
+  const total = field.length;
+  if (nv === 0 || nt === 0 || total === 0) return false;
+
+  let pPos = 0, pTri = 0, pField = 0, pClose = 0;
+  try {
+    // 先にすべて確保する。alloc でメモリが伸びるとビューが無効になるため、
+    // ビューは確保が全部終わってから作る。
+    pPos = W.alloc(nv * 12);
+    pTri = W.alloc(nt * 12);
+    pField = W.alloc(total * 4);
+    pClose = closest ? W.alloc(total * 4) : 0;
+    if (!pPos || !pTri || !pField || (closest && !pClose)) throw new Error('alloc 失敗');
+
+    const buf = W.memory.buffer;
+    new Float32Array(buf, pPos, nv * 3).set(mesh.positions.subarray(0, nv * 3));
+    new Int32Array(buf, pTri, nt * 3).set(mesh.tris.subarray(0, nt * 3));
+    W.fillField(pField, total, g.band);
+    if (pClose) W.fillClosest(pClose, total);
+
+    W.splat(pPos, pTri, nt, pField, pClose,
+      g.nx, g.ny, g.nz, g.ox, g.oy, g.oz, g.h, g.band);
+
+    // 結果を JS 側の配列へ戻す（以降の処理は通常の TypedArray 上で行う）
+    const b2 = W.memory.buffer;
+    field.set(new Float32Array(b2, pField, total));
+    if (closest) closest.set(new Int32Array(b2, pClose, total));
+    return true;
+  } catch (err) {
+    failReason = String(err && err.message || err);
+    return false;
+  } finally {
+    if (pClose) W.release(pClose);
+    if (pField) W.release(pField);
+    if (pTri) W.release(pTri);
+    if (pPos) W.release(pPos);
+  }
+}
+  return { wasmFieldState, wasmFieldReady, wasmFieldError, initWasmFieldFromBytes, initWasmField, wasmSplat };
+})();
+
 /* ===== dynamesh.js ===== */
 __M['dynamesh.js'] = (function () {
 // ---------------------------------------------------------------------------
@@ -2801,6 +2940,7 @@ __M['dynamesh.js'] = (function () {
 // ---------------------------------------------------------------------------
 
 const { clamp } = __M['math.js'];
+const { wasmSplat, wasmFieldReady } = __M['wasmfield.js'];
 
 const LARGE = 1e9;
 
@@ -2907,6 +3047,10 @@ function hasBoundary(mesh) {
  */
 function dynamesh(mesh, opts = {}) {
   const t0 = Date.now();
+  // 段階別の所要時間（どこが重いかを実測できるようにしておく）
+  const phase = {};
+  let _tp = Date.now();
+  const mark = (name) => { const n = Date.now(); phase[name] = (phase[name] || 0) + (n - _tp); _tp = n; };
   const res = clamp(Math.round(opts.resolution || 96), 16, 512);
   const smoothIters = clamp(Math.round(opts.smooth ?? 1), 0, 5);
   const transferColor = opts.transferColor !== false;
@@ -2945,8 +3089,16 @@ function dynamesh(mesh, opts = {}) {
   const closest = transferColor ? new Int32Array(total).fill(-1) : null;
   const P = mesh.positions, T = mesh.tris;
 
+  mark('grid');
   // ---- 2. 狭帯域の符号なし距離場 ---------------------------------------
-  for (let t = 0; t < mesh.nt; t++) {
+  // 全体の 9 割を占める部分。WASM が使えればそちらへ（結果は JS 版と完全一致）。
+  let usedWasm = false;
+  if (opts.wasm !== false && wasmFieldReady()) {
+    usedWasm = wasmSplat(mesh, field, closest, { nx, ny, nz, ox, oy, oz, h, band });
+  }
+
+  // WASM が使えなかったときの JS 版（アルゴリズムは同一）
+  if (!usedWasm) for (let t = 0; t < mesh.nt; t++) {
     const ti = t * 3;
     const ia = T[ti], ib = T[ti + 1], ic = T[ti + 2];
     if (ia === ib && ib === ic) continue;
@@ -2959,12 +3111,15 @@ function dynamesh(mesh, opts = {}) {
     const ty0 = Math.min(ay, by, cy), ty1 = Math.max(ay, by, cy);
     const tz0 = Math.min(az, bz, cz), tz1 = Math.max(az, bz, cz);
 
-    const i0 = Math.max(0, Math.floor((tx0 - band - ox) / h));
-    const i1 = Math.min(nx - 1, Math.ceil((tx1 + band - ox) / h));
-    const j0 = Math.max(0, Math.floor((ty0 - band - oy) / h));
-    const j1 = Math.min(ny - 1, Math.ceil((ty1 + band - oy) / h));
-    const k0 = Math.max(0, Math.floor((tz0 - band - oz) / h));
-    const k1 = Math.min(nz - 1, Math.ceil((tz1 + band - oz) / h));
+    // 走査すべきは「三角形から band 以内にある格子点」。格子点 i の座標は ox + i*h
+    // なので下限は ceil、上限は floor が正しい。floor/ceil を逆に取ると軸ごとに
+    // 2 セル余分に回ることになり、点に近い三角形では 7^3 と 5^3 で 2.7 倍の差が出る。
+    const i0 = Math.max(0, Math.ceil((tx0 - band - ox) / h));
+    const i1 = Math.min(nx - 1, Math.floor((tx1 + band - ox) / h));
+    const j0 = Math.max(0, Math.ceil((ty0 - band - oy) / h));
+    const j1 = Math.min(ny - 1, Math.floor((ty1 + band - oy) / h));
+    const k0 = Math.max(0, Math.ceil((tz0 - band - oz) / h));
+    const k1 = Math.min(nz - 1, Math.floor((tz1 + band - oz) / h));
 
     // AABB までの距離は三角形までの距離の下界になる。これを軸ごとに外へ括り出して
     // 「確実に現在値より遠い voxel」を pointTriDist2 を呼ばずに捨てる。
@@ -2995,18 +3150,18 @@ function dynamesh(mesh, opts = {}) {
     }
   }
 
+  mark('distance');
   // ---- 3. 内外判定 ------------------------------------------------------
-  const openMesh = hasBoundary(mesh);
+  //
+  // 境界の有無は「全辺を Map に入れて 1 面しかない辺を探す」のが素直だが、
+  // 300 万面だと 900 万件の Map 操作で 1.4 秒かかっていた。
+  // 実際に知りたいのは「巻き数が信用できるか」なので、スキャンラインを
+  // 走査し終えたときに巻き数が 0 に戻るかどうかで判定する（追加コストなし）。
+  // 閉じたメッシュならレイは必ず外側で始まり外側で終わるので必ず 0 に戻る。
   const far = band + h;
+  let openMesh = false;
 
-  if (openMesh) {
-    // 境界があるメッシュは巻き数が使えないので、厚みを持つシェルとして扱う。
-    // （平面をダイナメッシュすると板になる）
-    const thickness = h * 1.25;
-    for (let i = 0; i < total; i++) {
-      field[i] = Math.min(field[i], far) - thickness;
-    }
-  } else {
+  {
     // Z 方向のスキャンラインごとに符号付き交差（巻き数）を集める
     const lines = new Array(nx * ny);
     for (let t = 0; t < mesh.nt; t++) {
@@ -3050,34 +3205,65 @@ function dynamesh(mesh, opts = {}) {
       }
     }
 
-    for (let j = 0; j < ny; j++) {
-      for (let i = 0; i < nx; i++) {
-        const L = lines[i + j * nx];
-        if (!L) continue;
-        // (z, dir) のペアを z 昇順に並べ替える
-        const n = L.length / 2;
-        const order = new Array(n);
-        for (let q = 0; q < n; q++) order[q] = q;
-        order.sort((p, r) => L[p * 2] - L[r * 2]);
+    // まず全ラインの巻き数が 0 に戻るか確認する（= 境界がないか）
+    const orders = new Array(nx * ny);
+    for (let li = 0; li < lines.length; li++) {
+      const L = lines[li];
+      if (!L) continue;
+      const n = L.length / 2;
+      const order = new Int32Array(n);
+      for (let q = 0; q < n; q++) order[q] = q;
+      const sorted = Array.prototype.sort.call(order, (p, r) => L[p * 2] - L[r * 2]);
+      orders[li] = sorted;
+      let wind = 0;
+      for (let q = 0; q < n; q++) wind += L[q * 2 + 1];
+      if (wind !== 0) { openMesh = true; break; }
+    }
 
-        let wind = 0, q = 0;
-        const colBase = i + j * sy;
-        for (let k = 0; k < nz; k++) {
-          const pz = oz + k * h;
-          while (q < n && L[order[q] * 2] <= pz) { wind += L[order[q] * 2 + 1]; q++; }
-          if (wind !== 0) {
-            const idx = colBase + k * sz;
-            field[idx] = -Math.min(field[idx], far);
+    let insideCount = 0;
+    if (!openMesh) {
+      for (let j = 0; j < ny; j++) {
+        for (let i = 0; i < nx; i++) {
+          const li = i + j * nx;
+          const L = lines[li];
+          if (!L) continue;
+          const order = orders[li];
+          const n = order.length;
+          let wind = 0, q = 0;
+          const colBase = i + j * sy;
+          for (let k = 0; k < nz; k++) {
+            const pz = oz + k * h;
+            while (q < n && L[order[q] * 2] <= pz) { wind += L[order[q] * 2 + 1]; q++; }
+            if (wind !== 0) {
+              const idx = colBase + k * sz;
+              field[idx] = -Math.min(field[idx], far);
+              insideCount++;
+            }
           }
         }
       }
+      // 内側が 1 つも無い = Z レイから見て中身がない。
+      // 面が XZ 平面に乗っている板（射影面積 0 で交差を生まない）や、
+      // 1 ボクセル未満の薄い閉殻がこれに当たる。どちらもシェル化が正しい。
+      if (insideCount === 0) openMesh = true;
     }
-    // 内側にならなかった voxel は外側として帯域外をクランプする
-    for (let i = 0; i < total; i++) {
-      if (field[i] > 0) field[i] = Math.min(field[i], far);
+
+    if (openMesh) {
+      // 境界があるメッシュは巻き数が使えないので、厚みを持つシェルとして扱う。
+      // （平面をダイナメッシュすると板になる）
+      const thickness = h * 1.25;
+      for (let i = 0; i < total; i++) {
+        field[i] = Math.min(Math.abs(field[i]), far) - thickness;
+      }
+    } else {
+      // 内側にならなかった voxel は外側として帯域外をクランプする
+      for (let i = 0; i < total; i++) {
+        if (field[i] > 0) field[i] = Math.min(field[i], far);
+      }
     }
   }
 
+  mark('inside');
   // ---- 4. Surface Nets --------------------------------------------------
   const verts = [];
   const idxOut = [];
@@ -3151,16 +3337,19 @@ function dynamesh(mesh, opts = {}) {
     const tmp = bufB; bufB = bufA; bufA = tmp;
   }
 
+  mark('surfaceNets');
   // ---- 5. 多様体修復（1 ボクセル未満の薄い部分で必要になる） ------------
   const rep = repairManifold(new Float32Array(verts), new Uint32Array(idxOut));
   const positions = rep.positions;
   const indices = rep.indices;
 
+  mark('repair');
   // ---- 6. Taubin スムージング ------------------------------------------
   if (smoothIters > 0 && positions.length > 0) {
     taubinSmooth(positions, indices, smoothIters, 0.55, 0.58);
   }
 
+  mark('smooth');
   // ---- 7. 色の転写 ------------------------------------------------------
   let colors = null;
   if (transferColor && cellTri) {
@@ -3180,9 +3369,14 @@ function dynamesh(mesh, opts = {}) {
     }
   }
 
+  mark('color');
+
   return {
     positions, indices, colors,
     stats: {
+      phase,
+      inputTris: mesh.liveTris,
+      wasm: usedWasm,
       resolution: res,
       grid: [nx, ny, nz],
       voxelSize: h,
@@ -7071,6 +7265,7 @@ const { BRUSH_IDS, BRUSHES, usesGrabPlane } = __M['brushes.js'];
 const { buildUI } = __M['ui.js'];
 const { exportOBJ, exportSTL, exportPLY, importOBJ, download } = __M['io.js'];
 const store = __M['store.js'];
+const { initWasmField, wasmFieldState, wasmFieldError } = __M['wasmfield.js'];
 
 const BG_PRESETS = {
   dark: { top: [0.032, 0.036, 0.046, 1], bot: [0.0065, 0.0075, 0.011, 1], ring: [1, 1, 1, 0.92] },
@@ -7802,6 +7997,11 @@ async function boot() {
   ui.refreshLevels();
   ui.refreshProjects();
 
+  // 距離場の WASM を裏で読み込む（失敗しても JS 版で動くので待たない）
+  initWasmField().then((ok) => {
+    if (!ok) console.info('WASM 距離場は使えないため JS 版で動作します: ' + wasmFieldError());
+  });
+
   renderer.onDeviceLost = (info) => {
     fatal('GPU デバイスが失われました', info && info.message ? info.message : 'ページを再読み込みしてください。');
   };
@@ -7834,6 +8034,7 @@ async function boot() {
 boot();
 
 // デバッグ / 自動テスト用
+window.__wasmState = wasmFieldState;
 window.WebSculpt = {
   state, mesh, camera, app, BRUSHES,
   pointer: ptr,

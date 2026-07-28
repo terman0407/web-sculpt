@@ -120,6 +120,25 @@ for (const name of order) {
 }
 parts.push(`})();`);
 const script = parts.join('\n');
+let scriptWasm = script;
+
+// --- 単一ファイル版では wasm を base64 で埋め込む ---------------------------
+// fetch を使わずに済むので file:// からでも WASM 経路が有効になる。
+{
+  const wasmPath = join(ROOT, 'wasm', 'dynafield.wasm');
+  let b64 = '';
+  try {
+    b64 = readFileSync(wasmPath).toString('base64');
+  } catch {
+    console.warn('  wasm/dynafield.wasm が無いので単一ファイル版は JS フォールバックになります');
+  }
+  if (b64) {
+    const marker = "const WASM_B64 = '';";
+    if (!script.includes(marker)) throw new Error('WASM_B64 のマーカーが見つかりません');
+    scriptWasm = script.replace(marker, `const WASM_B64 = '${b64}';`);
+    console.log(`  wasm を埋め込み: ${(b64.length / 1024).toFixed(0)} KB (base64)`);
+  }
+}
 
 // --- HTML を組み立て -------------------------------------------------------
 const css = readFileSync(join(ROOT, 'css', 'style.css'), 'utf8');
@@ -133,7 +152,7 @@ if (html.includes('<link rel="stylesheet"')) throw new Error('CSS の差し替�
 
 html = html.replace(
   /^[ \t]*<script type="module"[^>]*><\/script>[ \t]*$/m,
-  `<script>\n${script}\n</script>`,
+  `<script>\n${scriptWasm}\n</script>`,
 );
 if (html.includes('type="module"')) throw new Error('スクリプトの差し替えに失敗しました');
 

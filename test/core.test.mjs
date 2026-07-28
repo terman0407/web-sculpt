@@ -5,6 +5,8 @@ import { splitEdge, collapseEdge, refineRegion } from '../js/dyntopo.js';
 import { exportOBJ, exportSTL, exportPLY, importOBJ } from '../js/io.js';
 import { BRUSH_IDS } from '../js/brushes.js';
 import { dynamesh, hasBoundary, taubinSmooth } from '../js/dynamesh.js';
+import { initWasmFieldFromBytes, wasmFieldReady } from '../js/wasmfield.js';
+import { readFileSync as _readFileSync } from 'node:fs';
 import { SubdivLevels } from '../js/subdiv.js';
 import { falloff } from '../js/brushes.js';
 import { packMesh } from '../js/store.js';
@@ -867,6 +869,57 @@ head('保存用のパック');
   ok(m2.liveVerts === p.verts && m2.liveTris === p.tris, '読み戻せる');
   ok(Math.abs(m2.mask[0] - 0.5) < 1e-6, 'マスクが読み戻せる');
   validate(m2, { closed: false, label: 'pack round-trip' });
+}
+
+
+// ---------------------------------------------------------------------------
+head('WASM 距離場（JS 版との一致）');
+{
+  let bytes = null;
+  try { bytes = _readFileSync(new URL('../wasm/dynafield.wasm', import.meta.url)); }
+  catch { console.log('  wasm/dynafield.wasm が無いのでスキップ（npm run build:wasm で生成）'); }
+
+  if (bytes) {
+    const g = PRIMITIVES.sphere();
+    const src = new SculptMesh();
+    src.setGeometry(g.positions, g.indices);
+    const state = makeState();
+    const s = new Sculptor(src, state);
+    state.worldRadius = 0.3;
+    // 形を崩して非自明な入力にする
+    const pt = new Float32Array(3);
+    for (let seed = 0; seed < 12; seed++) {
+      const at = (u) => {
+        const th = seed * 0.7 + u * 1.6, ph = -0.8 + Math.sin(seed + u * 2.2) * 0.9;
+        pt[0] = Math.cos(ph) * Math.cos(th); pt[1] = Math.sin(ph); pt[2] = Math.cos(ph) * Math.sin(th);
+        return pt;
+      };
+      s.beginStroke('clay', at(0), 1);
+      for (let k = 1; k <= 16; k++) s.addSample(at(k / 16));
+      s.endStroke();
+    }
+    console.log(`  入力 ${src.liveVerts.toLocaleString()} 頂点 / ${src.liveTris.toLocaleString()} 面`);
+
+    const ok2 = await initWasmFieldFromBytes(bytes);
+    ok(ok2 === true && wasmFieldReady(), 'WASM を初期化できる');
+
+    for (const res of [64, 128]) {
+      const jsR = dynamesh(src, { resolution: res, smooth: 1, transferColor: true, wasm: false });
+      const waR = dynamesh(src, { resolution: res, smooth: 1, transferColor: true });
+      ok(waR.stats.wasm === true, `res${res}: WASM 経路が使われる`);
+      ok(jsR.positions.length === waR.positions.length && jsR.indices.length === waR.indices.length,
+        `res${res}: 頂点/面数が一致 (JS ${jsR.positions.length / 3} vs WASM ${waR.positions.length / 3})`);
+      let dp = 0, di = 0;
+      for (let i = 0; i < jsR.positions.length; i++) if (jsR.positions[i] !== waR.positions[i]) dp++;
+      for (let i = 0; i < jsR.indices.length; i++) if (jsR.indices[i] !== waR.indices[i]) di++;
+      let dc = 0;
+      if (jsR.colors && waR.colors) for (let i = 0; i < jsR.colors.length; i++) if (jsR.colors[i] !== waR.colors[i]) dc++;
+      ok(dp === 0 && di === 0 && dc === 0,
+        `res${res}: 出力がビット単位で一致 (座標差 ${dp} / 面差 ${di} / 色差 ${dc})`);
+      console.log(`       res${res}: JS ${jsR.stats.ms}ms (距離場 ${jsR.stats.phase.distance}) / `
+        + `WASM ${waR.stats.ms}ms (距離場 ${waR.stats.phase.distance})`);
+    }
+  }
 }
 
 console.log('\n' + (failures === 0 ? '✅ すべて通過' : `❌ ${failures} 件の失敗`));
