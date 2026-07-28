@@ -2801,18 +2801,21 @@ __M['wasmfield.js'] = (function () {
 // ---------------------------------------------------------------------------
 
 // build.mjs が単一ファイル版を作るとき、この行を base64 文字列に差し替える。
-const WASM_B64 = 'AGFzbQEAAAABOwlgAX8AYAJ/fwBgAABgAn9/AX9gAX8Bf2AEf39/fwBgA39/fgBgDX9/f39/f39/fHx8fHwAYAN/f30AAg0BA2VudgVhYm9ydAAFAxMSAQECAwMGAAACAAQDAgcACAEEBQMBAAEGJQd/AUEAC38BQQALfwFBAAt/AUEAC38BQQALfwFBAAt/AEGwCwsHcgsFYWxsb2MAEgdyZWxlYXNlAA8Fc3BsYXQADglmaWxsRmllbGQAEAtmaWxsQ2xvc2VzdAARBV9fbmV3AAwFX19waW4ACwdfX3VucGluAAoJX19jb2xsZWN0AA0LX19ydHRpX2Jhc2UDBgZtZW1vcnkCAAgBCQwBCwqzIBLDAQEEfyABKAIAQXxxIgNBgAJJBH8gA0EEdgVBH0H8////AyADIANB/P///wNPGyIDZ2siBEEHayECIAMgBEEEa3ZBEHMLIQMgASgCCCEFIAEoAgQiBARAIAQgBTYCCAsgBQRAIAUgBDYCBAsgASAAIAJBBHQgA2pBAnRqIgEoAmBGBEAgASAFNgJgIAVFBEAgACACQQJ0aiIBKAIEQX4gA3dxIQMgASADNgIEIANFBEAgACAAKAIAQX4gAndxNgIACwsLC7YCAQV/IAFBBGoiBiABKAIAIgNBfHFqIgQoAgAiAkEBcQRAIAAgBBABIAEgA0EEaiACQXxxaiIDNgIAIAEoAgBBfHEgBmoiBCgCACECCyADQQJxBEAgAUEEaygCACIBKAIAIQYgACABEAEgASAGQQRqIANBfHFqIgM2AgALIAQgAkECcjYCACAEQQRrIAE2AgAgACADQXxxIgJBgAJJBH8gAkEEdgVBH0H8////AyACIAJB/P///wNPGyICZ2siA0EHayEFIAIgA0EEa3ZBEHMLIgIgBUEEdGpBAnRqKAJgIQMgAUEANgIEIAEgAzYCCCADBEAgAyABNgIECyAAIAVBBHQgAmpBAnRqIAE2AmAgACAAKAIAQQEgBXRyNgIAIAAgBUECdGoiACAAKAIEQQEgAnRyNgIEC5ABAQJ/PwAiAUEATAR/QQEgAWtAAEEASAVBAAsEQAALQdALQQA2AgBB8BdBADYCAANAIABBF0kEQCAAQQJ0QdALakEANgIEQQAhAQNAIAFBEEkEQCAAQQR0IAFqQQJ0QdALakEANgJgIAFBAWohAQwBCwsgAEEBaiEADAELC0HQC0H0Fz8ArEIQhhAGQdALJAALqQEBAX8gAUGAAkkEQCABQQR2IQEFIAFB/v///wFJBEAgAUEBQRsgAWdrdGpBAWshAQsgAUEfIAFnayICQQRrdkEQcyEBIAJBB2shAgsgACACQQJ0aigCBEF/IAF0cSIBBH8gACABaCACQQR0akECdGooAmAFIAAoAgBBfyACQQFqdHEiAQR/IAAgACABaCIAQQJ0aigCBGggAEEEdGpBAnRqKAJgBUEACwsLswIBA38gAUH8////A0sEQEGgCEHgCEHNA0EdEAAACyAAIAFBDE0Ef0EMBSABQRNqQXBxQQRrCyIDEAQiAUUEQCADQYACTwR/IANB/v///wFJBH8gA0EBQRsgA2drdGpBAWsFIAMLBSADC0EEIAAoAqAMPwAiAUEQdEEEa0d0akH//wNqQYCAfHFBEHYhAiABIAIgASACShtAAEEASARAIAJAAEEASARAAAsLIAAgAUEQdD8ArEIQhhAGIAAgAxAEIQELIAEoAgAaIAAgARABIAEoAgAiAkF8cSADayIEQRBPBEAgASADIAJBAnFyNgIAIAFBBGogA2oiAiAEQQRrQQFyNgIAIAAgAhACBSABIAJBfnE2AgAgAUEEaiABKAIAQXxxaiIAIAAoAgBBfXE2AgALIAELhgEBA38gAUETakFwcUEEayEBIAAoAqAMIgMEQCADIAFBEGsiBUYEQCADKAIAIQQgBSEBCwsgAqdBcHEgAWsiA0EUSQRADwsgASAEQQJxIANBCGsiA0EBcnI2AgAgAUEANgIEIAFBADYCCCABQQRqIANqIgNBAjYCACAAIAM2AqAMIAAgARACC0kBAX8gAEHEC0kEQA8LIwBFBEAQAwsgAEEEayEBIABBD3FBASAAGwR/QQEFIAEoAgBBAXELGiABIAEoAgBBAXI2AgAjACABEAILqgEBAn8CQAJAAkACQAJAIABBCGsoAgAOBAABAgMECw8LDwsPCyAAKAIAIgAEQCMCIABBFGsiACgCBCIBQQNxRgRAAkAgAUF8cSIBRQRAIAAoAggaDAELIAEgACgCCCICNgIIIAIgASACKAIEQQNxcjYCBAsjBSIBKAIIIQIgACABIwJFcjYCBCAAIAI2AgggAiAAIAIoAgRBA3FyNgIEIAEgADYCCAsLDwsAC0cAQdQJQdAJNgIAQdgJQdAJNgIAQdAJJAFBtApBsAo2AgBBuApBsAo2AgBBsAokBEGUC0GQCzYCAEGYC0GQCzYCAEGQCyQFC5IBAQJ/IABFBEAPCyAAQRRrIgAoAgRBA3FBA0cEQEHgCkGgCUHDAUEFEAAACwJAIAAoAgRBfHEiAUUEQCAAKAIIGgwBCyABIAAoAggiAjYCCCACIAEgAigCBEEDcXI2AgQLIwEiASgCCCECIAAgASMCcjYCBCAAIAI2AgggAiAAIAIoAgRBA3FyNgIEIAEgADYCCAuSAQEDfyAABEAgAEEUayIBKAIEQQNxQQNGBEBBgApBoAlBtQFBBxAAAAsCQCABKAIEQXxxIgJFBEAgASgCCBoMAQsgAiABKAIIIgM2AgggAyACIAMoAgRBA3FyNgIECyMEIgIoAgghAyABIAJBA3I2AgQgASADNgIIIAMgASADKAIEQQNxcjYCBCACIAE2AggLIAALgwEBAX8gAEHs////A0sEQEGgCEGgCUH9AEEeEAAACyMARQRAEAMLIwAgAEEQahAFIgIgATYCDCACIAA2AhAjASIAKAIIIQEgAiAAIwJyNgIEIAIgATYCCCABIAIgASgCBEEDcXI2AgQgACACNgIIIwMgAigCAEF8cUEEamokAyACQRRqC8IEAQV/IwJBkAgoAgAiAEEDcUYEQAJAIABBfHEiAEUEQEGUCCgCABoMAQsgAEGUCCgCACIBNgIIIAEgACABKAIEQQNxcjYCBAsjBSIAKAIIIQFBkAggACMCRXI2AgBBlAggATYCACABIAEoAgRBA3FBjAhyNgIEIABBjAg2AggLIwJB8AkoAgAiAEEDcUYEQAJAIABBfHEiAEUEQEH0CSgCABoMAQsgAEH0CSgCACIBNgIIIAEgACABKAIEQQNxcjYCBAsjBSIAKAIIIQFB8AkgACMCRXI2AgBB9AkgATYCACABIAEoAgRBA3FB7AlyNgIEIABB7Ak2AggLIwJB0AooAgAiAEEDcUYEQAJAIABBfHEiAEUEQEHUCigCABoMAQsgAEHUCigCACIBNgIIIAEgACABKAIEQQNxcjYCBAsjBSIAKAIIIQFB0AogACMCRXI2AgBB1AogATYCACABIAEoAgRBA3FBzApyNgIEIABBzAo2AggLIwQiASgCBEF8cSEAA0AgACABRwRAIAAoAgQaIABBFGoQCCAAKAIEQXxxIQAMAQsLIwJFIwUiAygCBEF8cSEAA0AgACADRwRAIAAoAgQaIABBFGoQCCAAKAIEQXxxIQAMAQsLIwEiBCgCBEF8cSEAA0AgACAERwRAIAAoAgRBfHEgAEHEC0kEQCAAQQA2AgQgAEEANgIIBSMDIAAoAgBBfHFBBGprJAMgAEEEahAHCyEADAELCyAEIAQ2AgQgBCAENgIIIAMkASAEJAUkAgujCwINfyt8IAUiEiAGbCEXIAwgDKIhKUQAAAAAAADwPyALoyFEIARBAEchFgNAIAIgGUoEQCABIBlBDGxqIgUoAgAhDSAFKAIEIg8gBSgCCCIFRiANIA9GcUUEQCAAIA1BDGxqIg4qAgC7IkIgACAFQQxsaiINKgIAuyI0IAAgD0EMbGoiBSoCALsiM6WlITIgDioCBLsiPyANKgIEuyIxIAUqAgS7IjCkpCEvIA4qAgi7Ij4gDSoCCLsiLSAFKgIIuyIspKQhKyBCIDMgNKSkIiggDKEgCKEgRKKb/AIiDkEASARAQQAhDgsgMiAMoCAIoSBEopz8AiIFIBJBAWsiEUwEQCAFIRELIC8gDKEgCaEgRKKb/AIiDUEASARAQQAhDQsgPyAwIDGlpSIuIAygIAmhIESinPwCIgUgBkEBayIQTARAIAUhEAsgKyAMoSAKoSBEopv8AiIFQQBIBEBBACEFCyA+ICwgLaWlIiogDKAgCqEgRKKc/AIiEyAHQQFrIg9MBEAgEyEPCwNAIAUgD0wEQCArIAogBbcgC6KgIkOhIEMgKqFEAAAAAAAAAAAgKiBDYxsgKyBDZBsiGiAaoiImIClmRQRAIA0hFANAIBAgFE4EQCAmIC8gCSAUtyALoqAiIaEgISAuoUQAAAAAAAAAACAhIC5kGyAhIC9jGyIaIBqioCIlIClmRQRAIA4gEiAUbGogBSAXbGohGCAOIRMDQCARIBNOBEAgJSAoIAggE7cgC6KgIiChICAgMqFEAAAAAAAAAAAgICAyZBsgICAoYxsiGiAaoqAgAyAYQQJ0aioCALsiGiAaomZFBEAgMyBCoSI9ICAgQqEiJKIgMCA/oSI8ICEgP6EiI6KgICwgPqEiOyBDID6hIh+ioCEdIBogGqICfCAkICSiICMgI6KgIB8gH6KgIDQgQqEiOiAkoiAxID+hIjkgI6KgIC0gPqEiOCAfoqAiHEQAAAAAAAAAAGUgHUQAAAAAAAAAAGVxDQAaID0gICAzoSIeoiA8ICEgMKEiQaKgIDsgQyAsoSJAoqAhIiAeIB6iIEEgQaKgIEAgQKKgIDogHqIgOSBBoqAgOCBAoqAiGyAiZSAiRAAAAAAAAAAAZnENABogHSAboiAiIByioSInRAAAAAAAAAAAZSAdRAAAAAAAAAAAZnEgIkQAAAAAAAAAAGVxBEAgJCA9IB0gHSAioaMiG6KhIhogGqIgIyA8IBuioSIaIBqioCAfIDsgG6KhIhogGqKgDAELID0gICA0oSI3oiA8ICEgMaEiNqKgIDsgQyAtoSI1oqAhICA3IDeiIDYgNqKgIDUgNaKgICAgOiA3oiA5IDaioCA4IDWioCIaZSAaRAAAAAAAAAAAZnENABogICAcoiAdIBqioSIdRAAAAAAAAAAAZSAcRAAAAAAAAAAAZnEgGkQAAAAAAAAAAGVxBEAgJCA6IBwgHCAaoaMiG6KhIhogGqIgIyA5IBuioSIaIBqioCAfIDggG6KhIhogGqKgDAELICIgGqIgICAboqEiHEQAAAAAAAAAAGUgGyAioSIbRAAAAAAAAAAAZnEgICAaoSIaRAAAAAAAAAAAZnEEQCAeIDcgHqEgGyAbIBqgoyIboqAiGiAaoiBBIDYgQaEgG6KgIhogGqKgIEAgNSBAoSAboqAiGiAaoqAMAQsgJCA9IB1EAAAAAAAA8D8gHCAdoCAnoKMiGqIiHKIgOiAnIBqiIhuioKEiGiAaoiAjIDwgHKIgOSAboqChIhogGqKgIB8gOyAcoiA4IBuioKEiGiAaoqALIhpkBEAgAyAYQQJ0IhVqIBqftjgCACAWBEAgBCAVaiAZNgIACwsLIBNBAWohEyAYQQFqIRgMAQsLCyAUQQFqIRQMAQsLCyAFQQFqIQUMAQsLCyAZQQFqIRkMAQsLCwYAIAAQBwslAQF/A0AgASADSgRAIAAgA0ECdGogAjgCACADQQFqIQMMAQsLCyUBAX8DQCABIAJKBEAgACACQQJ0akF/NgIAIAJBAWohAgwBCwsLEwAjAEUEQBADCyMAIAAQBUEEagsLrgILAEGMCAsBPABBmAgLLwIAAAAoAAAAQQBsAGwAbwBjAGEAdABpAG8AbgAgAHQAbwBvACAAbABhAHIAZwBlAEHMCAsBPABB2AgLJQIAAAAeAAAAfgBsAGkAYgAvAHIAdAAvAHQAbABzAGYALgB0AHMAQYwJCwE8AEGYCQslAgAAAB4AAAB+AGwAaQBiAC8AcgB0AC8AdABjAG0AcwAuAHQAcwBB7AkLATwAQfgJCzECAAAAKgAAAE8AYgBqAGUAYwB0ACAAYQBsAHIAZQBhAGQAeQAgAHAAaQBuAG4AZQBkAEHMCgsBPABB2AoLLwIAAAAoAAAATwBiAGoAZQBjAHQAIABpAHMAIABuAG8AdAAgAHAAaQBuAG4AZQBkAEGwCwsNBAAAACAAAAAgAAAAIA==';
+const WASM_B64 = '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';
 
 // wasm/ の場所はページからの相対。GitHub Pages のサブパス配信でも正しく解決される。
 const WASM_URL = 'wasm/dynafield.wasm';
 
 let W = null;             // instance.exports
+let WMod = null;          // WebAssembly.Module（ワーカーへ渡す）
 let state = 'idle';       // idle | loading | ready | failed
 let failReason = '';
 
 function wasmFieldState() { return state; }
 function wasmFieldReady() { return state === 'ready'; }
 function wasmFieldError() { return failReason; }
+/** ワーカーに渡す用のコンパイル済みモジュール */
+function wasmFieldModule() { return WMod; }
 
 function base64ToBytes(b64) {
   const bin = atob(b64);
@@ -2826,10 +2829,11 @@ function base64ToBytes(b64) {
  */
 async function initWasmFieldFromBytes(bytes) {
   try {
-    const { instance } = await WebAssembly.instantiate(bytes, {
+    const { instance, module } = await WebAssembly.instantiate(bytes, {
       env: { abort() { throw new Error('wasm abort'); } },
     });
     W = instance.exports;
+    WMod = module;
     state = 'ready';
     return true;
   } catch (err) {
@@ -2857,9 +2861,10 @@ async function initWasmField() {
       if (!res.ok) throw new Error(`${WASM_URL} が ${res.status}`);
       bytes = new Uint8Array(await res.arrayBuffer());
     }
-    const { instance } = await WebAssembly.instantiate(bytes, {
+    const { instance, module } = await WebAssembly.instantiate(bytes, {
       env: { abort() { throw new Error('wasm abort'); } },
     });
+    WMod = module;
     const e = instance.exports;
     for (const fn of ['alloc', 'release', 'splat', 'fillField', 'fillClosest', 'memory']) {
       if (!e[fn]) throw new Error(`export ${fn} がありません`);
@@ -2902,7 +2907,7 @@ function wasmSplat(mesh, field, closest, g) {
     if (pClose) W.fillClosest(pClose, total);
 
     W.splat(pPos, pTri, nt, pField, pClose,
-      g.nx, g.ny, g.nz, g.ox, g.oy, g.oz, g.h, g.band);
+      g.nx, g.ny, g.nz, 0, g.nz - 1, g.ox, g.oy, g.oz, g.h, g.band);
 
     // 結果を JS 側の配列へ戻す（以降の処理は通常の TypedArray 上で行う）
     const b2 = W.memory.buffer;
@@ -2919,7 +2924,285 @@ function wasmSplat(mesh, field, closest, g) {
     if (pPos) W.release(pPos);
   }
 }
-  return { wasmFieldState, wasmFieldReady, wasmFieldError, initWasmFieldFromBytes, initWasmField, wasmSplat };
+  return { wasmFieldState, wasmFieldReady, wasmFieldError, wasmFieldModule, initWasmFieldFromBytes, initWasmField, wasmSplat };
+})();
+
+/* ===== parallelfield.js ===== */
+__M['parallelfield.js'] = (function () {
+// ---------------------------------------------------------------------------
+// parallelfield.js
+// 距離場スプラットを Web Worker で並列化する。
+//
+// 分割は Z スラブ。各ワーカーは自分の [kBegin, kEnd] の voxel だけを書くので
+// 書き込み先が重ならず、マージ処理が要らない（結果を所定のオフセットへ置くだけ）。
+//
+// SharedArrayBuffer を使わないのが要点。スラブ単位で結果を Transferable として
+// 返せば足りるので、COOP/COEP ヘッダを設定できない GitHub Pages でも動く。
+//
+// 各ワーカーには「自分のスラブに band 以内で掛かる三角形」だけを、
+// 頂点を詰め直して送る。全頂点配列を人数分コピーすると転送量が跳ね上がるため。
+//
+// ワーカーを作れない環境（file:// の Blob Worker はブロックされる）では
+// 単に false を返し、呼び出し側が単一スレッド版へフォールバックする。
+// ---------------------------------------------------------------------------
+
+// ワーカー本体。別ファイルにすると単一ファイル版で読めなくなるので文字列で持つ。
+const WORKER_SRC = `
+let W = null;
+self.onmessage = async (ev) => {
+  const m = ev.data;
+  try {
+    if (m.type === 'init') {
+      const inst = await WebAssembly.instantiate(m.module, {
+        env: { abort() { throw new Error('wasm abort'); } },
+      });
+      W = inst.exports;
+      self.postMessage({ type: 'ready', id: m.id });
+      return;
+    }
+    if (m.type === 'splat') {
+      const { pos, tris, nv, nt, g, kBegin, kEnd, wantClosest, id } = m;
+      const slabK = kEnd - kBegin + 1;
+      const count = g.nx * g.ny * slabK;
+      const pPos = W.alloc(nv * 12);
+      const pTri = W.alloc(nt * 12);
+      const pField = W.alloc(count * 4);
+      const pClose = wantClosest ? W.alloc(count * 4) : 0;
+      const buf = W.memory.buffer;
+      new Float32Array(buf, pPos, nv * 3).set(pos);
+      new Int32Array(buf, pTri, nt * 3).set(tris);
+      W.fillField(pField, count, g.band);
+      if (pClose) W.fillClosest(pClose, count);
+      W.splat(pPos, pTri, nt, pField, pClose,
+        g.nx, g.ny, g.nz, kBegin, kEnd, g.ox, g.oy, g.oz, g.h, g.band);
+      const b2 = W.memory.buffer;
+      const field = new Float32Array(count);
+      field.set(new Float32Array(b2, pField, count));
+      let closest = null;
+      if (pClose) {
+        closest = new Int32Array(count);
+        closest.set(new Int32Array(b2, pClose, count));
+      }
+      if (pClose) W.release(pClose);
+      W.release(pField); W.release(pTri); W.release(pPos);
+      const transfer = closest ? [field.buffer, closest.buffer] : [field.buffer];
+      self.postMessage({ type: 'done', id, kBegin, slabK, field, closest }, transfer);
+      return;
+    }
+  } catch (err) {
+    self.postMessage({ type: 'error', id: m && m.id, message: String((err && err.message) || err) });
+  }
+};
+`;
+
+let pool = null;          // { workers: [], size }
+let poolState = 'idle';   // idle | ready | failed
+let poolError = '';
+let blobUrl = null;
+
+function parallelState() { return poolState; }
+function parallelError() { return poolError; }
+function parallelWorkers() { return pool ? pool.workers.length : 0; }
+
+function hardwareThreads() {
+  const n = (typeof navigator === 'object' && navigator.hardwareConcurrency) || 4;
+  // 1 コアは UI とメインスレッドの後処理に残す
+  return Math.max(1, Math.min(8, n - 1));
+}
+
+/**
+ * ワーカープールを用意する。WebAssembly.Module を渡すと各ワーカーで
+ * 再コンパイルせずに済む（Module は構造化クローンで安く複製できる）。
+ * @returns {Promise<boolean>}
+ */
+async function initParallelField(wasmModule, opts = {}) {
+  if (poolState === 'ready') return true;
+  if (poolState === 'failed') return false;
+  try {
+    if (typeof Worker !== 'function' || typeof Blob !== 'function' || !wasmModule) {
+      throw new Error('Worker が使えません');
+    }
+    const size = Math.max(1, Math.min(opts.workers || hardwareThreads(), 16));
+    blobUrl = URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' }));
+    const workers = [];
+    for (let i = 0; i < size; i++) workers.push(new Worker(blobUrl));
+
+    // 全ワーカーで WASM を初期化できるまで待つ
+    await Promise.all(workers.map((w, i) => new Promise((res, rej) => {
+      const to = setTimeout(() => rej(new Error('ワーカー初期化がタイムアウト')), 10000);
+      w.onmessage = (ev) => {
+        if (ev.data && ev.data.type === 'ready') { clearTimeout(to); res(); }
+        else if (ev.data && ev.data.type === 'error') { clearTimeout(to); rej(new Error(ev.data.message)); }
+      };
+      w.onerror = (e) => { clearTimeout(to); rej(new Error(e.message || 'ワーカーエラー')); };
+      w.postMessage({ type: 'init', id: i, module: wasmModule });
+    })));
+
+    pool = { workers };
+    poolState = 'ready';
+    return true;
+  } catch (err) {
+    poolError = String((err && err.message) || err);
+    poolState = 'failed';
+    disposeParallelField();
+    return false;
+  }
+}
+
+function disposeParallelField() {
+  if (pool) { for (const w of pool.workers) { try { w.terminate(); } catch { /* ignore */ } } }
+  pool = null;
+  if (blobUrl) { try { URL.revokeObjectURL(blobUrl); } catch { /* ignore */ } blobUrl = null; }
+}
+
+/**
+ * 各スラブに掛かる三角形を集めて、頂点を詰め直したペイロードを作る。
+ * 全頂点配列を人数分コピーすると 3M 面で 100MB を超えるため、
+ * 参照される頂点だけを取り出して番号を振り直す。
+ */
+function buildSlabPayloads(mesh, g, slabs) {
+  const P = mesh.positions, T = mesh.tris;
+  const nSlab = slabs.length;
+  const invH = 1 / g.h;
+  const band = g.band;
+
+  // k → スラブ番号の逆引き。スラブは連続範囲なので、三角形の [k0,k1] から
+  // 掛かるスラブ範囲を O(1) で求められる（全スラブを走査しなくてよい）。
+  const slabOfK = new Int32Array(g.nz);
+  for (let s = 0; s < nSlab; s++) {
+    for (let k = slabs[s].kBegin; k <= slabs[s].kEnd; k++) slabOfK[k] = s;
+  }
+
+  // 1) 各三角形の [k0,k1] を求め、掛かるスラブの件数を数える
+  const counts = new Int32Array(nSlab);
+  const kOf = new Int32Array(mesh.nt * 2);   // 三角形ごとの [k0, k1]
+  for (let t = 0; t < mesh.nt; t++) {
+    const ti = t * 3;
+    const ia = T[ti], ib = T[ti + 1], ic = T[ti + 2];
+    if (ia === ib && ib === ic) { kOf[t * 2] = 1; kOf[t * 2 + 1] = 0; continue; }
+    const az = P[ia * 3 + 2], bz = P[ib * 3 + 2], cz = P[ic * 3 + 2];
+    const z0 = Math.min(az, bz, cz), z1 = Math.max(az, bz, cz);
+    let k0 = Math.ceil((z0 - band - g.oz) * invH); if (k0 < 0) k0 = 0;
+    let k1 = Math.floor((z1 + band - g.oz) * invH); if (k1 > g.nz - 1) k1 = g.nz - 1;
+    kOf[t * 2] = k0; kOf[t * 2 + 1] = k1;
+    if (k1 < k0) continue;
+    const s0 = slabOfK[k0], s1 = slabOfK[k1];
+    for (let s = s0; s <= s1; s++) counts[s]++;
+  }
+
+  // 2) CSR に詰めて「スラブ → 三角形リスト」を作る。
+  //    これをやらずにスラブごとに全三角形を走査すると O(スラブ数 × 面数) になり、
+  //    300 万面 × 8 スラブで 2600 万回のループになってしまう。
+  const off = new Int32Array(nSlab + 1);
+  for (let s = 0; s < nSlab; s++) off[s + 1] = off[s] + counts[s];
+  const slabTris = new Int32Array(off[nSlab]);
+  const fill = off.slice(0, nSlab);
+  for (let t = 0; t < mesh.nt; t++) {
+    const k0 = kOf[t * 2], k1 = kOf[t * 2 + 1];
+    if (k1 < k0) continue;
+    const s0 = slabOfK[k0], s1 = slabOfK[k1];
+    for (let s = s0; s <= s1; s++) slabTris[fill[s]++] = t;
+  }
+
+  // 2) スラブごとに頂点を詰め直す
+  const payloads = new Array(nSlab);
+  const remap = new Int32Array(mesh.nv);
+  const stamp = new Int32Array(mesh.nv);
+  let stampId = 0;
+  for (let s = 0; s < nSlab; s++) {
+    const n = counts[s];
+    const sl = slabs[s];
+    if (n === 0) { payloads[s] = null; continue; }
+    const tris = new Int32Array(n * 3);
+    const posTmp = new Float32Array(Math.min(mesh.nv, n * 3) * 3);
+    let nv = 0, w = 0;
+    stampId++;
+    let posCap = posTmp.length / 3;
+    let pos = posTmp;
+    const pushVert = (v) => {
+      if (stamp[v] === stampId) return remap[v];
+      if (nv >= posCap) {          // 稀に足りなくなったら伸ばす
+        posCap = Math.ceil(posCap * 1.6) + 16;
+        const np = new Float32Array(posCap * 3);
+        np.set(pos.subarray(0, nv * 3));
+        pos = np;
+      }
+      stamp[v] = stampId;
+      remap[v] = nv;
+      pos[nv * 3] = P[v * 3]; pos[nv * 3 + 1] = P[v * 3 + 1]; pos[nv * 3 + 2] = P[v * 3 + 2];
+      return nv++;
+    };
+    for (let q = off[s]; q < off[s + 1]; q++) {
+      const ti = slabTris[q] * 3;
+      tris[w++] = pushVert(T[ti]);
+      tris[w++] = pushVert(T[ti + 1]);
+      tris[w++] = pushVert(T[ti + 2]);
+    }
+    payloads[s] = { pos: pos.subarray(0, nv * 3), tris: tris.subarray(0, w), nv, nt: w / 3 };
+  }
+  return payloads;
+}
+
+/**
+ * 距離場をワーカーで並列に計算して field / closest を埋める。
+ * @returns {Promise<boolean>} 実行できたか（false なら呼び出し側が単一スレッド版へ）
+ */
+async function parallelSplat(mesh, field, closest, g) {
+  if (poolState !== 'ready' || !pool) return false;
+  const nSlab = pool.workers.length;
+  if (nSlab < 2) return false;
+
+  try {
+    // Z 方向をワーカー数に分割（端数は前から配る）
+    const slabs = [];
+    const base = Math.floor(g.nz / nSlab), rem = g.nz % nSlab;
+    let k = 0;
+    for (let s = 0; s < nSlab; s++) {
+      const len = base + (s < rem ? 1 : 0);
+      if (len <= 0) continue;
+      slabs.push({ kBegin: k, kEnd: k + len - 1 });
+      k += len;
+    }
+
+    const payloads = buildSlabPayloads(mesh, g, slabs);
+    const wantClosest = !!closest;
+    const gp = { nx: g.nx, ny: g.ny, nz: g.nz, ox: g.ox, oy: g.oy, oz: g.oz, h: g.h, band: g.band };
+    const plane = g.nx * g.ny;
+
+    await Promise.all(slabs.map((sl, s) => new Promise((res, rej) => {
+      const p = payloads[s];
+      const slabK = sl.kEnd - sl.kBegin + 1;
+      if (!p) {
+        // 三角形が掛からないスラブ: band のままで良い（初期値と同じ）
+        res();
+        return;
+      }
+      const w = pool.workers[s];
+      const to = setTimeout(() => rej(new Error('スラブ計算がタイムアウト')), 120000);
+      w.onmessage = (ev) => {
+        const d = ev.data;
+        if (!d) return;
+        if (d.type === 'error') { clearTimeout(to); rej(new Error(d.message)); return; }
+        if (d.type !== 'done') return;
+        clearTimeout(to);
+        field.set(d.field, sl.kBegin * plane);
+        if (closest && d.closest) closest.set(d.closest, sl.kBegin * plane);
+        res();
+      };
+      w.onerror = (e) => { clearTimeout(to); rej(new Error(e.message || 'ワーカーエラー')); };
+      // pos / tris はコピーで渡す（メインスレッド側でも使い続けるため）
+      w.postMessage({
+        type: 'splat', id: s, pos: p.pos, tris: p.tris, nv: p.nv, nt: p.nt,
+        g: gp, kBegin: sl.kBegin, kEnd: sl.kEnd, wantClosest, slabK,
+      });
+    })));
+    return true;
+  } catch (err) {
+    poolError = String((err && err.message) || err);
+    return false;
+  }
+}
+  return { parallelState, parallelError, parallelWorkers, initParallelField, disposeParallelField, parallelSplat };
 })();
 
 /* ===== dynamesh.js ===== */
@@ -2941,6 +3224,7 @@ __M['dynamesh.js'] = (function () {
 
 const { clamp } = __M['math.js'];
 const { wasmSplat, wasmFieldReady } = __M['wasmfield.js'];
+const { parallelSplat, parallelState } = __M['parallelfield.js'];
 
 const LARGE = 1e9;
 
@@ -3045,7 +3329,7 @@ function hasBoundary(mesh) {
  *   maxVoxels     : 総ボクセル数の上限（超えると解像度を自動的に落とす）
  * @returns {{positions, indices, colors, stats}}
  */
-function dynamesh(mesh, opts = {}) {
+async function dynamesh(mesh, opts = {}) {
   const t0 = Date.now();
   // 段階別の所要時間（どこが重いかを実測できるようにしておく）
   const phase = {};
@@ -3092,9 +3376,16 @@ function dynamesh(mesh, opts = {}) {
   mark('grid');
   // ---- 2. 狭帯域の符号なし距離場 ---------------------------------------
   // 全体の 9 割を占める部分。WASM が使えればそちらへ（結果は JS 版と完全一致）。
-  let usedWasm = false;
-  if (opts.wasm !== false && wasmFieldReady()) {
-    usedWasm = wasmSplat(mesh, field, closest, { nx, ny, nz, ox, oy, oz, h, band });
+  const gp = { nx, ny, nz, ox, oy, oz, h, band };
+  let usedWasm = false, usedParallel = false;
+  // 十分大きいときだけワーカーに出す（小さいと転送のほうが高くつく）
+  const heavy = mesh.liveTris >= 60000 || total >= 400000;
+  if (opts.parallel !== false && heavy && parallelState() === 'ready') {
+    usedParallel = await parallelSplat(mesh, field, closest, gp);
+    usedWasm = usedParallel;
+  }
+  if (!usedWasm && opts.wasm !== false && wasmFieldReady()) {
+    usedWasm = wasmSplat(mesh, field, closest, gp);
   }
 
   // WASM が使えなかったときの JS 版（アルゴリズムは同一）
@@ -3377,6 +3668,7 @@ function dynamesh(mesh, opts = {}) {
       phase,
       inputTris: mesh.liveTris,
       wasm: usedWasm,
+      parallel: usedParallel,
       resolution: res,
       grid: [nx, ny, nz],
       voxelSize: h,
@@ -4651,9 +4943,9 @@ class Sculptor {
    * 自己交差や分離した部品が和集合として healing される。
    * @returns {object} 統計（頂点数・所要時間など）
    */
-  dynamesh(opts = {}) {
+  async dynamesh(opts = {}) {
     const m = this.mesh;
-    const r = dynamesh(m, opts);
+    const r = await dynamesh(m, opts);
     if (r.positions.length === 0 || r.indices.length === 0) {
       return Object.assign({ failed: true }, r.stats);
     }
@@ -7265,7 +7557,8 @@ const { BRUSH_IDS, BRUSHES, usesGrabPlane } = __M['brushes.js'];
 const { buildUI } = __M['ui.js'];
 const { exportOBJ, exportSTL, exportPLY, importOBJ, download } = __M['io.js'];
 const store = __M['store.js'];
-const { initWasmField, wasmFieldState, wasmFieldError } = __M['wasmfield.js'];
+const { initWasmField, wasmFieldState, wasmFieldError, wasmFieldModule } = __M['wasmfield.js'];
+const { initParallelField, parallelState, parallelWorkers } = __M['parallelfield.js'];
 
 const BG_PRESETS = {
   dark: { top: [0.032, 0.036, 0.046, 1], bot: [0.0065, 0.0075, 0.011, 1], ring: [1, 1, 1, 0.92] },
@@ -7401,7 +7694,7 @@ const app = {
     await new Promise(requestAnimationFrame);
     try {
       const before = mesh.liveVerts;
-      const s = sculptor.dynamesh({
+      const s = await sculptor.dynamesh({
         resolution: state.dynaResolution,
         smooth: state.dynaSmooth,
         transferColor: state.dynaTransferColor,
@@ -7998,8 +8291,10 @@ async function boot() {
   ui.refreshProjects();
 
   // 距離場の WASM を裏で読み込む（失敗しても JS 版で動くので待たない）
-  initWasmField().then((ok) => {
-    if (!ok) console.info('WASM 距離場は使えないため JS 版で動作します: ' + wasmFieldError());
+  initWasmField().then(async (ok) => {
+    if (!ok) { console.info('WASM 距離場は使えないため JS 版で動作します: ' + wasmFieldError()); return; }
+    // ワーカープールも用意する（作れなければ単一スレッドのまま）
+    await initParallelField(wasmFieldModule());
   });
 
   renderer.onDeviceLost = (info) => {
@@ -8035,6 +8330,7 @@ boot();
 
 // デバッグ / 自動テスト用
 window.__wasmState = wasmFieldState;
+window.__parState = () => parallelState() + ':' + parallelWorkers();
 window.WebSculpt = {
   state, mesh, camera, app, BRUSHES,
   pointer: ptr,

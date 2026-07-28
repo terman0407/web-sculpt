@@ -11,7 +11,8 @@ import { BRUSH_IDS, BRUSHES, usesGrabPlane } from './brushes.js';
 import { buildUI } from './ui.js';
 import { exportOBJ, exportSTL, exportPLY, importOBJ, download } from './io.js';
 import * as store from './store.js';
-import { initWasmField, wasmFieldState, wasmFieldError } from './wasmfield.js';
+import { initWasmField, wasmFieldState, wasmFieldError, wasmFieldModule } from './wasmfield.js';
+import { initParallelField, parallelState, parallelWorkers } from './parallelfield.js';
 
 const BG_PRESETS = {
   dark: { top: [0.032, 0.036, 0.046, 1], bot: [0.0065, 0.0075, 0.011, 1], ring: [1, 1, 1, 0.92] },
@@ -147,7 +148,7 @@ const app = {
     await new Promise(requestAnimationFrame);
     try {
       const before = mesh.liveVerts;
-      const s = sculptor.dynamesh({
+      const s = await sculptor.dynamesh({
         resolution: state.dynaResolution,
         smooth: state.dynaSmooth,
         transferColor: state.dynaTransferColor,
@@ -749,8 +750,10 @@ async function boot() {
   ui.refreshProjects();
 
   // 距離場の WASM を裏で読み込む（失敗しても JS 版で動くので待たない）
-  initWasmField().then((ok) => {
-    if (!ok) console.info('WASM 距離場は使えないため JS 版で動作します: ' + wasmFieldError());
+  initWasmField().then(async (ok) => {
+    if (!ok) { console.info('WASM 距離場は使えないため JS 版で動作します: ' + wasmFieldError()); return; }
+    // ワーカープールも用意する（作れなければ単一スレッドのまま）
+    await initParallelField(wasmFieldModule());
   });
 
   renderer.onDeviceLost = (info) => {
@@ -786,6 +789,7 @@ boot();
 
 // デバッグ / 自動テスト用
 window.__wasmState = wasmFieldState;
+window.__parState = () => parallelState() + ':' + parallelWorkers();
 window.WebSculpt = {
   state, mesh, camera, app, BRUSHES,
   pointer: ptr,

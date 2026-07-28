@@ -82,8 +82,11 @@ export function splat(
   posPtr: usize, triPtr: usize, nt: i32,
   fieldPtr: usize, closestPtr: usize,
   nx: i32, ny: i32, nz: i32,
+  kBegin: i32, kEnd: i32,
   ox: f64, oy: f64, oz: f64, h: f64, band: f64,
 ): void {
+  // field / closest は [kBegin, kEnd] のスラブぶんだけを持つ配列。
+  // 添字は i + j*nx + (k - kBegin)*nx*ny。kBegin=0, kEnd=nz-1 を渡せば全体になる。
   const sy = nx;
   const sz = nx * ny;
   const band2 = band * band;
@@ -112,8 +115,8 @@ export function splat(
     let i1 = <i32>Math.floor((tx1 + band - ox) * invH); if (i1 > nx - 1) i1 = nx - 1;
     let j0 = <i32>Math.ceil((ty0 - band - oy) * invH); if (j0 < 0) j0 = 0;
     let j1 = <i32>Math.floor((ty1 + band - oy) * invH); if (j1 > ny - 1) j1 = ny - 1;
-    let k0 = <i32>Math.ceil((tz0 - band - oz) * invH); if (k0 < 0) k0 = 0;
-    let k1 = <i32>Math.floor((tz1 + band - oz) * invH); if (k1 > nz - 1) k1 = nz - 1;
+    let k0 = <i32>Math.ceil((tz0 - band - oz) * invH); if (k0 < kBegin) k0 = kBegin;
+    let k1 = <i32>Math.floor((tz1 + band - oz) * invH); if (k1 > kEnd) k1 = kEnd;
 
     for (let k = k0; k <= k1; k++) {
       const pz = oz + <f64>k * h;
@@ -125,7 +128,7 @@ export function splat(
         const ey = py < ty0 ? ty0 - py : (py > ty1 ? py - ty1 : 0.0);
         const e2zy = e2z + ey * ey;
         if (e2zy >= band2) continue;
-        let idx = i0 + j * sy + k * sz;
+        let idx = i0 + j * sy + (k - kBegin) * sz;
         for (let i = i0; i <= i1; i++, idx++) {
           const px = ox + <f64>i * h;
           const cur = <f64>load<f32>(fieldPtr + (<usize>idx) * 4);

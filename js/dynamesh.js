@@ -15,6 +15,7 @@
 
 import { clamp } from './math.js';
 import { wasmSplat, wasmFieldReady } from './wasmfield.js';
+import { parallelSplat, parallelState } from './parallelfield.js';
 
 const LARGE = 1e9;
 
@@ -119,7 +120,7 @@ export function hasBoundary(mesh) {
  *   maxVoxels     : 総ボクセル数の上限（超えると解像度を自動的に落とす）
  * @returns {{positions, indices, colors, stats}}
  */
-export function dynamesh(mesh, opts = {}) {
+export async function dynamesh(mesh, opts = {}) {
   const t0 = Date.now();
   // 段階別の所要時間（どこが重いかを実測できるようにしておく）
   const phase = {};
@@ -166,9 +167,16 @@ export function dynamesh(mesh, opts = {}) {
   mark('grid');
   // ---- 2. 狭帯域の符号なし距離場 ---------------------------------------
   // 全体の 9 割を占める部分。WASM が使えればそちらへ（結果は JS 版と完全一致）。
-  let usedWasm = false;
-  if (opts.wasm !== false && wasmFieldReady()) {
-    usedWasm = wasmSplat(mesh, field, closest, { nx, ny, nz, ox, oy, oz, h, band });
+  const gp = { nx, ny, nz, ox, oy, oz, h, band };
+  let usedWasm = false, usedParallel = false;
+  // 十分大きいときだけワーカーに出す（小さいと転送のほうが高くつく）
+  const heavy = mesh.liveTris >= 60000 || total >= 400000;
+  if (opts.parallel !== false && heavy && parallelState() === 'ready') {
+    usedParallel = await parallelSplat(mesh, field, closest, gp);
+    usedWasm = usedParallel;
+  }
+  if (!usedWasm && opts.wasm !== false && wasmFieldReady()) {
+    usedWasm = wasmSplat(mesh, field, closest, gp);
   }
 
   // WASM が使えなかったときの JS 版（アルゴリズムは同一）
@@ -451,6 +459,7 @@ export function dynamesh(mesh, opts = {}) {
       phase,
       inputTris: mesh.liveTris,
       wasm: usedWasm,
+      parallel: usedParallel,
       resolution: res,
       grid: [nx, ny, nz],
       voxelSize: h,

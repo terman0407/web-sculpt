@@ -20,12 +20,15 @@ const WASM_B64 = '';
 const WASM_URL = 'wasm/dynafield.wasm';
 
 let W = null;             // instance.exports
+let WMod = null;          // WebAssembly.Module（ワーカーへ渡す）
 let state = 'idle';       // idle | loading | ready | failed
 let failReason = '';
 
 export function wasmFieldState() { return state; }
 export function wasmFieldReady() { return state === 'ready'; }
 export function wasmFieldError() { return failReason; }
+/** ワーカーに渡す用のコンパイル済みモジュール */
+export function wasmFieldModule() { return WMod; }
 
 function base64ToBytes(b64) {
   const bin = atob(b64);
@@ -39,10 +42,11 @@ function base64ToBytes(b64) {
  */
 export async function initWasmFieldFromBytes(bytes) {
   try {
-    const { instance } = await WebAssembly.instantiate(bytes, {
+    const { instance, module } = await WebAssembly.instantiate(bytes, {
       env: { abort() { throw new Error('wasm abort'); } },
     });
     W = instance.exports;
+    WMod = module;
     state = 'ready';
     return true;
   } catch (err) {
@@ -70,9 +74,10 @@ export async function initWasmField() {
       if (!res.ok) throw new Error(`${WASM_URL} が ${res.status}`);
       bytes = new Uint8Array(await res.arrayBuffer());
     }
-    const { instance } = await WebAssembly.instantiate(bytes, {
+    const { instance, module } = await WebAssembly.instantiate(bytes, {
       env: { abort() { throw new Error('wasm abort'); } },
     });
+    WMod = module;
     const e = instance.exports;
     for (const fn of ['alloc', 'release', 'splat', 'fillField', 'fillClosest', 'memory']) {
       if (!e[fn]) throw new Error(`export ${fn} がありません`);
@@ -115,7 +120,7 @@ export function wasmSplat(mesh, field, closest, g) {
     if (pClose) W.fillClosest(pClose, total);
 
     W.splat(pPos, pTri, nt, pField, pClose,
-      g.nx, g.ny, g.nz, g.ox, g.oy, g.oz, g.h, g.band);
+      g.nx, g.ny, g.nz, 0, g.nz - 1, g.ox, g.oy, g.oz, g.h, g.band);
 
     // 結果を JS 側の配列へ戻す（以降の処理は通常の TypedArray 上で行う）
     const b2 = W.memory.buffer;

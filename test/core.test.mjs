@@ -350,8 +350,8 @@ head('weld');
 head('ダイナメッシュ');
 
 /** 出力ジオメトリを SculptMesh に載せて検証する */
-function checkDyna(src, opts, label, expect = {}) {
-  const r = dynamesh(src, opts);
+async function checkDyna(src, opts, label, expect = {}) {
+  const r = await dynamesh(src, opts);
   const m = new SculptMesh();
   if (r.positions.length === 0) { failures++; console.log(`  FAIL ${label}: 出力が空`); return null; }
   m.setGeometry(r.positions, r.indices, r.colors);
@@ -391,7 +391,7 @@ function checkDyna(src, opts, label, expect = {}) {
   const g = PRIMITIVES.sphere();
   const src = new SculptMesh();
   src.setGeometry(g.positions, g.indices);
-  const res = checkDyna(src, { resolution: 64, smooth: 1 }, '球 res64');
+  const res = await checkDyna(src, { resolution: 64, smooth: 1 }, '球 res64');
   if (res) {
     // 半径 1 の球なので、全頂点が原点から 1 付近にあるはず
     let min = Infinity, max = -Infinity;
@@ -412,8 +412,8 @@ function checkDyna(src, opts, label, expect = {}) {
   const g = PRIMITIVES.sphere();
   const src = new SculptMesh();
   src.setGeometry(g.positions, g.indices);
-  const a = dynamesh(src, { resolution: 40, smooth: 0 });
-  const b = dynamesh(src, { resolution: 80, smooth: 0 });
+  const a = await dynamesh(src, { resolution: 40, smooth: 0 });
+  const b = await dynamesh(src, { resolution: 80, smooth: 0 });
   const ratio = (b.stats.verts / a.stats.verts);
   console.log(`  res40 → ${a.stats.verts} 頂点 / res80 → ${b.stats.verts} 頂点 (比 ${ratio.toFixed(2)})`);
   ok(ratio > 3.0 && ratio < 5.0, `解像度 2 倍で頂点数がおよそ 4 倍 (比 ${ratio.toFixed(2)})`);
@@ -441,7 +441,7 @@ function checkDyna(src, opts, label, expect = {}) {
   // 入力は 2 成分なので χ = 4
   validate(src, { closed: true, genus: -1, label: '重なった 2 球（入力）' });
 
-  const res = checkDyna(src, { resolution: 72, smooth: 1 }, '重なった 2 球 → 融合');
+  const res = await checkDyna(src, { resolution: 72, smooth: 1 }, '重なった 2 球 → 融合');
   if (res) {
     // 連結成分が 1 つになっていること
     const m = res.m;
@@ -474,9 +474,9 @@ function checkDyna(src, opts, label, expect = {}) {
   // Y を強く潰して自身にめり込ませる
   for (let v = 0; v < src.nv; v++) src.positions[v * 3 + 1] *= 0.12;
   src.computeAllNormals();
-  checkDyna(src, { resolution: 80, smooth: 1 }, '潰したトーラス res80', { genus: null });
+  await checkDyna(src, { resolution: 80, smooth: 1 }, '潰したトーラス res80', { genus: null });
   // 解像度を上げれば厚みが十分に取れて修復不要（トーラスのまま χ = 0）になる
-  const hi = checkDyna(src, { resolution: 220, smooth: 1 }, '潰したトーラス res220', { genus: 1 });
+  const hi = await checkDyna(src, { resolution: 220, smooth: 1 }, '潰したトーラス res220', { genus: 1 });
   if (hi) ok(hi.r.stats.repair.clean === true, '高解像度では多様体修復が不要になる');
 }
 
@@ -490,7 +490,7 @@ function checkDyna(src, opts, label, expect = {}) {
   const src2 = new SculptMesh();
   src2.setGeometry(g2.positions, g2.indices);
   ok(hasBoundary(src2) === false, '球には境界辺がない');
-  const res = checkDyna(src, { resolution: 56, smooth: 1 }, '平面 → 板状シェル');
+  const res = await checkDyna(src, { resolution: 56, smooth: 1 }, '平面 → 板状シェル');
   if (res) {
     let minY = Infinity, maxY = -Infinity;
     const m = res.m;
@@ -515,7 +515,7 @@ function checkDyna(src, opts, label, expect = {}) {
     src.colors[i + 1] = 0;
     src.colors[i + 2] = red ? 0 : 1;
   }
-  const r = dynamesh(src, { resolution: 64, smooth: 0, transferColor: true });
+  const r = await dynamesh(src, { resolution: 64, smooth: 0, transferColor: true });
   ok(r.colors !== null && r.colors.length === r.positions.length, '色配列が返る');
   let redRight = 0, blueLeft = 0, wrong = 0;
   for (let v = 0; v < r.positions.length / 3; v++) {
@@ -529,7 +529,7 @@ function checkDyna(src, opts, label, expect = {}) {
   console.log(`  色転写: 正 ${redRight + blueLeft} / 誤 ${wrong}`);
   ok(wrong < (redRight + blueLeft) * 0.03, `ポリペイントが位置どおりに転写された (誤 ${wrong})`);
 
-  const r2 = dynamesh(src, { resolution: 48, smooth: 0, transferColor: false });
+  const r2 = await dynamesh(src, { resolution: 48, smooth: 0, transferColor: false });
   ok(r2.colors === null, '転写オフなら色は返らない');
 }
 
@@ -549,7 +549,7 @@ function checkDyna(src, opts, label, expect = {}) {
   s.endStroke();
   const vBefore = m.liveVerts;
 
-  const st = s.dynamesh({ resolution: 56, smooth: 1, transferColor: true });
+  const st = await s.dynamesh({ resolution: 56, smooth: 1, transferColor: true });
   ok(!st.failed, 'Sculptor.dynamesh が成功する');
   ok(m.liveVerts !== vBefore, `トポロジが作り直された (${vBefore} → ${m.liveVerts})`);
   ok(s.hoverSeed === -1, 'ホバーシードが無効化される');
@@ -575,7 +575,7 @@ function checkDyna(src, opts, label, expect = {}) {
   const g = PRIMITIVES.sphere();
   const src = new SculptMesh();
   src.setGeometry(g.positions, g.indices);
-  const r = dynamesh(src, { resolution: 512, smooth: 0, transferColor: false, maxVoxels: 200000 });
+  const r = await dynamesh(src, { resolution: 512, smooth: 0, transferColor: false, maxVoxels: 200000 });
   const voxels = r.stats.grid[0] * r.stats.grid[1] * r.stats.grid[2];
   console.log(`  上限 200k → ${r.stats.grid.join('×')} = ${voxels.toLocaleString()} voxel`);
   ok(voxels <= 200000, `ボクセル数が上限内に収まる (${voxels})`);
@@ -830,7 +830,7 @@ function sphereSculptor(over = {}) {
 
   const r2 = sphereSculptor();
   r2.s.divide();
-  r2.s.dynamesh({ resolution: 48, smooth: 0, transferColor: false });
+  await r2.s.dynamesh({ resolution: 48, smooth: 0, transferColor: false });
   ok(r2.s.levels.count === 0, 'ダイナメッシュでレベルが破棄される');
 }
 
@@ -904,8 +904,8 @@ head('WASM 距離場（JS 版との一致）');
     ok(ok2 === true && wasmFieldReady(), 'WASM を初期化できる');
 
     for (const res of [64, 128]) {
-      const jsR = dynamesh(src, { resolution: res, smooth: 1, transferColor: true, wasm: false });
-      const waR = dynamesh(src, { resolution: res, smooth: 1, transferColor: true });
+      const jsR = await dynamesh(src, { resolution: res, smooth: 1, transferColor: true, wasm: false });
+      const waR = await dynamesh(src, { resolution: res, smooth: 1, transferColor: true });
       ok(waR.stats.wasm === true, `res${res}: WASM 経路が使われる`);
       ok(jsR.positions.length === waR.positions.length && jsR.indices.length === waR.indices.length,
         `res${res}: 頂点/面数が一致 (JS ${jsR.positions.length / 3} vs WASM ${waR.positions.length / 3})`);

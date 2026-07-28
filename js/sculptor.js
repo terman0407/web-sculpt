@@ -636,9 +636,9 @@ export class Sculptor {
    * 自己交差や分離した部品が和集合として healing される。
    * @returns {object} 統計（頂点数・所要時間など）
    */
-  dynamesh(opts = {}) {
+  async dynamesh(opts = {}) {
     const m = this.mesh;
-    const r = dynamesh(m, opts);
+    const r = await dynamesh(m, opts);
     if (r.positions.length === 0 || r.indices.length === 0) {
       return Object.assign({ failed: true }, r.stats);
     }

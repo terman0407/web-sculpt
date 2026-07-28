@@ -65,7 +65,7 @@ for (const [name, gen, div] of CASES) {
 
   let r;
   try {
-    r = dynamesh(m, { resolution: RES, smooth: 1, transferColor: true });
+    r = await dynamesh(m, { resolution: RES, smooth: 1, transferColor: true });
   } catch (e) {
     console.log(`  ${m.liveTris.toLocaleString()} 面: ダイナメッシュ失敗 (${e.message})`);
     continue;

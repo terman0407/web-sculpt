@@ -270,6 +270,33 @@ async function main() {
     await frames(3);
     ok((await st('WebSculpt.mesh.liveVerts')) === vDyna0, 'ダイナメッシュを Undo で戻せる');
 
+    // ---- 10b) 距離場の並列化（ワーカー）が逐次と同じ結果を出すか ---------
+    // Node からは Worker を作れないのでコアテストで検証できない。ここで見る。
+    const par = await cdp.eval(`(async () => {
+      const W = window.WebSculpt, { mesh, sculptor, state } = W;
+      state.maxVerts = 4000000;
+      W.app.newMesh('sphere');
+      sculptor.divide(); sculptor.divide();     // 8 万面ほどに増やす
+      const inTris = mesh.liveTris;
+      const a = await sculptor.dynamesh({ resolution: 96, smooth: 1, transferColor: true });
+      W.app.undo();
+      const b = await sculptor.dynamesh({ resolution: 96, smooth: 1, transferColor: true, parallel: false });
+      W.app.undo();
+      return JSON.stringify({
+        inTris, pool: (window.__parState && window.__parState()) || '?',
+        parUsed: a.parallel, seqUsed: b.parallel,
+        parVerts: a.verts, seqVerts: b.verts, parTris: a.tris, seqTris: b.tris,
+        parMs: a.ms, seqMs: b.ms, parDist: a.phase.distance, seqDist: b.phase.distance,
+      });
+    })()`);
+    const pr = JSON.parse(par);
+    console.log(`       プール ${pr.pool} / 入力 ${pr.inTris.toLocaleString()} 面`);
+    ok(pr.parUsed === true, `並列経路が使われる (parallel=${pr.parUsed})`);
+    ok(pr.seqUsed === false, '{parallel:false} で逐次に落とせる');
+    ok(pr.parVerts === pr.seqVerts && pr.parTris === pr.seqTris,
+      `並列と逐次の出力が一致 (${pr.parVerts}/${pr.parTris} vs ${pr.seqVerts}/${pr.seqTris})`);
+    console.log(`       並列 ${pr.parMs}ms(距離場 ${pr.parDist}) / 逐次 ${pr.seqMs}ms(距離場 ${pr.seqDist})`);
+
     // ---- 11) UI 要素のクリック ----------------------------------------
     await cdp.eval(`document.querySelectorAll('#brushList .brush')[0].click()`);
     ok((await st('WebSculpt.state.brush')) === 'clay', 'ブラシパレットのクリックが効く');
