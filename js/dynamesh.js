@@ -15,7 +15,7 @@
 
 import { clamp } from './math.js';
 import { wasmSplat, wasmFieldReady } from './wasmfield.js';
-import { parallelSplat, parallelState, lastTiming } from './parallelfield.js';
+import { parallelSplat, parallelState, lastTiming, buildTiming } from './parallelfield.js';
 
 const LARGE = 1e9;
 
@@ -460,7 +460,7 @@ export async function dynamesh(mesh, opts = {}) {
       inputTris: mesh.liveTris,
       wasm: usedWasm,
       parallel: usedParallel,
-      parTiming: usedParallel ? Object.assign({}, lastTiming) : null,
+      parTiming: usedParallel ? Object.assign({}, lastTiming, buildTiming) : null,
       resolution: res,
       grid: [nx, ny, nz],
       voxelSize: h,

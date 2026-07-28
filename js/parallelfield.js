@@ -38,8 +38,8 @@ self.onmessage = async (ev) => {
       const pField = W.alloc(count * 4);
       const pClose = wantClosest ? W.alloc(count * 4) : 0;
       const buf = W.memory.buffer;
-      new Float32Array(buf, pPos, nv * 3).set(pos);
-      new Int32Array(buf, pTri, nt * 3).set(tris);
+      new Float32Array(buf, pPos, nv * 3).set(pos.subarray(0, nv * 3));
+      new Int32Array(buf, pTri, nt * 3).set(tris.subarray(0, nt * 3));
       W.fillField(pField, count, g.band);
       if (pClose) W.fillClosest(pClose, count);
       W.splat(pPos, pTri, nt, pField, pClose,
@@ -132,7 +132,11 @@ export function disposeParallelField() {
  * 全頂点配列を人数分コピーすると 3M 面で 100MB を超えるため、
  * 参照される頂点だけを取り出して番号を振り直す。
  */
+export let buildTiming = { krange: 0, csr: 0, pack: 0 };
+
 function buildSlabPayloads(mesh, g, slabs) {
+  const _now = () => (typeof performance === 'object' ? performance.now() : Date.now());
+  const _t0 = _now();
   const P = mesh.positions, T = mesh.tris;
   const nSlab = slabs.length;
   const invH = 1 / g.h;
@@ -148,19 +152,33 @@ function buildSlabPayloads(mesh, g, slabs) {
   // 1) 各三角形の [k0,k1] を求め、掛かるスラブの件数を数える
   const counts = new Int32Array(nSlab);
   const kOf = new Int32Array(mesh.nt * 2);   // 三角形ごとの [k0, k1]
+  // 300 万回まわるので Math.min/max（3 引数）と Math.ceil/floor の呼び出しを避け、
+  // 比較と加算で書く。ceil(x) は -floor(-x)、floor は | 0 で代用できるが
+  // 負値で切り捨て方向が変わるため、下駄を履かせてから整数化する。
+  const nzMax = g.nz - 1;
+  const oz = g.oz;
+  const BIAS = 1 << 22;                      // |k| がこの値を超えない前提の下駄
   for (let t = 0; t < mesh.nt; t++) {
     const ti = t * 3;
     const ia = T[ti], ib = T[ti + 1], ic = T[ti + 2];
     if (ia === ib && ib === ic) { kOf[t * 2] = 1; kOf[t * 2 + 1] = 0; continue; }
     const az = P[ia * 3 + 2], bz = P[ib * 3 + 2], cz = P[ic * 3 + 2];
-    const z0 = Math.min(az, bz, cz), z1 = Math.max(az, bz, cz);
-    let k0 = Math.ceil((z0 - band - g.oz) * invH); if (k0 < 0) k0 = 0;
-    let k1 = Math.floor((z1 + band - g.oz) * invH); if (k1 > g.nz - 1) k1 = g.nz - 1;
+    let z0 = az, z1 = az;
+    if (bz < z0) z0 = bz; else if (bz > z1) z1 = bz;
+    if (cz < z0) z0 = cz; else if (cz > z1) z1 = cz;
+    // ceil((z0 - band - oz) * invH)
+    let k0 = BIAS - (((BIAS - (z0 - band - oz) * invH)) | 0);
+    // floor((z1 + band - oz) * invH)
+    let k1 = ((((z1 + band - oz) * invH) + BIAS) | 0) - BIAS;
+    if (k0 < 0) k0 = 0;
+    if (k1 > nzMax) k1 = nzMax;
     kOf[t * 2] = k0; kOf[t * 2 + 1] = k1;
     if (k1 < k0) continue;
     const s0 = slabOfK[k0], s1 = slabOfK[k1];
     for (let s = s0; s <= s1; s++) counts[s]++;
   }
+
+  const _t1 = _now();
 
   // 2) CSR に詰めて「スラブ → 三角形リスト」を作る。
   //    これをやらずにスラブごとに全三角形を走査すると O(スラブ数 × 面数) になり、
@@ -176,7 +194,9 @@ function buildSlabPayloads(mesh, g, slabs) {
     for (let s = s0; s <= s1; s++) slabTris[fill[s]++] = t;
   }
 
-  // 2) スラブごとに頂点を詰め直す
+  const _t2 = _now();
+
+  // 3) スラブごとに頂点を詰め直す
   const payloads = new Array(nSlab);
   const remap = new Int32Array(mesh.nv);
   const stamp = new Int32Array(mesh.nv);
@@ -186,32 +206,34 @@ function buildSlabPayloads(mesh, g, slabs) {
     const sl = slabs[s];
     if (n === 0) { payloads[s] = null; continue; }
     const tris = new Int32Array(n * 3);
-    const posTmp = new Float32Array(Math.min(mesh.nv, n * 3) * 3);
+    // 使う頂点数は上限が 3n。多少余っても転送はバッファ所有権の移動（ゼロコピー）
+    // なので、伸長判定を無くして一気に確保したほうが速い。
+    const pos = new Float32Array(n * 9);
     let nv = 0, w = 0;
     stampId++;
-    let posCap = posTmp.length / 3;
-    let pos = posTmp;
-    const pushVert = (v) => {
-      if (stamp[v] === stampId) return remap[v];
-      if (nv >= posCap) {          // 稀に足りなくなったら伸ばす
-        posCap = Math.ceil(posCap * 1.6) + 16;
-        const np = new Float32Array(posCap * 3);
-        np.set(pos.subarray(0, nv * 3));
-        pos = np;
-      }
-      stamp[v] = stampId;
-      remap[v] = nv;
-      pos[nv * 3] = P[v * 3]; pos[nv * 3 + 1] = P[v * 3 + 1]; pos[nv * 3 + 2] = P[v * 3 + 2];
-      return nv++;
-    };
+    const st = stamp, rm = remap;
+    // pushVert をクロージャで呼ぶと 1000 万回の呼び出しになるため展開する
     for (let q = off[s]; q < off[s + 1]; q++) {
       const ti = slabTris[q] * 3;
-      tris[w++] = pushVert(T[ti]);
-      tris[w++] = pushVert(T[ti + 1]);
-      tris[w++] = pushVert(T[ti + 2]);
+      for (let e = 0; e < 3; e++) {
+        const v = T[ti + e];
+        let r;
+        if (st[v] === stampId) {
+          r = rm[v];
+        } else {
+          st[v] = stampId;
+          r = nv;
+          rm[v] = nv;
+          const o = nv * 3, pv = v * 3;
+          pos[o] = P[pv]; pos[o + 1] = P[pv + 1]; pos[o + 2] = P[pv + 2];
+          nv++;
+        }
+        tris[w++] = r;
+      }
     }
-    payloads[s] = { pos: pos.subarray(0, nv * 3), tris: tris.subarray(0, w), nv, nt: w / 3 };
+    payloads[s] = { pos, tris, nv, nt: w / 3 };
   }
+  buildTiming = { krange: Math.round(_t1 - _t0), csr: Math.round(_t2 - _t1), pack: Math.round(_now() - _t2) };
   return payloads;
 }
 
@@ -264,11 +286,12 @@ export async function parallelSplat(mesh, field, closest, g) {
         res();
       };
       w.onerror = (e) => { clearTimeout(to); rej(new Error(e.message || 'ワーカーエラー')); };
-      // pos / tris はコピーで渡す（メインスレッド側でも使い続けるため）
+      // バッファの所有権ごと渡す（構造化クローンのコピーを避ける）。
+      // 送ったあとメインスレッド側では使わないので detach されて問題ない。
       w.postMessage({
         type: 'splat', id: s, pos: p.pos, tris: p.tris, nv: p.nv, nt: p.nt,
         g: gp, kBegin: sl.kBegin, kEnd: sl.kEnd, wantClosest, slabK,
-      });
+      }, [p.pos.buffer, p.tris.buffer]);
     })));
     const tE = (typeof performance === 'object' ? performance.now() : Date.now());
     lastTiming = { build: Math.round(tW - tB), wait: Math.round(tE - tW), merge: 0 };
