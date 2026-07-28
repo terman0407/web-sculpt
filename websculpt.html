@@ -4646,7 +4646,13 @@ class Sculptor {
    * 移動した頂点とその近傍の法線と曲率を再計算する。
    * 曲率は 1-ring 平均に依存するので、法線より 1 段広い範囲を更新する。
    */
-  _updateNormals(verts, count) {
+  /**
+   * @param verts 動いた頂点
+   * @param count 有効数
+   * @param tris  verts に接する三角形（_gather が集めたものをそのまま渡す）。
+   *              渡すと ring を辿り直さずに済むぶん大幅に速い。
+   */
+  _updateNormals(verts, count, tris = null) {
     const m = this.mesh;
     this._ensureStamps();
     const T = m.tris;
@@ -4656,19 +4662,37 @@ class Sculptor {
     const nS = this.nStamp;
     const set = this.normalSet;
     set.length = 0;
-    for (let k = 0; k < count; k++) {
-      const v = verts[k];
-      if (nS[v] !== id1) { nS[v] = id1; set.push(v); }
-      const r = m.ring[v];
-      if (!r) continue;
-      for (let j = 0; j < r.length; j++) {
-        const ti = r[j] * 3;
+    if (tris) {
+      // 「verts に接する三角形の全頂点」= verts + その 1-ring。
+      // 三角形リストを 1 回舐めるだけで済み、ring の間接参照が消える。
+      for (let k = 0; k < count; k++) {
+        const v = verts[k];
+        if (nS[v] !== id1) { nS[v] = id1; set.push(v); }
+      }
+      for (let k = 0; k < tris.length; k++) {
+        const ti = tris[k] * 3;
         for (let e = 0; e < 3; e++) {
           const u = T[ti + e];
           if (nS[u] !== id1) { nS[u] = id1; set.push(u); }
         }
       }
+    } else {
+      for (let k = 0; k < count; k++) {
+        const v = verts[k];
+        if (nS[v] !== id1) { nS[v] = id1; set.push(v); }
+        const r = m.ring[v];
+        if (!r) continue;
+        for (let j = 0; j < r.length; j++) {
+          const ti = r[j] * 3;
+          for (let e = 0; e < 3; e++) {
+            const u = T[ti + e];
+            if (nS[u] !== id1) { nS[u] = id1; set.push(u); }
+          }
+        }
+      }
     }
+    // 面法線を 1 面 1 回だけ計算する版も試したが、そのための三角形集合を
+    // 作るコストのほうが上回ったので頂点ごとの計算のままにしてある。
     m.computeNormalsFor(set, set.length);
 
     // 曲率は見た目（キャビティ陰影）にしか使わず、彫刻の挙動には影響しない。
@@ -4972,7 +4996,7 @@ class Sculptor {
     });
 
     if (brush !== 'paint' && brush !== 'mask') {
-      this._updateNormals(ms.verts, ms.count);
+      this._updateNormals(ms.verts, ms.count, ms.tris);
     }
   }
 
