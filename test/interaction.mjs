@@ -253,7 +253,11 @@ async function main() {
     })()`);
     const mf = JSON.parse(manifold);
     ok(mf.bad === 0 && mf.bnd === 0, `ダイナメッシュ出力が閉多様体 (${manifold})`);
-    ok(mf.chi === 2, `ダイナメッシュ出力の位相が球面 (χ = ${mf.chi})`);
+    // 彫った形しだいで自己交差が融合してハンドルができることがあるため、
+    // 球面（χ=2）だと決め打ちしない。閉じた向き付け可能曲面である条件
+    // 「χ が偶数かつ 2 以下」だけを要求する。
+    ok(mf.chi <= 2 && mf.chi % 2 === 0,
+      `ダイナメッシュ出力が閉じた向き付け可能曲面 (χ = ${mf.chi}, 種数 ${(2 - mf.chi) / 2})`);
     await shot('16-dynamesh.png');
     // ダイナメッシュ後も彫刻できる
     await mouse('mouseMoved', cx, cy);
