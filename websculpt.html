@@ -555,6 +555,125 @@ input.text:focus { border-color: var(--accent); }
   #leftbar { width: 72px; min-width: 72px; }
   .brush .bn { font-size: 9px; }
 }
+
+/* --- リスト（スカルプトレイヤー / ポリグループ） -------------------------- */
+/* 行数が増えるので固定高さでスクロールさせる。パネル全体が伸びると
+   下のセクションが押し出されて使いにくくなる。 */
+.listbox {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 168px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 4px;
+  background: #14161a;
+}
+.listbox:empty::after {
+  content: attr(data-empty);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  padding: 6px 4px;
+}
+.lrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 5px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.lrow:hover { background: #1d2027; }
+.lrow.on { background: var(--accent-dim); }
+.lrow .swatch {
+  width: 11px; height: 11px;
+  border-radius: 2px;
+  border: 1px solid #0006;
+  flex: 0 0 auto;
+}
+.lrow .lname {
+  flex: 1 1 auto;
+  font-size: 11.5px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lrow.on .lname { color: var(--accent-2); }
+.lrow .lnum {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+.lrow .eye {
+  flex: 0 0 auto;
+  width: 18px; height: 16px;
+  border: 0; background: none; padding: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  border-radius: 2px;
+}
+.lrow .eye:hover { background: #2a2e36; color: var(--text); }
+.lrow .eye.off { color: #4a4e57; }
+.lrow input.lname-edit {
+  flex: 1 1 auto;
+  background: #0f1114;
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  padding: 1px 4px;
+  min-width: 0;
+}
+
+/* 小さめのアイコンボタン列（リストの下に置く追加・削除など） */
+.iconrow { display: flex; gap: 4px; }
+.iconrow .ibtn {
+  flex: 1 1 auto;
+  padding: 4px 0;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.iconrow .ibtn:hover { background: #24282f; color: var(--text); }
+.iconrow .ibtn:disabled { opacity: .38; cursor: default; }
+
+/* アルファのサムネイル格子（マテリアルの .matgrid と同じ考え方） */
+.alphagrid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 5px;
+}
+.alphagrid .alpha {
+  aspect-ratio: 1;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0;
+  background: #0e1013;
+  cursor: pointer;
+  overflow: hidden;
+  position: relative;
+}
+.alphagrid .alpha canvas { width: 100%; height: 100%; display: block; }
+.alphagrid .alpha:hover { border-color: var(--line-2); }
+.alphagrid .alpha.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+
+/* 見出しの小さなラベル（セクション内のグループ分け） */
+.subhead {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  margin: 2px 0 -3px;
+}
 </style>
 </head>
 <body>
@@ -4606,21 +4725,67 @@ const { refineRegion } = __M['dyntopo.js'];
 const { dynamesh } = __M['dynamesh.js'];
 const { SubdivLevels } = __M['subdiv.js'];
 
-function buildMirrors(sym) {
-  let list = [[1, 1, 1]];
+// シンメトリの写像。ZBrush の Symmetry パネル相当で 3 種類を合成する:
+//   * 平面ミラー   … 軸平面での反転（符号反転）
+//   * ラジアル     … 軸まわりに N 回転コピー（Radial Symmetry）
+//   * ローカル中心 … 原点ではなくモデル中心を基準にする（Local Symmetry）
+// 「符号ベクトルの配列」だと回転が表せないので、写像そのものを記述にした。
+//   p' = R(axis, ang) * (S ⊙ (p - c)) + c
+const MAX_MIRRORS = 64;
+
+function buildMirrors(sym, radial = null, center = null) {
+  const cx = center ? center[0] : 0, cy = center ? center[1] : 0, cz = center ? center[2] : 0;
+  // 1) 平面ミラー（符号の組み合わせ）
+  let signs = [[1, 1, 1]];
   const axes = [[0, sym.x], [1, sym.y], [2, sym.z]];
   for (const [i, on] of axes) {
     if (!on) continue;
     const next = [];
-    for (const m of list) {
+    for (const m of signs) {
       next.push(m);
       const c = m.slice();
       c[i] = -c[i];
       next.push(c);
     }
-    list = next;
+    signs = next;
   }
-  return list;
+  // 2) ラジアル（軸まわりの等分回転）
+  const rc = radial && radial.on ? Math.max(1, Math.min(32, Math.round(radial.count || 1))) : 1;
+  const rAxis = radial ? (radial.axis | 0) : 1;
+  const out = [];
+  for (let k = 0; k < rc && out.length < MAX_MIRRORS; k++) {
+    const ang = rc > 1 ? (Math.PI * 2 * k) / rc : 0;
+    for (const s of signs) {
+      if (out.length >= MAX_MIRRORS) break;
+      out.push({ s, ang, axis: rAxis, c: [cx, cy, cz], flip: s[0] * s[1] * s[2] < 0 });
+    }
+  }
+  return out;
+}
+
+/** 軸 axis まわりに角 ang だけ回す（axis 成分は変えない） */
+function rotAxis(axis, ang, x, y, z, out) {
+  if (ang === 0) { out[0] = x; out[1] = y; out[2] = z; return out; }
+  const cs = Math.cos(ang), sn = Math.sin(ang);
+  if (axis === 0) { out[0] = x; out[1] = y * cs - z * sn; out[2] = y * sn + z * cs; }
+  else if (axis === 1) { out[0] = x * cs + z * sn; out[1] = y; out[2] = -x * sn + z * cs; }
+  else { out[0] = x * cs - y * sn; out[1] = x * sn + y * cs; out[2] = z; }
+  return out;
+}
+
+/** 点をミラー先へ写す */
+function mirrorPoint(mir, p, out) {
+  const s = mir.s, c = mir.c;
+  rotAxis(mir.axis, mir.ang,
+    (p[0] - c[0]) * s[0], (p[1] - c[1]) * s[1], (p[2] - c[2]) * s[2], out);
+  out[0] += c[0]; out[1] += c[1]; out[2] += c[2];
+  return out;
+}
+
+/** ベクトル（ドラッグ差分など）をミラー先へ写す。平行移動は掛けない */
+function mirrorVector(mir, v, out) {
+  const s = mir.s;
+  return rotAxis(mir.axis, mir.ang, v[0] * s[0], v[1] * s[1], v[2] * s[2], out);
 }
 
 /** 全頂点走査で p に最も近い生存頂点を返す */
@@ -4765,7 +4930,7 @@ class Sculptor {
 
     this.mirrors = [];
     for (let i = 0; i < 8; i++) this.mirrors.push(new MirrorState());
-    this.activeMirrors = [[1, 1, 1]];
+    this.activeMirrors = buildMirrors({ x: false, y: false, z: false });
 
     this.hoverSeed = -1;
     this.stroking = false;
@@ -4781,6 +4946,18 @@ class Sculptor {
     this._walk = V3.create();
 
     this.history.reset(mesh);
+  }
+
+  /**
+   * いまの state からミラー写像の一覧を作る。
+   * ローカルシンメトリはモデルの中心を基準にするので bounds を見る
+   * （毎ダブではなくストローク開始時に 1 回だけ呼ばれる）。
+   */
+  buildActiveMirrors() {
+    const st = this.state;
+    let center = null;
+    if (st.localSymmetry) center = this.mesh.bounds().center;
+    return buildMirrors(st.symmetry, st.radial, center);
   }
 
   setMesh(mesh) {
@@ -5071,12 +5248,13 @@ class Sculptor {
     this.topoChanged = false;
     this.dabCount = 0;
     this.engine.beginStroke();
-    this.activeMirrors = buildMirrors(this.state.symmetry);
+    this.activeMirrors = this.buildActiveMirrors();
+    // ラジアルシンメトリでミラー数が増えるので、足りなければ足す
+    while (this.mirrors.length < this.activeMirrors.length) this.mirrors.push(new MirrorState());
 
     for (let i = 0; i < this.activeMirrors.length; i++) {
       const ms = this.mirrors[i];
-      const sgn = this.activeMirrors[i];
-      V3.set(this._mp, point[0] * sgn[0], point[1] * sgn[1], point[2] * sgn[2]);
+      mirrorPoint(this.activeMirrors[i], point, this._mp);
       // 全頂点走査は 260 万頂点で 1 ミラーあたり 45ms かかる。
       // ホバー中に追従させているシードから降下すれば通常はそれで足りる。
       ms.seed = this._seedNear(this._mp, i === 0 ? this.hoverSeed : this.mirrors[i].seed);
@@ -5184,10 +5362,9 @@ class Sculptor {
   _dabAll(point, delta, first, scale = 1) {
     const mirrors = this.activeMirrors;
     for (let i = 0; i < mirrors.length; i++) {
-      const sgn = mirrors[i];
       const ms = this.mirrors[i];
-      V3.set(this._mp, point[0] * sgn[0], point[1] * sgn[1], point[2] * sgn[2]);
-      V3.set(this._pt, delta[0] * sgn[0], delta[1] * sgn[1], delta[2] * sgn[2]);
+      mirrorPoint(mirrors[i], point, this._mp);
+      mirrorVector(mirrors[i], delta, this._pt);
       this._dab(ms, this._mp, this._pt, first, scale);
       V3.copy(ms.lastPoint, this._mp);
     }
@@ -5431,7 +5608,7 @@ class Sculptor {
     this.history.commit(m);
   }
 }
-  return { buildMirrors, nearestVertexBrute, History, Sculptor };
+  return { MAX_MIRRORS, buildMirrors, mirrorPoint, mirrorVector, nearestVertexBrute, History, Sculptor };
 })();
 
 /* ===== matcap.js ===== */
@@ -5966,6 +6143,47 @@ fn fs() -> FSOut {
 `;
 
 // ---------------------------------------------------------------------------
+// 1c-2. オーバーレイの線（トランスポーズのハンドル、クリップ平面のガイドなど）
+//
+// ワイヤフレームと違い頂点ごとに色を持たせる。ハンドルは軸ごとに色を変えたいし、
+// 「いま掴んでいるハンドルだけ明るくする」のを CPU 側で色を差し替えて表現したい。
+// 深度テストは呼び出し側で 2 通り使う: 隠れる線（形状把握用）と、
+// 常に手前に出る線（操作用）。パイプラインを 2 本用意して使い分ける。
+// ---------------------------------------------------------------------------
+const OVERLAY_WGSL = COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> u : Uniforms;
+
+struct VSOut {
+  @builtin(position) pos : vec4<f32>,
+  @location(0) color : vec4<f32>,
+};
+
+struct FSOut {
+  @location(0) color  : vec4<f32>,
+  @location(1) normal : vec4<f32>,
+};
+
+@vertex
+fn vs(@location(0) position : vec3<f32>, @location(1) color : vec4<f32>) -> VSOut {
+  var o : VSOut;
+  var p = u.viewProj * vec4<f32>(position, 1.0);
+  // 線が面と同じ深度に来ると z ファイティングするので少し手前へ寄せる
+  p.z = p.z - 0.00030 * p.w;
+  o.pos = p;
+  o.color = color;
+  return o;
+}
+
+@fragment
+fn fs(i : VSOut) -> FSOut {
+  var o : FSOut;
+  o.color = i.color;
+  o.normal = vec4<f32>(0.0, 0.0, 1.0, 1.0);
+  return o;
+}
+`;
+
+// ---------------------------------------------------------------------------
 // 1d. フロアグリッド（Y=0 平面。頂点バッファ不要の大きな四角形を 1 枚描き、
 //     フラグメントで解析的にラインを引く。fwidth で距離に応じたアンチエイリアス）
 // ---------------------------------------------------------------------------
@@ -6332,7 +6550,7 @@ fn fs(i : VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(r.color.rgb, r.color.a * i.fade);
 }
 `;
-  return { UNIFORM_FLOATS, UO, BG_WGSL, MESH_WGSL, WIRE_WGSL, GRID_WGSL, SSAO_WGSL, BLUR_WGSL, PRESENT_WGSL, PICK_WGSL, RING_WGSL };
+  return { UNIFORM_FLOATS, UO, BG_WGSL, MESH_WGSL, WIRE_WGSL, OVERLAY_WGSL, GRID_WGSL, SSAO_WGSL, BLUR_WGSL, PRESENT_WGSL, PICK_WGSL, RING_WGSL };
 })();
 
 /* ===== renderer.js ===== */
@@ -6349,7 +6567,7 @@ __M['renderer.js'] = (function () {
 const { clamp } = __M['math.js'];
 const { DIRTY_SHIFT, DIRTY_BLOCK } = __M['mesh.js'];
 const { generateMatcapLayer, MATERIALS } = __M['matcap.js'];
-const { UNIFORM_FLOATS, UO, BG_WGSL, MESH_WGSL, WIRE_WGSL, GRID_WGSL, SSAO_WGSL, BLUR_WGSL, PRESENT_WGSL, RING_WGSL, PICK_WGSL } = __M['shaders.js'];
+const { UNIFORM_FLOATS, UO, BG_WGSL, MESH_WGSL, WIRE_WGSL, OVERLAY_WGSL, GRID_WGSL, SSAO_WGSL, BLUR_WGSL, PRESENT_WGSL, RING_WGSL, PICK_WGSL } = __M['shaders.js'];
 
 const COLOR_FORMAT = 'rgba16float';
 const NORMAL_FORMAT = 'rgba16float';
@@ -6419,6 +6637,16 @@ class Renderer {
     // --- メッシュ用 GPU バッファ ---
     this.gpuCapV = 0;
     this.gpuCapT = 0;
+
+    // 部分表示用インデックス（0 なら全部描く）
+    this.visIb = null;
+    this.visCap = 0;
+    this.visCount = 0;
+    // オーバーレイ線（位置 vec3 + 色 vec4 = 7 float / 頂点）
+    this.overlayBuf = null;
+    this.overlayCap = 0;
+    this.overlayCount = 0;
+    this.overlayFront = true;
     this.vbPos = null; this.vbNrm = null; this.vbCol = null; this.vbMask = null; this.vbCurv = null;
     this.ib = null;
     this.wireIb = null;
@@ -6535,6 +6763,7 @@ class Renderer {
     const meshMod = mod(MESH_WGSL);
     const wireMod = mod(WIRE_WGSL);
     const gridMod = mod(GRID_WGSL);
+    const overlayMod = mod(OVERLAY_WGSL);
     const ssaoMod = mod(SSAO_WGSL);
     const blurMod = mod(BLUR_WGSL);
     const presentMod = mod(PRESENT_WGSL);
@@ -6601,6 +6830,35 @@ class Renderer {
       },
       primitive: { topology: 'line-list' },
       depthStencil: depthState(false, 'less-equal'),
+    });
+
+    // オーバーレイの線。頂点は (位置 vec3, 色 vec4) の 28 バイトストライド。
+    // depth 付き（形状に隠れる）と depth 無し（常に手前）の 2 本を作り、
+    // ハンドルは「隠れる線を薄く + 手前の線を濃く」の重ね描きで見やすくする。
+    const overlayVB = [{
+      arrayStride: 28,
+      attributes: [
+        { shaderLocation: 0, offset: 0, format: 'float32x3' },
+        { shaderLocation: 1, offset: 12, format: 'float32x4' },
+      ],
+    }];
+    const overlayTargets = [
+      { format: COLOR_FORMAT, blend: alphaBlend },
+      { format: NORMAL_FORMAT, writeMask: 0 },
+    ];
+    this.pipeOverlay = d.createRenderPipeline({
+      layout: mainLayout,
+      vertex: { module: overlayMod, entryPoint: 'vs', buffers: overlayVB },
+      fragment: { module: overlayMod, entryPoint: 'fs', targets: overlayTargets },
+      primitive: { topology: 'line-list' },
+      depthStencil: depthState(false, 'less-equal'),
+    });
+    this.pipeOverlayFront = d.createRenderPipeline({
+      layout: mainLayout,
+      vertex: { module: overlayMod, entryPoint: 'vs', buffers: overlayVB },
+      fragment: { module: overlayMod, entryPoint: 'fs', targets: overlayTargets },
+      primitive: { topology: 'line-list' },
+      depthStencil: depthState(false, 'always'),
     });
 
     // フロアグリッドはメッシュの後に描く（深度テストのみ、書き込みなし）
@@ -6887,6 +7145,48 @@ class Renderer {
     mesh.clearDirty();
   }
 
+  /**
+   * 部分表示のインデックスを差し替える。null / count 0 を渡すと全体表示に戻る。
+   * ポリグループの表示状態が変わったときだけ呼ぶ（毎フレーム呼ぶものではない）。
+   */
+  setVisibleIndices(indices, count) {
+    if (!indices || !count) { this.visCount = 0; return; }
+    const d = this.device;
+    if (!this.visIb || this.visCap < count) {
+      if (this.visIb) this.visIb.destroy();
+      this.visCap = Math.ceil(count * 1.4);
+      this.visIb = d.createBuffer({
+        size: this.visCap * 4,
+        usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+      });
+    }
+    d.queue.writeBuffer(this.visIb, 0, indices, 0, count);
+    this.visCount = count;
+  }
+
+  /**
+   * オーバーレイの線を差し替える。
+   * @param {Float32Array} verts (x,y,z,r,g,b,a) を線分の端点ごとに並べたもの
+   * @param {number} vertCount   頂点数（線分数 × 2）
+   * @param {boolean} front      形状に隠れずに常に手前へ描くか
+   */
+  setOverlayLines(verts, vertCount, front = true) {
+    if (!verts || !vertCount) { this.overlayCount = 0; return; }
+    const d = this.device;
+    const need = vertCount * 7;
+    if (!this.overlayBuf || this.overlayCap < need) {
+      if (this.overlayBuf) this.overlayBuf.destroy();
+      this.overlayCap = Math.ceil(need * 1.5);
+      this.overlayBuf = d.createBuffer({
+        size: this.overlayCap * 4,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      });
+    }
+    d.queue.writeBuffer(this.overlayBuf, 0, verts, 0, need);
+    this.overlayCount = vertCount;
+    this.overlayFront = front;
+  }
+
   _syncWireframe(mesh, now) {
     if (mesh.topoVersion === this.wireVersion) return;
     if (this.wireVersion >= 0 && now - this.wireBuiltAt < 160) return;   // 構築を間引く
@@ -7069,8 +7369,16 @@ class Renderer {
         pass.setVertexBuffer(2, this.vbCol);
         pass.setVertexBuffer(3, this.vbMask);
         pass.setVertexBuffer(4, this.vbCurv);
-        pass.setIndexBuffer(this.ib, 'uint32');
-        pass.drawIndexed(mesh.nt * 3);
+        // 部分表示（ポリグループのハイド）中は、可視な三角形だけを詰めた
+        // インデックスバッファを使う。退化三角形に書き換えて隠す方法もあるが、
+        // それだとトポロジ自体を壊すので表示だけ差し替える。
+        if (this.visCount > 0 && this.visIb) {
+          pass.setIndexBuffer(this.visIb, 'uint32');
+          pass.drawIndexed(this.visCount);
+        } else {
+          pass.setIndexBuffer(this.ib, 'uint32');
+          pass.drawIndexed(mesh.nt * 3);
+        }
       }
 
       // グリッドはメッシュの後（深度テストで隠れるように）
@@ -7084,6 +7392,19 @@ class Renderer {
         pass.setVertexBuffer(0, this.vbPos);
         pass.setIndexBuffer(this.wireIb, 'uint32');
         pass.drawIndexed(this.wireCount);
+      }
+
+      // オーバーレイの線（トランスポーズのハンドル / クリップのガイド）。
+      // 隠れる線を薄く重ねてから手前の線を描くと、奥行きが分かりつつ操作しやすい。
+      if (this.overlayCount > 0 && this.overlayBuf) {
+        pass.setPipeline(this.pipeOverlay);
+        pass.setVertexBuffer(0, this.overlayBuf);
+        pass.draw(this.overlayCount);
+        if (this.overlayFront) {
+          pass.setPipeline(this.pipeOverlayFront);
+          pass.setVertexBuffer(0, this.overlayBuf);
+          pass.draw(this.overlayCount);
+        }
       }
       pass.end();
     }
@@ -7137,7 +7458,8 @@ class Renderer {
   }
 
   destroy() {
-    for (const b of [this.vbPos, this.vbNrm, this.vbCol, this.vbMask, this.vbCurv, this.ib, this.wireIb]) {
+    for (const b of [this.vbPos, this.vbNrm, this.vbCol, this.vbMask, this.vbCurv, this.ib, this.wireIb,
+      this.visIb, this.overlayBuf]) {
       if (b) b.destroy();
     }
   }
@@ -7252,6 +7574,88 @@ function segmented(parent, items, value, onChange) {
     btns.push(b);
   });
   return { el: row, set(v) { btns.forEach((b, i) => b.classList.toggle('on', items[i].value === v)); } };
+}
+
+/**
+ * 行を差し替えて使うリスト。スカルプトレイヤーとポリグループで共用する。
+ * items は [{ id, label, num, color, visible, selected }]。
+ * 毎回全部作り直す（数十行しかないので差分更新の複雑さに見合わない）。
+ */
+function listBox(parent, opt) {
+  const box = el('div', 'listbox', parent);
+  box.dataset.empty = opt.empty || '（なし）';
+  let editing = -1;
+  const render = (items) => {
+    box.textContent = '';
+    for (const it of items) {
+      const row = el('div', 'lrow' + (it.selected ? ' on' : ''), box);
+      if (it.color) {
+        const sw = el('span', 'swatch', row);
+        sw.style.background = `rgb(${it.color.map(c => Math.round(clamp(c, 0, 1) * 255)).join(',')})`;
+      }
+      if (editing === it.id && opt.onRename) {
+        const inp = el('input', 'lname-edit', row);
+        inp.value = it.label;
+        const done = (commit) => {
+          editing = -1;
+          if (commit && inp.value.trim()) opt.onRename(it.id, inp.value.trim());
+          else opt.refresh();
+        };
+        inp.onblur = () => done(true);
+        inp.onkeydown = (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); done(true); }
+          if (e.key === 'Escape') { e.preventDefault(); done(false); }
+          e.stopPropagation();
+        };
+        setTimeout(() => { inp.focus(); inp.select(); }, 0);
+      } else {
+        const name = el('span', 'lname', row);
+        name.textContent = it.label;
+        if (opt.onRename) {
+          name.title = 'ダブルクリックで名前を変更';
+          name.ondblclick = (e) => { e.stopPropagation(); editing = it.id; opt.refresh(); };
+        }
+      }
+      if (it.num !== undefined && it.num !== null) {
+        el('span', 'lnum', row).textContent = it.num;
+      }
+      if (opt.onToggle) {
+        const eye = el('button', 'eye' + (it.visible ? '' : ' off'), row);
+        eye.textContent = it.visible ? '◉' : '○';
+        eye.title = '表示 / 非表示';
+        eye.onclick = (e) => { e.stopPropagation(); opt.onToggle(it.id, !it.visible); };
+      }
+      row.onclick = () => { if (opt.onSelect) opt.onSelect(it.id); };
+    }
+  };
+  return { el: box, render, cancelEdit() { editing = -1; } };
+}
+
+/** 小さいボタンを横並びにする（リストの下の追加・削除など） */
+function iconRow(parent, items) {
+  const row = el('div', 'iconrow', parent);
+  const made = new Map();
+  for (const it of items) {
+    const b = el('button', 'ibtn', row);
+    b.textContent = it.label;
+    if (it.title) b.title = it.title;
+    b.onclick = it.onClick;
+    made.set(it.id || it.label, b);
+  }
+  return { el: row, buttons: made, enable(id, on) { const b = made.get(id); if (b) b.disabled = !on; } };
+}
+
+/** X / Y / Z の軸選択 */
+function axisPicker(parent, value, onChange) {
+  return segmented(parent, [
+    { label: 'X', value: 0 }, { label: 'Y', value: 1 }, { label: 'Z', value: 2 },
+  ], value, onChange);
+}
+
+/** セクション内の小見出し */
+function subhead(parent, text) {
+  el('div', 'subhead', parent).textContent = text;
+  return parent;
 }
 
 // ---------------------------------------------------------------------------
@@ -8004,7 +8408,7 @@ __M['main.js'] = (function () {
 const { M4, V3, clamp } = __M['math.js'];
 const { OrbitCamera } = __M['camera.js'];
 const { SculptMesh, PRIMITIVES } = __M['mesh.js'];
-const { Sculptor, buildMirrors } = __M['sculptor.js'];
+const { Sculptor, buildMirrors, mirrorPoint, mirrorVector } = __M['sculptor.js'];
 const { Renderer } = __M['renderer.js'];
 const { BRUSH_IDS, BRUSHES, usesGrabPlane } = __M['brushes.js'];
 const { buildUI } = __M['ui.js'];
@@ -8047,6 +8451,8 @@ const state = {
   dynaTransferColor: true,
   // シンメトリ
   symmetry: { x: true, y: false, z: false },
+  radial: { on: false, count: 6, axis: 1 },   // ラジアルシンメトリ（軸まわりの回転コピー）
+  localSymmetry: false,                        // 原点ではなくモデル中心を基準にする
   // 表示
   material: 0,
   wireframe: false,
@@ -8634,15 +9040,17 @@ function buildRings() {
   if (!haveN) haveN = sculptor.surfaceNormalAt(tmpPoint, tmpNormal);
   if (!haveN) V3.set(tmpNormal, 0, 0, 1);
 
-  const mirrors = sculptor.stroking ? sculptor.activeMirrors : buildMirrors(state.symmetry);
+  const mirrors = sculptor.stroking ? sculptor.activeMirrors : sculptor.buildActiveMirrors();
 
   ringOut.length = 0;
-  const maxRings = state.lazyRadius > 0.5 ? 7 : 8;
+  // リングの枚数だけは上限を設ける。ラジアルシンメトリで 32 分割すると
+  // カーソルのリングが 32 個出て何も見えなくなるため。
+  const maxRings = Math.min(ringMats.length, state.lazyRadius > 0.5 ? 7 : 8);
   for (let i = 0; i < mirrors.length && i < maxRings; i++) {
-    const s = mirrors[i];
+    const mir = mirrors[i];
     const r = ringMats[i];
-    V3.set(r.pos, tmpPoint[0] * s[0], tmpPoint[1] * s[1], tmpPoint[2] * s[2]);
-    V3.set(r.nrm, tmpNormal[0] * s[0], tmpNormal[1] * s[1], tmpNormal[2] * s[2]);
+    mirrorPoint(mir, tmpPoint, r.pos);
+    mirrorVector(mir, tmpNormal, r.nrm);
     M4.diskBasis(r.matrix, r.pos, r.nrm, state.worldRadius);
     ringOut.push(r);
   }

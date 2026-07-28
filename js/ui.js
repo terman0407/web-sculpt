@@ -105,6 +105,88 @@ function segmented(parent, items, value, onChange) {
   return { el: row, set(v) { btns.forEach((b, i) => b.classList.toggle('on', items[i].value === v)); } };
 }
 
+/**
+ * 行を差し替えて使うリスト。スカルプトレイヤーとポリグループで共用する。
+ * items は [{ id, label, num, color, visible, selected }]。
+ * 毎回全部作り直す（数十行しかないので差分更新の複雑さに見合わない）。
+ */
+function listBox(parent, opt) {
+  const box = el('div', 'listbox', parent);
+  box.dataset.empty = opt.empty || '（なし）';
+  let editing = -1;
+  const render = (items) => {
+    box.textContent = '';
+    for (const it of items) {
+      const row = el('div', 'lrow' + (it.selected ? ' on' : ''), box);
+      if (it.color) {
+        const sw = el('span', 'swatch', row);
+        sw.style.background = `rgb(${it.color.map(c => Math.round(clamp(c, 0, 1) * 255)).join(',')})`;
+      }
+      if (editing === it.id && opt.onRename) {
+        const inp = el('input', 'lname-edit', row);
+        inp.value = it.label;
+        const done = (commit) => {
+          editing = -1;
+          if (commit && inp.value.trim()) opt.onRename(it.id, inp.value.trim());
+          else opt.refresh();
+        };
+        inp.onblur = () => done(true);
+        inp.onkeydown = (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); done(true); }
+          if (e.key === 'Escape') { e.preventDefault(); done(false); }
+          e.stopPropagation();
+        };
+        setTimeout(() => { inp.focus(); inp.select(); }, 0);
+      } else {
+        const name = el('span', 'lname', row);
+        name.textContent = it.label;
+        if (opt.onRename) {
+          name.title = 'ダブルクリックで名前を変更';
+          name.ondblclick = (e) => { e.stopPropagation(); editing = it.id; opt.refresh(); };
+        }
+      }
+      if (it.num !== undefined && it.num !== null) {
+        el('span', 'lnum', row).textContent = it.num;
+      }
+      if (opt.onToggle) {
+        const eye = el('button', 'eye' + (it.visible ? '' : ' off'), row);
+        eye.textContent = it.visible ? '◉' : '○';
+        eye.title = '表示 / 非表示';
+        eye.onclick = (e) => { e.stopPropagation(); opt.onToggle(it.id, !it.visible); };
+      }
+      row.onclick = () => { if (opt.onSelect) opt.onSelect(it.id); };
+    }
+  };
+  return { el: box, render, cancelEdit() { editing = -1; } };
+}
+
+/** 小さいボタンを横並びにする（リストの下の追加・削除など） */
+function iconRow(parent, items) {
+  const row = el('div', 'iconrow', parent);
+  const made = new Map();
+  for (const it of items) {
+    const b = el('button', 'ibtn', row);
+    b.textContent = it.label;
+    if (it.title) b.title = it.title;
+    b.onclick = it.onClick;
+    made.set(it.id || it.label, b);
+  }
+  return { el: row, buttons: made, enable(id, on) { const b = made.get(id); if (b) b.disabled = !on; } };
+}
+
+/** X / Y / Z の軸選択 */
+function axisPicker(parent, value, onChange) {
+  return segmented(parent, [
+    { label: 'X', value: 0 }, { label: 'Y', value: 1 }, { label: 'Z', value: 2 },
+  ], value, onChange);
+}
+
+/** セクション内の小見出し */
+function subhead(parent, text) {
+  el('div', 'subhead', parent).textContent = text;
+  return parent;
+}
+
 // ---------------------------------------------------------------------------
 
 export function buildUI(app) {

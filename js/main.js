@@ -5,7 +5,7 @@
 import { M4, V3, clamp } from './math.js';
 import { OrbitCamera } from './camera.js';
 import { SculptMesh, PRIMITIVES } from './mesh.js';
-import { Sculptor, buildMirrors } from './sculptor.js';
+import { Sculptor, buildMirrors, mirrorPoint, mirrorVector } from './sculptor.js';
 import { Renderer } from './renderer.js';
 import { BRUSH_IDS, BRUSHES, usesGrabPlane } from './brushes.js';
 import { buildUI } from './ui.js';
@@ -48,6 +48,8 @@ const state = {
   dynaTransferColor: true,
   // シンメトリ
   symmetry: { x: true, y: false, z: false },
+  radial: { on: false, count: 6, axis: 1 },   // ラジアルシンメトリ（軸まわりの回転コピー）
+  localSymmetry: false,                        // 原点ではなくモデル中心を基準にする
   // 表示
   material: 0,
   wireframe: false,
@@ -635,15 +637,17 @@ function buildRings() {
   if (!haveN) haveN = sculptor.surfaceNormalAt(tmpPoint, tmpNormal);
   if (!haveN) V3.set(tmpNormal, 0, 0, 1);
 
-  const mirrors = sculptor.stroking ? sculptor.activeMirrors : buildMirrors(state.symmetry);
+  const mirrors = sculptor.stroking ? sculptor.activeMirrors : sculptor.buildActiveMirrors();
 
   ringOut.length = 0;
-  const maxRings = state.lazyRadius > 0.5 ? 7 : 8;
+  // リングの枚数だけは上限を設ける。ラジアルシンメトリで 32 分割すると
+  // カーソルのリングが 32 個出て何も見えなくなるため。
+  const maxRings = Math.min(ringMats.length, state.lazyRadius > 0.5 ? 7 : 8);
   for (let i = 0; i < mirrors.length && i < maxRings; i++) {
-    const s = mirrors[i];
+    const mir = mirrors[i];
     const r = ringMats[i];
-    V3.set(r.pos, tmpPoint[0] * s[0], tmpPoint[1] * s[1], tmpPoint[2] * s[2]);
-    V3.set(r.nrm, tmpNormal[0] * s[0], tmpNormal[1] * s[1], tmpNormal[2] * s[2]);
+    mirrorPoint(mir, tmpPoint, r.pos);
+    mirrorVector(mir, tmpNormal, r.nrm);
     M4.diskBasis(r.matrix, r.pos, r.nrm, state.worldRadius);
     ringOut.push(r);
   }

@@ -1,6 +1,6 @@
 // WebSculpt コアロジックの検証（DOM / WebGPU に触らない部分）
 import { SculptMesh, PRIMITIVES, weld } from '../js/mesh.js';
-import { Sculptor } from '../js/sculptor.js';
+import { Sculptor, mirrorPoint } from '../js/sculptor.js';
 import { splitEdge, collapseEdge, refineRegion } from '../js/dyntopo.js';
 import { exportOBJ, exportSTL, exportPLY, importOBJ } from '../js/io.js';
 import { BRUSH_IDS } from '../js/brushes.js';
@@ -954,6 +954,124 @@ head('WASM 距離場（JS 版との一致）');
 // 何もしないので、divide() の「0..liveVerts-1 が全部生きている」前提が崩れ、
 // 生きた面が範囲外の頂点を参照して形が崩壊していた
 // （実測: 死んだスロット 2/7050 で最長辺が平均の 36 倍、最小半径 0.9989 → 0.5704）。
+// ---------------------------------------------------------------------------
+// シンメトリ（平面 / ラジアル / ローカル中心）
+//
+// 「回転させた形が一致するか」で測ろうとすると、球の頂点配置自体が N 回対称で
+// ないため回転先に頂点が無く、指標がノイズに埋もれる（実際にそれで測ろうとして
+// 相対誤差が 1.4 = 無相関になり判定できなかった）。代わりに
+// 「変位した頂点の方位ヒストグラム」を見る。ラジアルが効いていれば
+// 360/N 度ごとにピークが立つ。
+head('シンメトリ');
+{
+  const runStroke = (over) => {
+    const g = PRIMITIVES.sphere();
+    const m = new SculptMesh();
+    m.setGeometry(g.positions, g.indices);
+    const s = new Sculptor(m, makeState(Object.assign({
+      dynTopo: false, decimate: false, worldRadius: 0.25, strength: 0.9,
+      symmetry: { x: false, y: false, z: false },
+      radial: { on: false, count: 6, axis: 1 }, localSymmetry: false,
+    }, over)));
+    const before = m.positions.slice(0, m.nv * 3);
+    const pt = new Float32Array([1, 0.3, 0]);
+    s.beginStroke('clay', pt, 1);
+    for (let k = 1; k <= 8; k++) { pt.set([Math.cos(k * 0.05), 0.3, Math.sin(k * 0.05)]); s.addSample(pt); }
+    s.endStroke();
+    const BINS = 12;
+    const hist = new Float64Array(BINS);
+    let moved = 0;
+    for (let v = 0; v < m.nv; v++) {
+      if (!m.vAlive[v]) continue;
+      const i = v * 3;
+      const d = Math.hypot(m.positions[i] - before[i], m.positions[i + 1] - before[i + 1],
+        m.positions[i + 2] - before[i + 2]);
+      if (d < 1e-6) continue;
+      moved++;
+      let a = Math.atan2(before[i + 2], before[i]);
+      if (a < 0) a += Math.PI * 2;
+      hist[Math.min(BINS - 1, Math.floor(a / (Math.PI * 2) * BINS))] += d;
+    }
+    return { m, s, hist, moved };
+  };
+  /** ヒストグラムのピーク（平均の 1.5 倍を超えるビン）の位置 */
+  const peaks = (hist) => {
+    let sum = 0;
+    for (const h of hist) sum += h;
+    const mean = sum / hist.length;
+    const out = [];
+    for (let b = 0; b < hist.length; b++) if (hist[b] > mean * 1.5) out.push(b);
+    return out;
+  };
+
+  const off = runStroke({});
+  ok(off.s.activeMirrors.length === 1, `シンメトリ無しならミラーは 1 枚 (${off.s.activeMirrors.length})`);
+  ok(peaks(off.hist).length === 1, `シンメトリ無しなら変位は 1 か所 (ピーク ${peaks(off.hist).length} か所)`);
+  validate(off.m, { label: 'シンメトリ無し' });
+
+  for (const n of [3, 4, 6]) {
+    const r = runStroke({ radial: { on: true, count: n, axis: 1 } });
+    ok(r.s.activeMirrors.length === n, `radial ${n}: ミラーが ${n} 枚 (${r.s.activeMirrors.length})`);
+    const pk = peaks(r.hist);
+    ok(pk.length === n, `radial ${n}: ピークが ${n} か所 (実際 ${pk.length}: ${pk.join(',')})`);
+    let even = true;
+    for (let i = 1; i < pk.length; i++) if (pk[i] - pk[i - 1] !== 12 / n) even = false;
+    ok(even, `radial ${n}: ピークが ${360 / n} 度の等間隔 (${pk.join(',')})`);
+    ok(r.moved > off.moved * (n - 0.5), `radial ${n}: 変位頂点が約 ${n} 倍 (${off.moved} → ${r.moved})`);
+    validate(r.m, { label: `radial ${n}` });
+  }
+
+  // 平面 × ラジアルの合成
+  const both = runStroke({ symmetry: { x: true, y: false, z: false }, radial: { on: true, count: 3, axis: 1 } });
+  ok(both.s.activeMirrors.length === 6, `X 対称 × radial 3 = 6 枚 (${both.s.activeMirrors.length})`);
+  validate(both.m, { label: 'X 対称 × radial 3' });
+
+  // 平面シンメトリは厳密な左右対称を要求できる
+  {
+    const r = runStroke({ symmetry: { x: true, y: false, z: false } });
+    const m = r.m, P = m.positions;
+    let worst = 0;
+    const step = Math.max(1, Math.floor(m.nv / 300));
+    for (let v = 0; v < m.nv; v += step) {
+      if (!m.vAlive[v]) continue;
+      const i = v * 3;
+      const mx = -P[i], my = P[i + 1], mz = P[i + 2];
+      let best = Infinity;
+      for (let u = 0; u < m.nv; u++) {
+        if (!m.vAlive[u]) continue;
+        const j = u * 3;
+        const d = (P[j] - mx) ** 2 + (P[j + 1] - my) ** 2 + (P[j + 2] - mz) ** 2;
+        if (d < best) best = d;
+      }
+      if (best > worst) worst = best;
+    }
+    ok(Math.sqrt(worst) < 1e-5, `X 平面シンメトリが厳密に左右対称 (ずれ ${Math.sqrt(worst).toExponential(1)})`);
+  }
+
+  // ローカルシンメトリはモデル中心を基準に反転する
+  {
+    const g = PRIMITIVES.sphere();
+    const m = new SculptMesh();
+    m.setGeometry(g.positions, g.indices);
+    for (let v = 0; v < m.nv; v++) m.positions[v * 3] += 3;
+    const s = new Sculptor(m, makeState({
+      symmetry: { x: true, y: false, z: false }, localSymmetry: true,
+      radial: { on: false, count: 6, axis: 1 },
+    }));
+    const c = m.bounds().center;
+    const out = new Float32Array(3);
+    mirrorPoint(s.buildActiveMirrors()[1], new Float32Array([c[0] + 0.5, 0, 0]), out);
+    ok(Math.abs(out[0] - (c[0] - 0.5)) < 1e-5,
+      `ローカルシンメトリがモデル中心 x=${c[0].toFixed(2)} を基準に反転する (x=${out[0].toFixed(3)})`);
+    const s2 = new Sculptor(m, makeState({
+      symmetry: { x: true, y: false, z: false }, localSymmetry: false,
+      radial: { on: false, count: 6, axis: 1 },
+    }));
+    mirrorPoint(s2.buildActiveMirrors()[1], new Float32Array([c[0] + 0.5, 0, 0]), out);
+    ok(Math.abs(out[0] + (c[0] + 0.5)) < 1e-5, 'ローカル off なら原点基準の反転');
+  }
+}
+
 head('dyntopo → Divide');
 {
   const g = PRIMITIVES.sphere();

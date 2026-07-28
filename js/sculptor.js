@@ -15,21 +15,67 @@ import { refineRegion } from './dyntopo.js';
 import { dynamesh } from './dynamesh.js';
 import { SubdivLevels } from './subdiv.js';
 
-export function buildMirrors(sym) {
-  let list = [[1, 1, 1]];
+// シンメトリの写像。ZBrush の Symmetry パネル相当で 3 種類を合成する:
+//   * 平面ミラー   … 軸平面での反転（符号反転）
+//   * ラジアル     … 軸まわりに N 回転コピー（Radial Symmetry）
+//   * ローカル中心 … 原点ではなくモデル中心を基準にする（Local Symmetry）
+// 「符号ベクトルの配列」だと回転が表せないので、写像そのものを記述にした。
+//   p' = R(axis, ang) * (S ⊙ (p - c)) + c
+export const MAX_MIRRORS = 64;
+
+export function buildMirrors(sym, radial = null, center = null) {
+  const cx = center ? center[0] : 0, cy = center ? center[1] : 0, cz = center ? center[2] : 0;
+  // 1) 平面ミラー（符号の組み合わせ）
+  let signs = [[1, 1, 1]];
   const axes = [[0, sym.x], [1, sym.y], [2, sym.z]];
   for (const [i, on] of axes) {
     if (!on) continue;
     const next = [];
-    for (const m of list) {
+    for (const m of signs) {
       next.push(m);
       const c = m.slice();
       c[i] = -c[i];
       next.push(c);
     }
-    list = next;
+    signs = next;
   }
-  return list;
+  // 2) ラジアル（軸まわりの等分回転）
+  const rc = radial && radial.on ? Math.max(1, Math.min(32, Math.round(radial.count || 1))) : 1;
+  const rAxis = radial ? (radial.axis | 0) : 1;
+  const out = [];
+  for (let k = 0; k < rc && out.length < MAX_MIRRORS; k++) {
+    const ang = rc > 1 ? (Math.PI * 2 * k) / rc : 0;
+    for (const s of signs) {
+      if (out.length >= MAX_MIRRORS) break;
+      out.push({ s, ang, axis: rAxis, c: [cx, cy, cz], flip: s[0] * s[1] * s[2] < 0 });
+    }
+  }
+  return out;
+}
+
+/** 軸 axis まわりに角 ang だけ回す（axis 成分は変えない） */
+function rotAxis(axis, ang, x, y, z, out) {
+  if (ang === 0) { out[0] = x; out[1] = y; out[2] = z; return out; }
+  const cs = Math.cos(ang), sn = Math.sin(ang);
+  if (axis === 0) { out[0] = x; out[1] = y * cs - z * sn; out[2] = y * sn + z * cs; }
+  else if (axis === 1) { out[0] = x * cs + z * sn; out[1] = y; out[2] = -x * sn + z * cs; }
+  else { out[0] = x * cs - y * sn; out[1] = x * sn + y * cs; out[2] = z; }
+  return out;
+}
+
+/** 点をミラー先へ写す */
+export function mirrorPoint(mir, p, out) {
+  const s = mir.s, c = mir.c;
+  rotAxis(mir.axis, mir.ang,
+    (p[0] - c[0]) * s[0], (p[1] - c[1]) * s[1], (p[2] - c[2]) * s[2], out);
+  out[0] += c[0]; out[1] += c[1]; out[2] += c[2];
+  return out;
+}
+
+/** ベクトル（ドラッグ差分など）をミラー先へ写す。平行移動は掛けない */
+export function mirrorVector(mir, v, out) {
+  const s = mir.s;
+  return rotAxis(mir.axis, mir.ang, v[0] * s[0], v[1] * s[1], v[2] * s[2], out);
 }
 
 /** 全頂点走査で p に最も近い生存頂点を返す */
@@ -174,7 +220,7 @@ export class Sculptor {
 
     this.mirrors = [];
     for (let i = 0; i < 8; i++) this.mirrors.push(new MirrorState());
-    this.activeMirrors = [[1, 1, 1]];
+    this.activeMirrors = buildMirrors({ x: false, y: false, z: false });
 
     this.hoverSeed = -1;
     this.stroking = false;
@@ -190,6 +236,18 @@ export class Sculptor {
     this._walk = V3.create();
 
     this.history.reset(mesh);
+  }
+
+  /**
+   * いまの state からミラー写像の一覧を作る。
+   * ローカルシンメトリはモデルの中心を基準にするので bounds を見る
+   * （毎ダブではなくストローク開始時に 1 回だけ呼ばれる）。
+   */
+  buildActiveMirrors() {
+    const st = this.state;
+    let center = null;
+    if (st.localSymmetry) center = this.mesh.bounds().center;
+    return buildMirrors(st.symmetry, st.radial, center);
   }
 
   setMesh(mesh) {
@@ -480,12 +538,13 @@ export class Sculptor {
     this.topoChanged = false;
     this.dabCount = 0;
     this.engine.beginStroke();
-    this.activeMirrors = buildMirrors(this.state.symmetry);
+    this.activeMirrors = this.buildActiveMirrors();
+    // ラジアルシンメトリでミラー数が増えるので、足りなければ足す
+    while (this.mirrors.length < this.activeMirrors.length) this.mirrors.push(new MirrorState());
 
     for (let i = 0; i < this.activeMirrors.length; i++) {
       const ms = this.mirrors[i];
-      const sgn = this.activeMirrors[i];
-      V3.set(this._mp, point[0] * sgn[0], point[1] * sgn[1], point[2] * sgn[2]);
+      mirrorPoint(this.activeMirrors[i], point, this._mp);
       // 全頂点走査は 260 万頂点で 1 ミラーあたり 45ms かかる。
       // ホバー中に追従させているシードから降下すれば通常はそれで足りる。
       ms.seed = this._seedNear(this._mp, i === 0 ? this.hoverSeed : this.mirrors[i].seed);
@@ -593,10 +652,9 @@ export class Sculptor {
   _dabAll(point, delta, first, scale = 1) {
     const mirrors = this.activeMirrors;
     for (let i = 0; i < mirrors.length; i++) {
-      const sgn = mirrors[i];
       const ms = this.mirrors[i];
-      V3.set(this._mp, point[0] * sgn[0], point[1] * sgn[1], point[2] * sgn[2]);
-      V3.set(this._pt, delta[0] * sgn[0], delta[1] * sgn[1], delta[2] * sgn[2]);
+      mirrorPoint(mirrors[i], point, this._mp);
+      mirrorVector(mirrors[i], delta, this._pt);
       this._dab(ms, this._mp, this._pt, first, scale);
       V3.copy(ms.lastPoint, this._mp);
     }

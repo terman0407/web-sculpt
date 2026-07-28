@@ -12,7 +12,7 @@ import { DIRTY_SHIFT, DIRTY_BLOCK } from './mesh.js';
 import { generateMatcapLayer, MATERIALS } from './matcap.js';
 import {
   UNIFORM_FLOATS, UO,
-  BG_WGSL, MESH_WGSL, WIRE_WGSL, GRID_WGSL, SSAO_WGSL, BLUR_WGSL, PRESENT_WGSL, RING_WGSL, PICK_WGSL,
+  BG_WGSL, MESH_WGSL, WIRE_WGSL, OVERLAY_WGSL, GRID_WGSL, SSAO_WGSL, BLUR_WGSL, PRESENT_WGSL, RING_WGSL, PICK_WGSL,
 } from './shaders.js';
 
 const COLOR_FORMAT = 'rgba16float';
@@ -83,6 +83,16 @@ export class Renderer {
     // --- メッシュ用 GPU バッファ ---
     this.gpuCapV = 0;
     this.gpuCapT = 0;
+
+    // 部分表示用インデックス（0 なら全部描く）
+    this.visIb = null;
+    this.visCap = 0;
+    this.visCount = 0;
+    // オーバーレイ線（位置 vec3 + 色 vec4 = 7 float / 頂点）
+    this.overlayBuf = null;
+    this.overlayCap = 0;
+    this.overlayCount = 0;
+    this.overlayFront = true;
     this.vbPos = null; this.vbNrm = null; this.vbCol = null; this.vbMask = null; this.vbCurv = null;
     this.ib = null;
     this.wireIb = null;
@@ -199,6 +209,7 @@ export class Renderer {
     const meshMod = mod(MESH_WGSL);
     const wireMod = mod(WIRE_WGSL);
     const gridMod = mod(GRID_WGSL);
+    const overlayMod = mod(OVERLAY_WGSL);
     const ssaoMod = mod(SSAO_WGSL);
     const blurMod = mod(BLUR_WGSL);
     const presentMod = mod(PRESENT_WGSL);
@@ -265,6 +276,35 @@ export class Renderer {
       },
       primitive: { topology: 'line-list' },
       depthStencil: depthState(false, 'less-equal'),
+    });
+
+    // オーバーレイの線。頂点は (位置 vec3, 色 vec4) の 28 バイトストライド。
+    // depth 付き（形状に隠れる）と depth 無し（常に手前）の 2 本を作り、
+    // ハンドルは「隠れる線を薄く + 手前の線を濃く」の重ね描きで見やすくする。
+    const overlayVB = [{
+      arrayStride: 28,
+      attributes: [
+        { shaderLocation: 0, offset: 0, format: 'float32x3' },
+        { shaderLocation: 1, offset: 12, format: 'float32x4' },
+      ],
+    }];
+    const overlayTargets = [
+      { format: COLOR_FORMAT, blend: alphaBlend },
+      { format: NORMAL_FORMAT, writeMask: 0 },
+    ];
+    this.pipeOverlay = d.createRenderPipeline({
+      layout: mainLayout,
+      vertex: { module: overlayMod, entryPoint: 'vs', buffers: overlayVB },
+      fragment: { module: overlayMod, entryPoint: 'fs', targets: overlayTargets },
+      primitive: { topology: 'line-list' },
+      depthStencil: depthState(false, 'less-equal'),
+    });
+    this.pipeOverlayFront = d.createRenderPipeline({
+      layout: mainLayout,
+      vertex: { module: overlayMod, entryPoint: 'vs', buffers: overlayVB },
+      fragment: { module: overlayMod, entryPoint: 'fs', targets: overlayTargets },
+      primitive: { topology: 'line-list' },
+      depthStencil: depthState(false, 'always'),
     });
 
     // フロアグリッドはメッシュの後に描く（深度テストのみ、書き込みなし）
@@ -551,6 +591,48 @@ export class Renderer {
     mesh.clearDirty();
   }
 
+  /**
+   * 部分表示のインデックスを差し替える。null / count 0 を渡すと全体表示に戻る。
+   * ポリグループの表示状態が変わったときだけ呼ぶ（毎フレーム呼ぶものではない）。
+   */
+  setVisibleIndices(indices, count) {
+    if (!indices || !count) { this.visCount = 0; return; }
+    const d = this.device;
+    if (!this.visIb || this.visCap < count) {
+      if (this.visIb) this.visIb.destroy();
+      this.visCap = Math.ceil(count * 1.4);
+      this.visIb = d.createBuffer({
+        size: this.visCap * 4,
+        usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+      });
+    }
+    d.queue.writeBuffer(this.visIb, 0, indices, 0, count);
+    this.visCount = count;
+  }
+
+  /**
+   * オーバーレイの線を差し替える。
+   * @param {Float32Array} verts (x,y,z,r,g,b,a) を線分の端点ごとに並べたもの
+   * @param {number} vertCount   頂点数（線分数 × 2）
+   * @param {boolean} front      形状に隠れずに常に手前へ描くか
+   */
+  setOverlayLines(verts, vertCount, front = true) {
+    if (!verts || !vertCount) { this.overlayCount = 0; return; }
+    const d = this.device;
+    const need = vertCount * 7;
+    if (!this.overlayBuf || this.overlayCap < need) {
+      if (this.overlayBuf) this.overlayBuf.destroy();
+      this.overlayCap = Math.ceil(need * 1.5);
+      this.overlayBuf = d.createBuffer({
+        size: this.overlayCap * 4,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      });
+    }
+    d.queue.writeBuffer(this.overlayBuf, 0, verts, 0, need);
+    this.overlayCount = vertCount;
+    this.overlayFront = front;
+  }
+
   _syncWireframe(mesh, now) {
     if (mesh.topoVersion === this.wireVersion) return;
     if (this.wireVersion >= 0 && now - this.wireBuiltAt < 160) return;   // 構築を間引く
@@ -733,8 +815,16 @@ export class Renderer {
         pass.setVertexBuffer(2, this.vbCol);
         pass.setVertexBuffer(3, this.vbMask);
         pass.setVertexBuffer(4, this.vbCurv);
-        pass.setIndexBuffer(this.ib, 'uint32');
-        pass.drawIndexed(mesh.nt * 3);
+        // 部分表示（ポリグループのハイド）中は、可視な三角形だけを詰めた
+        // インデックスバッファを使う。退化三角形に書き換えて隠す方法もあるが、
+        // それだとトポロジ自体を壊すので表示だけ差し替える。
+        if (this.visCount > 0 && this.visIb) {
+          pass.setIndexBuffer(this.visIb, 'uint32');
+          pass.drawIndexed(this.visCount);
+        } else {
+          pass.setIndexBuffer(this.ib, 'uint32');
+          pass.drawIndexed(mesh.nt * 3);
+        }
       }
 
       // グリッドはメッシュの後（深度テストで隠れるように）
@@ -748,6 +838,19 @@ export class Renderer {
         pass.setVertexBuffer(0, this.vbPos);
         pass.setIndexBuffer(this.wireIb, 'uint32');
         pass.drawIndexed(this.wireCount);
+      }
+
+      // オーバーレイの線（トランスポーズのハンドル / クリップのガイド）。
+      // 隠れる線を薄く重ねてから手前の線を描くと、奥行きが分かりつつ操作しやすい。
+      if (this.overlayCount > 0 && this.overlayBuf) {
+        pass.setPipeline(this.pipeOverlay);
+        pass.setVertexBuffer(0, this.overlayBuf);
+        pass.draw(this.overlayCount);
+        if (this.overlayFront) {
+          pass.setPipeline(this.pipeOverlayFront);
+          pass.setVertexBuffer(0, this.overlayBuf);
+          pass.draw(this.overlayCount);
+        }
       }
       pass.end();
     }
@@ -801,7 +904,8 @@ export class Renderer {
   }
 
   destroy() {
-    for (const b of [this.vbPos, this.vbNrm, this.vbCol, this.vbMask, this.vbCurv, this.ib, this.wireIb]) {
+    for (const b of [this.vbPos, this.vbNrm, this.vbCol, this.vbMask, this.vbCurv, this.ib, this.wireIb,
+      this.visIb, this.overlayBuf]) {
       if (b) b.destroy();
     }
   }
