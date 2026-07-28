@@ -12,6 +12,7 @@ import { buildUI } from './ui.js';
 import { exportOBJ, exportSTL, exportPLY, importOBJ, download } from './io.js';
 import * as store from './store.js';
 import { initWasmField, wasmFieldState, wasmFieldError, wasmFieldModule } from './wasmfield.js';
+import { dynamesh } from './dynamesh.js';
 import { initParallelField, parallelState, parallelWorkers } from './parallelfield.js';
 
 const BG_PRESETS = {
@@ -791,6 +792,8 @@ boot();
 // デバッグ / 自動テスト用
 window.__wasmState = wasmFieldState;
 window.__parState = () => parallelState() + ':' + parallelWorkers();
+// ダイナメッシュを差し替え前の生の形で呼べるようにしておく（並列と逐次の突き合わせ用）
+window.__rawDynamesh = dynamesh;
 window.WebSculpt = {
   state, mesh, camera, app, BRUSHES,
   pointer: ptr,

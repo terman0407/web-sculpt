@@ -30,7 +30,7 @@ self.onmessage = async (ev) => {
       return;
     }
     if (m.type === 'splat') {
-      const { pos, tris, nv, nt, g, kBegin, kEnd, wantClosest, id } = m;
+      const { pos, tris, ids, nv, nt, g, kBegin, kEnd, wantClosest, id } = m;
       const slabK = kEnd - kBegin + 1;
       const count = g.nx * g.ny * slabK;
       const pPos = W.alloc(nv * 12);
@@ -51,6 +51,13 @@ self.onmessage = async (ev) => {
       if (pClose) {
         closest = new Int32Array(count);
         closest.set(new Int32Array(b2, pClose, count));
+        // splat が返すのは「このスラブに渡した三角形リストの中での番号」。
+        // 呼び出し側（ポリペイント転写）が欲しいのは元メッシュの三角形 ID なので
+        // ここで引き直す。これを忘れると色が無関係な三角形から拾われる。
+        for (let i = 0; i < count; i++) {
+          const c = closest[i];
+          closest[i] = c >= 0 && c < nt ? ids[c] : -1;
+        }
       }
       if (pClose) W.release(pClose);
       W.release(pField); W.release(pTri); W.release(pPos);
@@ -206,6 +213,8 @@ function buildSlabPayloads(mesh, g, slabs) {
     const sl = slabs[s];
     if (n === 0) { payloads[s] = null; continue; }
     const tris = new Int32Array(n * 3);
+    // closest を元メッシュの三角形 ID に戻すための対応表（ワーカー側で引き直す）
+    const ids = new Int32Array(n);
     // 使う頂点数は上限が 3n。多少余っても転送はバッファ所有権の移動（ゼロコピー）
     // なので、伸長判定を無くして一気に確保したほうが速い。
     const pos = new Float32Array(n * 9);
@@ -214,7 +223,9 @@ function buildSlabPayloads(mesh, g, slabs) {
     const st = stamp, rm = remap;
     // pushVert をクロージャで呼ぶと 1000 万回の呼び出しになるため展開する
     for (let q = off[s]; q < off[s + 1]; q++) {
-      const ti = slabTris[q] * 3;
+      const gt = slabTris[q];
+      ids[q - off[s]] = gt;
+      const ti = gt * 3;
       for (let e = 0; e < 3; e++) {
         const v = T[ti + e];
         let r;
@@ -231,7 +242,7 @@ function buildSlabPayloads(mesh, g, slabs) {
         tris[w++] = r;
       }
     }
-    payloads[s] = { pos, tris, nv, nt: w / 3 };
+    payloads[s] = { pos, tris, ids, nv, nt: w / 3 };
   }
   buildTiming = { krange: Math.round(_t1 - _t0), csr: Math.round(_t2 - _t1), pack: Math.round(_now() - _t2) };
   return payloads;
@@ -289,9 +300,9 @@ export async function parallelSplat(mesh, field, closest, g) {
       // バッファの所有権ごと渡す（構造化クローンのコピーを避ける）。
       // 送ったあとメインスレッド側では使わないので detach されて問題ない。
       w.postMessage({
-        type: 'splat', id: s, pos: p.pos, tris: p.tris, nv: p.nv, nt: p.nt,
+        type: 'splat', id: s, pos: p.pos, tris: p.tris, ids: p.ids, nv: p.nv, nt: p.nt,
         g: gp, kBegin: sl.kBegin, kEnd: sl.kEnd, wantClosest, slabK,
-      }, [p.pos.buffer, p.tris.buffer]);
+      }, [p.pos.buffer, p.tris.buffer, p.ids.buffer]);
     })));
     const tE = (typeof performance === 'object' ? performance.now() : Date.now());
     lastTiming = { build: Math.round(tW - tB), wait: Math.round(tE - tW), merge: 0 };

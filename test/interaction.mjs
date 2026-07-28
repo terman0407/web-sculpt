@@ -259,6 +259,7 @@ async function main() {
     ok(mf.chi <= 2 && mf.chi % 2 === 0,
       `ダイナメッシュ出力が閉じた向き付け可能曲面 (χ = ${mf.chi}, 種数 ${(2 - mf.chi) / 2})`);
     await shot('16-dynamesh.png');
+
     // ダイナメッシュ後も彫刻できる
     await mouse('mouseMoved', cx, cy);
     await frames(6);
@@ -300,6 +301,46 @@ async function main() {
     ok(pr.parVerts === pr.seqVerts && pr.parTris === pr.seqTris,
       `並列と逐次の出力が一致 (${pr.parVerts}/${pr.parTris} vs ${pr.seqVerts}/${pr.seqTris})`);
     console.log(`       並列 ${pr.parMs}ms(距離場 ${pr.parDist}) / 逐次 ${pr.seqMs}ms(距離場 ${pr.seqDist})`);
+
+    // --- ポリペイントの転写 -----------------------------------------------
+    // ワーカー並列版は「スラブに渡した三角形リスト内での番号」を返すので、
+    // 元メッシュの三角形 ID に引き直さないと色が無関係な面から拾われる。
+    // 実際にそのバグを出したので、並列 / 逐次の両方で毎回確かめる。
+    const paint = await cdp.eval(`(async () => {
+      const W = window.WebSculpt, { mesh, sculptor, state } = W;
+      const rows = [];
+      for (const par of [false, true]) {
+        W.app.newMesh('sphere');
+        for (let i = 0; i < 3; i++) sculptor.divide();
+        // x > 0 を赤、x <= 0 を青に塗る
+        const C = mesh.colors, P = mesh.positions;
+        for (let v = 0; v < mesh.nv; v++) {
+          const i = v * 3;
+          C[i] = P[i] > 0 ? 1 : 0; C[i + 1] = 0; C[i + 2] = P[i] > 0 ? 0 : 1;
+        }
+        mesh.markAllDirty();
+        const r = await window.__rawDynamesh(mesh,
+          { resolution: 96, smooth: 1, transferColor: true, parallel: par });
+        let wrong = 0, white = 0, judged = 0;
+        const n = r.positions.length / 3;
+        for (let v = 0; v < n; v++) {
+          const x = r.positions[v * 3];
+          const cr = r.colors[v * 3], cb = r.colors[v * 3 + 2];
+          if (cr > 0.9 && cb > 0.9) { white++; continue; }
+          if (Math.abs(x) < 0.06) continue;     // 塗り分けの境目は判定しない
+          judged++;
+          if (x > 0 ? cb > cr : cr > cb) wrong++;
+        }
+        rows.push({ par, n, judged, wrong, white, usedPar: r.stats.parallel });
+      }
+      return JSON.stringify(rows);
+    })()`);
+    for (const r of JSON.parse(paint)) {
+      ok(r.judged > 1000, `色転写の判定対象が十分ある (parallel=${r.par}: ${r.judged} 頂点)`);
+      ok(r.wrong === 0, `ポリペイントが正しく転写される (parallel=${r.par}"→"${r.usedPar}: 誤り ${r.wrong} / ${r.judged})`);
+      ok(r.white === 0, `色が取れず白になった頂点がない (parallel=${r.par}: ${r.white})`);
+    }
+
 
     // ---- 11) UI 要素のクリック ----------------------------------------
     await cdp.eval(`document.querySelectorAll('#brushList .brush')[0].click()`);
