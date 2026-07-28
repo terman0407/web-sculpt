@@ -234,6 +234,8 @@ export function buildUI(app) {
   let morphAmount = null, morphFactor = null, morphInfo = null;
   let clipModeSeg = null, transposeToggle = null;
   let alphaGrid = null, strokeSeg = null, strokeParamBox = null;
+  let subtoolList = null, subtoolIcons = null, subtoolSolo = null, subtoolPrimSeg = null;
+  let subtoolPrim = 'sphere';
   let syncStrokeParams = () => {};
 
   /** 選択中のレイヤーに対して何かする。無ければ促す */
@@ -288,6 +290,21 @@ export function buildUI(app) {
       });
     }
     groupList.render(rows);
+  }
+
+  function refreshSubtools() {
+    if (!subtoolList || !app.subtools) return;
+    const set = app.subtools;
+    subtoolList.render(set.info().map((t) => ({
+      id: t.index, label: t.name,
+      num: t.tris.toLocaleString() + ' 面',
+      visible: t.visible, selected: t.active,
+    })));
+    const many = set.count > 1;
+    subtoolIcons.enable('del', many);
+    subtoolIcons.enable('up', many);
+    subtoolIcons.enable('down', many);
+    if (subtoolSolo) subtoolSolo.set(set.solo);
   }
 
   function refreshMorph() {
@@ -563,6 +580,54 @@ export function buildUI(app) {
     { label: '反転', onClick: () => app.invertMask() },
   ]);
   el('p', 'note', mk).textContent = 'Ctrl+ドラッグでマスクを塗る / Ctrl+Alt+ドラッグで消す。マスク部分は彫刻されません。';
+
+  // --- サブツール ---------------------------------------------------------
+  // ZBrush の SubTool 相当。1 つのシーンに独立したメッシュを複数置き、
+  // 編集できるのはアクティブな 1 つだけ。
+  const su = section(right, 'サブツール');
+  {
+    subtoolList = listBox(su, {
+      empty: '（サブツールなし）',
+      refresh: () => refreshSubtools(),
+      onSelect: (i) => app.subtoolSelect(i),
+      onToggle: (i, on) => app.subtoolSetVisible(i, on),
+      onRename: (i, name) => app.subtoolRename(i, name),
+    });
+    subtoolIcons = iconRow(su, [
+      { id: 'add', label: '＋', title: 'サブツールを追加（球）', onClick: () => app.subtoolAdd(subtoolPrim) },
+      { id: 'dup', label: '複製', title: 'アクティブなサブツールを複製', onClick: () => app.subtoolDuplicate() },
+      { id: 'up', label: '↑', title: '順番を上へ', onClick: () => app.subtoolMove(app.subtools.active, -1) },
+      { id: 'down', label: '↓', title: '順番を下へ', onClick: () => app.subtoolMove(app.subtools.active, 1) },
+      { id: 'del', label: '削除', title: 'アクティブなサブツールを削除', onClick: () => app.subtoolRemove() },
+    ]);
+    el('div', 'subhead', su).textContent = '追加する形';
+    subtoolPrimSeg = segmented(su, [
+      { label: '球', value: 'sphere' }, { label: '箱', value: 'cube' },
+      { label: '円柱', value: 'cylinder' }, { label: 'トーラス', value: 'torus' },
+    ], 'sphere', (v) => { subtoolPrim = v; });
+
+    subtoolSolo = toggle(su, {
+      label: 'ソロ表示', value: false,
+      title: 'アクティブなサブツールだけを表示する（ZBrush の Solo）',
+      onChange: (on) => app.subtoolSetSolo(on),
+    });
+
+    el('div', 'subhead', su).textContent = 'まとめる / 分ける';
+    btnRow(su, [
+      { label: 'まとめる', title: '表示中のサブツールを 1 つに結合する（ダイナメッシュを掛けると和になる）', onClick: () => app.subtoolMerge() },
+    ]);
+    btnRow(su, [
+      { label: '塊で分ける', title: '離れている塊ごとに別のサブツールへ分ける', onClick: () => app.subtoolSplitParts() },
+      { label: 'マスクで分ける', title: 'マスクした部分を別のサブツールへ切り出す', onClick: () => app.subtoolSplitMasked() },
+    ]);
+    btnRow(su, [
+      { label: '全体表示', cls: 'wide', title: '全サブツールが収まるように視点を合わせる', onClick: () => app.frameAll() },
+    ]);
+    el('p', 'note', su).textContent =
+      '彫刻できるのはアクティブな 1 つだけです。行をクリックで切り替え、'
+      + '目のアイコンで表示切替、名前をダブルクリックで変更できます。'
+      + '別々のサブツールを重ねて「まとめる」→「ダイナメッシュ」で 1 つの形に融合できます。';
+  }
 
   // --- アルファ / ストローク ---------------------------------------------
   // ZBrush の Alpha パレットと Stroke パレット相当。
@@ -1112,11 +1177,12 @@ export function buildUI(app) {
   refreshLayers();
   refreshGroups();
   refreshMorph();
+  refreshSubtools();
 
   return {
     setBrush, setMaterial, toast, refreshStats, showBusy, hideBusy,
     askRestore, refreshLevels, refreshProjects, setAutosaveMark,
-    refreshLayers, refreshGroups, refreshMorph,
+    refreshLayers, refreshGroups, refreshMorph, refreshSubtools,
     /** トランスポーズのトグル表示を state に合わせる（キー操作から呼ばれる） */
     syncTranspose(on) { if (transposeToggle) transposeToggle.set(on); },
     syncFromState() {
@@ -1146,6 +1212,7 @@ export function buildUI(app) {
       refreshLayers();
       refreshGroups();
       refreshMorph();
+      refreshSubtools();
     },
   };
 }

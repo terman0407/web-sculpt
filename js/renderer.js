@@ -84,6 +84,9 @@ export class Renderer {
     this.gpuCapV = 0;
     this.gpuCapT = 0;
 
+    // 非アクティブなサブツールの静的バッファ（id → スロット）
+    this.staticSlots = new Map();
+
     // 部分表示用インデックス（0 なら全部描く）
     this.visIb = null;
     this.visCap = 0;
@@ -511,6 +514,75 @@ export class Renderer {
   }
 
   // -----------------------------------------------------------------------
+  // 非アクティブなサブツールの静的バッファ
+  //
+  // アクティブなサブツールは既存の vbPos… を dirty 転送で毎フレーム更新する。
+  // 非アクティブなものは彫刻されないので、一度だけ丸ごと上げて置いておけばよい。
+  // パイプラインと頂点レイアウトはアクティブと同じなので、描画時にバッファを
+  // 差し替えるだけで済む。
+  // -----------------------------------------------------------------------
+
+  /** id のスロットを（無ければ作って）返す。geomVersion が変わっていたら上げ直す */
+  ensureStatic(id, mesh) {
+    let slot = this.staticSlots.get(id);
+    const needCapV = mesh.nv, needCapT = mesh.nt;
+    if (slot && (slot.capV < needCapV || slot.capT < needCapT)) {
+      this.destroyStatic(id);
+      slot = null;
+    }
+    const d = this.device;
+    if (!slot) {
+      const vu = GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST;
+      const capV = Math.max(1, needCapV), capT = Math.max(1, needCapT);
+      slot = {
+        capV, capT,
+        pos: d.createBuffer({ size: capV * 12, usage: vu }),
+        nrm: d.createBuffer({ size: capV * 12, usage: vu }),
+        col: d.createBuffer({ size: capV * 12, usage: vu }),
+        msk: d.createBuffer({ size: capV * 4, usage: vu }),
+        crv: d.createBuffer({ size: capV * 4, usage: vu }),
+        ib: d.createBuffer({ size: capT * 12, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST }),
+        count: 0,
+        stamp: -1,
+      };
+      this.staticSlots.set(id, slot);
+    }
+    // 形や色が変わっていたら上げ直す。geomVersion と topoVersion の両方を見る
+    const stamp = mesh.geomVersion * 1048576 + mesh.topoVersion;
+    if (slot.stamp !== stamp) {
+      d.queue.writeBuffer(slot.pos, 0, mesh.positions, 0, mesh.nv * 3);
+      d.queue.writeBuffer(slot.nrm, 0, mesh.normals, 0, mesh.nv * 3);
+      d.queue.writeBuffer(slot.col, 0, mesh.colors, 0, mesh.nv * 3);
+      d.queue.writeBuffer(slot.msk, 0, mesh.mask, 0, mesh.nv);
+      d.queue.writeBuffer(slot.crv, 0, mesh.curv, 0, mesh.nv);
+      d.queue.writeBuffer(slot.ib, 0, mesh.tris, 0, mesh.nt * 3);
+      slot.count = mesh.nt * 3;
+      slot.stamp = stamp;
+    }
+    return slot;
+  }
+
+  destroyStatic(id) {
+    const slot = this.staticSlots.get(id);
+    if (!slot) return;
+    for (const b of [slot.pos, slot.nrm, slot.col, slot.msk, slot.crv, slot.ib]) {
+      if (b) b.destroy();
+    }
+    this.staticSlots.delete(id);
+  }
+
+  /** 使われていないスロットを片付ける（keep に無い id を捨てる） */
+  pruneStatic(keep) {
+    for (const id of [...this.staticSlots.keys()]) {
+      if (!keep.has(id)) this.destroyStatic(id);
+    }
+    // drawSlots は破棄したスロットを掴んでいる可能性があるので必ず落とす。
+    // 次のフレームで syncSubtoolSlots が作り直す。残すと破棄済みバッファを
+    // バインドしかねない。
+    this.drawSlots = null;
+  }
+
+  // -----------------------------------------------------------------------
   // メッシュ転送
   // -----------------------------------------------------------------------
   syncMesh(mesh) {
@@ -827,6 +899,21 @@ export class Renderer {
         }
       }
 
+      // 非アクティブなサブツール（静的バッファから描く。彫刻されないので転送不要）
+      if (this.drawSlots && this.drawSlots.length) {
+        pass.setPipeline(this.pipeMesh);
+        for (const sl of this.drawSlots) {
+          if (!sl || sl.count === 0) continue;
+          pass.setVertexBuffer(0, sl.pos);
+          pass.setVertexBuffer(1, sl.nrm);
+          pass.setVertexBuffer(2, sl.col);
+          pass.setVertexBuffer(3, sl.msk);
+          pass.setVertexBuffer(4, sl.crv);
+          pass.setIndexBuffer(sl.ib, 'uint32');
+          pass.drawIndexed(sl.count);
+        }
+      }
+
       // グリッドはメッシュの後（深度テストで隠れるように）
       if (state.grid) {
         pass.setPipeline(this.pipeGrid);
@@ -904,6 +991,7 @@ export class Renderer {
   }
 
   destroy() {
+    for (const id of [...this.staticSlots.keys()]) this.destroyStatic(id);
     for (const b of [this.vbPos, this.vbNrm, this.vbCol, this.vbMask, this.vbCurv, this.ib, this.wireIb,
       this.visIb, this.overlayBuf]) {
       if (b) b.destroy();

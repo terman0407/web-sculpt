@@ -145,8 +145,31 @@ export function projectBytes(p) {
  * @param {SculptMesh} mesh
  * @param {object} state 設定（一緒に保存して復元時に戻す）
  */
+/**
+ * サブツールを 1 つぶんレコードへ詰める形にして返す。
+ * subarray のままだと構造化複製で親バッファ全体が複製されるので実体化する。
+ */
+function packSubTool(t) {
+  const p = packMesh(t.mesh);
+  return {
+    name: t.name, visible: t.visible !== false,
+    verts: p.verts, tris: p.tris,
+    positions: p.positions, colors: p.colors, mask: p.mask,
+    indices: new Uint32Array(p.indices),
+  };
+}
+
+/**
+ * プロジェクトを保存する。
+ * @param {string} name スロット名
+ * @param {SculptMesh|object} mesh 単一メッシュ、または { list, active } のサブツール集合
+ * @param {object} state 設定（一緒に保存して復元時に戻す）
+ */
 export async function saveProject(name, mesh, state) {
-  const p = packMesh(mesh);
+  // サブツール集合が渡されたら全部を保存する。
+  // 1 つめは旧形式のフィールドにも入れておく（古い版で開いても最低限読める）。
+  const set = mesh && Array.isArray(mesh.list) ? mesh : null;
+  const p = packMesh(set ? set.list[set.active || 0].mesh : mesh);
   // subarray のままだと構造化複製で親バッファ全体が複製されるので実体化する
   const rec = {
     name,
@@ -157,6 +180,9 @@ export async function saveProject(name, mesh, state) {
     colors: p.colors,
     mask: p.mask,
     indices: new Uint32Array(p.indices),
+    // サブツール版のデータ。無ければ単一メッシュとして読まれる
+    subtools: set ? set.list.map(packSubTool) : null,
+    activeSubtool: set ? (set.active || 0) : 0,
     settings: (() => {
       const o = {};
       for (const k of SETTING_KEYS) if (state[k] !== undefined) {
@@ -190,10 +216,17 @@ export async function listProjects() {
         updated: r.updated,
         verts: r.verts,
         tris: r.tris,
-        bytes: (r.positions ? r.positions.byteLength : 0)
-          + (r.colors ? r.colors.byteLength : 0)
-          + (r.mask ? r.mask.byteLength : 0)
-          + (r.indices ? r.indices.byteLength : 0),
+        subtools: r.subtools ? r.subtools.length : 1,
+        bytes: r.subtools
+          ? r.subtools.reduce((acc, t) => acc
+            + (t.positions ? t.positions.byteLength : 0)
+            + (t.colors ? t.colors.byteLength : 0)
+            + (t.mask ? t.mask.byteLength : 0)
+            + (t.indices ? t.indices.byteLength : 0), 0)
+          : (r.positions ? r.positions.byteLength : 0)
+            + (r.colors ? r.colors.byteLength : 0)
+            + (r.mask ? r.mask.byteLength : 0)
+            + (r.indices ? r.indices.byteLength : 0),
         auto: r.name === AUTOSAVE_NAME,
       }));
       out.sort((a, b) => b.updated - a.updated);

@@ -15,6 +15,7 @@ import { initWasmField, wasmFieldState, wasmFieldError, wasmFieldModule } from '
 import { dynamesh } from './dynamesh.js';
 import { initParallelField, parallelState, parallelWorkers } from './parallelfield.js';
 import { Tools, defaultToolState } from './tools.js';
+import { SubToolSet } from './subtool.js';
 
 const BG_PRESETS = {
   dark: { top: [0.032, 0.036, 0.046, 1], bot: [0.0065, 0.0075, 0.011, 1], ring: [1, 1, 1, 0.92] },
@@ -95,7 +96,8 @@ Object.assign(state, defaultToolState());
 
 const canvas = document.getElementById('gpu');
 const camera = new OrbitCamera();
-const mesh = new SculptMesh();
+let mesh = new SculptMesh();
+const subtools = new SubToolSet();
 let renderer = null;
 let sculptor = null;
 let ui = null;
@@ -133,14 +135,23 @@ const ringOut = [];
 // ---------------------------------------------------------------------------
 const app = {
   state,
+  get subtools() { return subtools; },
   newMesh(kind) {
     const gen = PRIMITIVES[kind] || PRIMITIVES.sphere;
     const g = gen();
+    // 新規作成はサブツールも 1 個に戻す（「作り直し」の意味をはっきりさせる）
+    mesh = new SculptMesh();
     mesh.setGeometry(g.positions, g.indices);
+    if (renderer) {
+      for (const t of subtools.list) renderer.destroyStatic(t.id);
+      renderer.drawSlots = null;
+      renderer.gpuCapV = 0; renderer.gpuCapT = 0;
+    }
+    subtools.adopt(mesh, 'サブツール 1');
     if (sculptor) { sculptor.setMesh(mesh); }
     if (tools) { tools.onMeshReplaced(); applyTransposeMode(false); }
     frameCamera();
-    if (ui) ui.toast('新しいメッシュを作成しました');
+    if (ui) { ui.refreshSubtools(); ui.toast('新しいメッシュを作成しました'); }
   },
   undo() {
     if (sculptor.history.undo(mesh)) { sculptor.hoverSeed = -1; ui.toast('元に戻しました'); }
@@ -240,7 +251,7 @@ const app = {
   async saveProject(name) {
     if (!name) return;
     try {
-      const r = await store.saveProject(name, mesh, state);
+      const r = await store.saveProject(name, subtools, state);
       store.saveSettings(state);
       ui.toast(`保存しました: ${name}（${r.verts.toLocaleString()} 頂点 / ${(r.bytes / 1048576).toFixed(1)} MB）`, 3200);
       await ui.refreshProjects();
@@ -252,7 +263,7 @@ const app = {
     try {
       const rec = await store.loadProject(name);
       if (!rec) { ui.toast('見つかりません: ' + name, 3000); return; }
-      sculptor.loadGeometry(rec.positions, rec.indices, rec.colors, rec.mask);
+      restoreRecord(rec);
       if (tools) tools.onMeshReplaced();
       if (rec.settings) {
         store.loadSettings(Object.assign(state, {}));   // 既定を壊さないよう state に直接
@@ -356,7 +367,7 @@ function scheduleAutosave() {
     if (!autosaveDirty || busy) return;
     autosaveDirty = false;
     try {
-      await store.saveAutosave(mesh, state);
+      await store.saveAutosave(subtools, state);
       store.saveSettings(state);
       if (ui) ui.setAutosaveMark(new Date());
     } catch { /* 容量超過などは黙って諦める */ }
@@ -469,6 +480,169 @@ function resolveBrush(e) {
   }
   return { brush, dir };
 }
+
+// ---------------------------------------------------------------------------
+// サブツール（複数メッシュ）
+//
+// mesh はモジュールスコープの let で、アクティブなサブツールのメッシュを指す。
+// 切り替えると sculptor / tools / レンダラの参照先をまとめて張り替える。
+// 非アクティブなものはレンダラの静的スロットから描く（彫刻されないので
+// 毎フレーム転送する必要がない）。
+// ---------------------------------------------------------------------------
+
+/**
+ * 保存レコードからサブツールを復元する。
+ * サブツール版のデータが無ければ単一メッシュとして読む（旧形式の互換）。
+ */
+function restoreRecord(rec) {
+  if (renderer) {
+    for (const t of subtools.list) renderer.destroyStatic(t.id);
+    renderer.drawSlots = null;
+    renderer.gpuCapV = 0; renderer.gpuCapT = 0;
+  }
+  if (Array.isArray(rec.subtools) && rec.subtools.length > 0) {
+    const made = [];
+    for (const r of rec.subtools) {
+      const m = new SculptMesh();
+      m.setGeometry(r.positions, r.indices, r.colors, r.mask);
+      m.computeAllNormals();
+      m.computeAllCurvature();
+      made.push({ mesh: m, name: r.name, visible: r.visible !== false });
+    }
+    subtools.adopt(made[0].mesh, made[0].name);
+    subtools.list[0].visible = made[0].visible;
+    for (let i = 1; i < made.length; i++) {
+      const t = subtools.add(made[i].mesh, made[i].name);
+      t.visible = made[i].visible;
+    }
+    subtools.select(Math.min(rec.activeSubtool || 0, subtools.count - 1));
+    mesh = subtools.activeMesh;
+    sculptor.setMesh(mesh);
+    return;
+  }
+  // 旧形式（単一メッシュ）
+  sculptor.loadGeometry(rec.positions, rec.indices, rec.colors, rec.mask);
+  subtools.adopt(mesh, 'サブツール 1');
+}
+
+/** アクティブなサブツールを切り替える */
+function setActiveSubtool(index, opts = {}) {
+  if (!subtools.select(index)) return false;
+  mesh = subtools.activeMesh;
+  if (sculptor) sculptor.setMesh(mesh);
+  if (tools) tools.onMeshReplaced();
+  // 新しくアクティブになったものは毎フレーム転送する側へ回るので、
+  // 静的スロットは捨てる（残すと GPU メモリを二重に持つ）
+  if (renderer) {
+    renderer.destroyStatic(subtools.activeTool.id);
+    renderer.gpuCapV = 0; renderer.gpuCapT = 0;   // メッシュが変わったので全転送させる
+  }
+  applyTransposeMode(false);
+  if (!opts.keepView) frameCameraKeepView();
+  if (ui) { ui.refreshSubtools(); ui.refreshLevels(); }
+  return true;
+}
+
+/** 非アクティブで表示中のサブツールをレンダラへ渡す */
+function syncSubtoolSlots() {
+  if (!renderer) return;
+  const inactive = subtools.inactiveVisible();
+  const slots = [];
+  const keep = new Set();
+  for (const t of inactive) {
+    keep.add(t.id);
+    slots.push(renderer.ensureStatic(t.id, t.mesh));
+  }
+  // 片付けは代入より先に。pruneStatic は破棄済みスロットを掴まないよう
+  // drawSlots を落とすので、逆順にすると今作ったリストが消える。
+  renderer.pruneStatic(keep);
+  renderer.drawSlots = slots;
+}
+
+const subtoolApp = {
+  subtoolAdd(kind) {
+    if (busy) return;
+    subtools.addPrimitive(kind || 'sphere');
+    setActiveSubtool(subtools.active);
+    scheduleAutosave();
+    ui.toast(`サブツールを追加しました（${subtools.count} 個）`);
+  },
+  subtoolDuplicate() {
+    if (busy) return;
+    if (!subtools.duplicate()) { ui.toast('複製できませんでした'); return; }
+    setActiveSubtool(subtools.active);
+    scheduleAutosave();
+    ui.toast(`複製しました（${subtools.count} 個）`);
+  },
+  subtoolRemove(index) {
+    if (busy) return;
+    const i = index === undefined ? subtools.active : index;
+    const name = subtools.list[i] ? subtools.list[i].name : '';
+    if (!subtools.remove(i)) { ui.toast('最後の 1 個は削除できません'); return; }
+    if (renderer) renderer.pruneStatic(new Set(subtools.list.map(t => t.id)));
+    setActiveSubtool(subtools.active);
+    scheduleAutosave();
+    ui.toast(`「${name}」を削除しました`);
+  },
+  subtoolSelect(index) {
+    if (busy) return;
+    setActiveSubtool(index, { keepView: true });
+  },
+  subtoolRename(index, name) {
+    subtools.rename(index, name);
+    ui.refreshSubtools();
+    scheduleAutosave();
+  },
+  subtoolSetVisible(index, on) {
+    subtools.setVisible(index, on);
+    syncSubtoolSlots();
+    ui.refreshSubtools();
+  },
+  subtoolSetSolo(on) {
+    subtools.solo = !!on;
+    syncSubtoolSlots();
+    ui.refreshSubtools();
+  },
+  subtoolMove(index, dir) {
+    if (subtools.move(index, dir)) { ui.refreshSubtools(); scheduleAutosave(); }
+  },
+  subtoolMerge() {
+    if (busy) return;
+    const r = subtools.mergeVisible();
+    if (!r) { ui.toast('まとめるには表示中のサブツールが 2 個以上必要です', 3500); return; }
+    if (renderer) renderer.pruneStatic(new Set(subtools.list.map(t => t.id)));
+    setActiveSubtool(subtools.active);
+    scheduleAutosave();
+    ui.toast(`${r.count} 個をまとめました（${r.verts.toLocaleString()} 頂点 / ${r.tris.toLocaleString()} 面）`, 3500);
+  },
+  subtoolSplitParts() {
+    if (busy) return;
+    const r = subtools.splitToParts();
+    if (!r || r.made === 0) { ui.toast(r ? r.reason : '分けられませんでした', 3500); return; }
+    setActiveSubtool(subtools.active);
+    scheduleAutosave();
+    ui.toast(`${r.made} 個に分けました`);
+  },
+  subtoolSplitMasked() {
+    if (busy) return;
+    const r = subtools.splitMasked();
+    if (!r || r.made === 0) { ui.toast(r ? r.reason : '分けられませんでした', 3500); return; }
+    setActiveSubtool(subtools.active);
+    scheduleAutosave();
+    ui.toast('マスク部分を切り出しました');
+  },
+  subtoolInfo() { return subtools.info(); },
+  get subtoolSolo() { return subtools.solo; },
+  /** 全サブツールが収まるように視点を合わせる */
+  frameAll() {
+    const b = subtools.bounds();
+    if (!b) return;
+    camera.frame(b.center, b.radius);
+    updateFloor(b);
+    camera.update(canvas.clientWidth || 1, canvas.clientHeight || 1);
+    ui.toast('全体表示');
+  },
+};
 
 // ---------------------------------------------------------------------------
 // トランスポーズ（ギズモ）と平面カットのドラッグ
@@ -888,6 +1062,8 @@ function loop(t) {
   if (ptr.inside || ptr.down) renderer.requestPick(ptr.lazyX, ptr.lazyY);
   else renderer.pickRequest = null;
 
+  // 非アクティブなサブツールは静的バッファから描く（彫刻されないので転送は初回だけ）
+  if (subtools.count > 1 || renderer.drawSlots) syncSubtoolSlots();
   renderer.render(camera, mesh, state, rings);
   // 残りの MatCap を 1 フレーム 1 枚ずつ裏で用意する（起動を待たせない）
   renderer.fillNextMatcap();
@@ -944,6 +1120,7 @@ async function boot() {
 
   const g = PRIMITIVES.sphere();
   mesh.setGeometry(g.positions, g.indices);
+  subtools.adopt(mesh, 'サブツール 1');
   sculptor = new Sculptor(mesh, state);
   tools = new Tools({
     state,
@@ -954,6 +1131,7 @@ async function boot() {
     redraw: () => { /* 毎フレーム描いているので即時の再描画要求は不要 */ },
     autosave: scheduleAutosave,
   });
+  Object.assign(app, subtoolApp);
   app.tools = tools;
   tools.syncRecorder();   // モーフブラシのフックもここで差される
   ui = buildUI(app);
@@ -1007,7 +1185,9 @@ window.__parState = () => parallelState() + ':' + parallelWorkers();
 // ダイナメッシュを差し替え前の生の形で呼べるようにしておく（並列と逐次の突き合わせ用）
 window.__rawDynamesh = dynamesh;
 window.WebSculpt = {
-  state, mesh, camera, app, BRUSHES,
+  state, camera, app, BRUSHES,
+  get mesh() { return mesh; },
+  get subtools() { return subtools; },
   pointer: ptr,
   get renderer() { return renderer; },
   get sculptor() { return sculptor; },
