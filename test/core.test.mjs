@@ -1072,6 +1072,222 @@ head('シンメトリ');
   }
 }
 
+// ---------------------------------------------------------------------------
+// シンメトリ平面付近での二重適用
+//
+// 平面の近くを彫ると、その頂点は複数のミラーの領域に入る。素直に順番へ適用すると
+// 減衰が 2 回掛かって中心線付近だけ倍の深さになっていた
+// （実測: 平面上に 1 ダブで変位 5.46e-2 → 1.08e-1 とちょうど 2 倍）。
+// 「その頂点にいちばん近いダブ中心を持つミラーだけが書き込む」ことで直したので、
+// シンメトリの有無で結果が変わらないことを検算する。
+head('シンメトリ平面上の二重適用');
+{
+  const oneDab = (sym) => {
+    const g = PRIMITIVES.sphere();
+    const m = new SculptMesh();
+    m.setGeometry(g.positions, g.indices);
+    const s = new Sculptor(m, makeState({
+      brush: 'draw', dynTopo: false, decimate: false, worldRadius: 0.4, strength: 0.8,
+      symmetry: sym, radial: { on: false, count: 6, axis: 1 }, localSymmetry: false,
+    }));
+    const before = m.positions.slice(0, m.nv * 3);
+    // x = 0 の平面上（z 極）に 1 ダブだけ置く
+    const pt = new Float32Array([0, 0, 1]);
+    s.beginStroke('draw', pt, 1);
+    s.endStroke();
+    return { m, before };
+  };
+
+  const off = oneDab({ x: false, y: false, z: false });
+  const on = oneDab({ x: true, y: false, z: false });
+
+  // 同じ頂点番号どうしを比べる（トポロジは変えていないので対応が取れる）
+  let maxRatio = 0, minRatio = Infinity, compared = 0, exact = 0;
+  for (let v = 0; v < off.m.nv; v++) {
+    if (!off.m.vAlive[v]) continue;
+    const i = v * 3;
+    const dOff = Math.hypot(off.m.positions[i] - off.before[i],
+      off.m.positions[i + 1] - off.before[i + 1], off.m.positions[i + 2] - off.before[i + 2]);
+    if (dOff < 1e-5) continue;
+    const dOn = Math.hypot(on.m.positions[i] - on.before[i],
+      on.m.positions[i + 1] - on.before[i + 1], on.m.positions[i + 2] - on.before[i + 2]);
+    compared++;
+    if (Math.abs(dOn - dOff) < 1e-9) exact++;
+    const r = dOn / dOff;
+    if (r > maxRatio) maxRatio = r;
+    if (r < minRatio) minRatio = r;
+  }
+  ok(compared > 100, `比較対象の頂点が十分ある (${compared})`);
+  // 厳密一致にはならない（±1% 程度ずれる）。平面上にダブを置くと、対称化によって
+  // 「平面に垂直な向きの変位」が正しく落ちるのに対し、シンメトリなしの参照側は
+  // 平均法線がわずかに傾いたままなので、その差ぶんだけ大きさが違う。
+  // 見るべきは「2 倍になっていないこと」。
+  ok(maxRatio < 1.02 && minRatio > 0.98,
+    `平面上のダブがシンメトリの有無でほぼ変わらない (比 ${minRatio.toFixed(4)}〜${maxRatio.toFixed(4)}, ${exact}/${compared} は完全一致)`);
+  ok(maxRatio < 1.5, `二重適用が起きていない (最大比 ${maxRatio.toFixed(4)}, 二重なら 2.0 になる)`);
+
+  // 平面上の頂点は平面上に留まる
+  let offPlane = 0, worstX = 0;
+  for (let v = 0; v < on.m.nv; v++) {
+    if (!on.m.vAlive[v]) continue;
+    const i = v * 3;
+    if (Math.abs(on.before[i]) > 1e-6) continue;
+    const x = Math.abs(on.m.positions[i]);
+    if (x > 1e-9) { offPlane++; if (x > worstX) worstX = x; }
+  }
+  ok(offPlane === 0, `平面上の頂点が平面から外れない (${offPlane} 個 / 最大 |x| ${worstX.toExponential(1)})`);
+}
+
+// 平面を横切るストロークでも誤差が溜まらないこと。
+// 完全に 0 にはならない（ミラー 1 の平均法線が、ミラー 0 が動かした頂点も含めて
+// 計算されるため）が、繰り返しても増えないことを確認する。
+head('シンメトリ誤差の蓄積');
+{
+  const g = PRIMITIVES.sphere();
+  const m = new SculptMesh();
+  m.setGeometry(g.positions, g.indices);
+  const s = new Sculptor(m, makeState({
+    dynTopo: false, decimate: false, worldRadius: 0.3, strength: 0.9,
+    symmetry: { x: true, y: false, z: false },
+    radial: { on: false, count: 6, axis: 1 }, localSymmetry: false,
+  }));
+  // 全頂点を見る（サンプリングだと非対称な頂点を取りこぼして 0 に見えてしまう）
+  const err = () => {
+    const P = m.positions;
+    let worst = 0;
+    for (let v = 0; v < m.nv; v++) {
+      if (!m.vAlive[v]) continue;
+      const i = v * 3;
+      const mx = -P[i], my = P[i + 1], mz = P[i + 2];
+      let best = Infinity;
+      for (let u = 0; u < m.nv; u++) {
+        if (!m.vAlive[u]) continue;
+        const j = u * 3;
+        const d = (P[j] - mx) ** 2 + (P[j + 1] - my) ** 2 + (P[j + 2] - mz) ** 2;
+        if (d < best) best = d;
+      }
+      if (best > worst) worst = best;
+    }
+    return Math.sqrt(worst);
+  };
+  const pt = new Float32Array(3);
+  const run = () => {
+    pt.set([Math.cos(1.4), 0.3, Math.sin(1.4)]);
+    s.beginStroke('clay', pt, 1);
+    for (let k = 1; k <= 10; k++) {
+      pt.set([Math.cos(1.4 + k * 0.06), 0.3 + Math.sin(k * 0.2) * 0.1, Math.sin(1.4 + k * 0.06)]);
+      s.addSample(pt);
+    }
+    s.endStroke();
+  };
+  run();
+  const e1 = err();
+  for (let i = 0; i < 5; i++) run();
+  const e6 = err();
+  const el = m.averageEdgeLength();
+  console.log(`       1 回目 ${e1.toExponential(2)} → 6 回目 ${e6.toExponential(2)}`
+    + ` (辺長 ${el.toFixed(4)} の ${(e6 / el * 100).toFixed(1)}%)`);
+  // 担当分け（重なりは 1 回だけ適用）とフレーム共有（2 枚目以降は 1 枚目の
+  // 平均法線・重心の鏡像を使う）を入れたので、動的トポロジを切っていれば
+  // 頂点単位で厳密に 0 になる。以前は 1 回で 1.5e-3、6 回で 7.1e-3 まで溜まっていた。
+  ok(e1 === 0, `1 ストロークで厳密に左右対称 (ずれ ${e1.toExponential(2)})`);
+  ok(e6 === 0, `6 ストローク重ねても厳密に左右対称 (ずれ ${e6.toExponential(2)})`);
+}
+
+// ---------------------------------------------------------------------------
+// シンメトリが厳密かどうか（平面 / ラジアル / 合成）
+//
+// 指標に注意が要る。「変換して最近傍頂点までの距離」は、メッシュの頂点配置
+// 自体がその対称性を持っていないと 0 にならない。実測した下限:
+//   icosphere: X/Y/Z 反転 0、180 度回転 1.6e-16、60/90/120 度回転 4.3〜4.6e-2
+//   quadball : 90 度回転 7.9e-17
+// なので、下限が 1e-16 の組み合わせだけで厳密性を判定する。
+// 60 度回転などを使うと「対称になっていない」と誤判定する（実際にやった）。
+head('シンメトリの厳密性');
+{
+  const stroke = (s) => {
+    const pt = new Float32Array(3);
+    pt.set([Math.cos(1.4), 0.3, Math.sin(1.4)]);
+    s.beginStroke('clay', pt, 1);
+    for (let k = 1; k <= 10; k++) {
+      pt.set([Math.cos(1.4 + k * 0.06), 0.3 + Math.sin(k * 0.2) * 0.1, Math.sin(1.4 + k * 0.06)]);
+      s.addSample(pt);
+    }
+    s.endStroke();
+  };
+  const build = (prim, over) => {
+    const g = PRIMITIVES[prim]();
+    const m = new SculptMesh();
+    m.setGeometry(g.positions, g.indices);
+    const s = new Sculptor(m, makeState(Object.assign({
+      dynTopo: false, decimate: false, worldRadius: 0.3, strength: 0.9,
+      symmetry: { x: false, y: false, z: false },
+      radial: { on: false, count: 6, axis: 1 }, localSymmetry: false,
+    }, over)));
+    return { m, s };
+  };
+  /** 線形変換 f を掛けて最近傍頂点までの距離の最大値 */
+  const err = (m, f) => {
+    const P = m.positions;
+    const q = [0, 0, 0];
+    let worst = 0;
+    for (let v = 0; v < m.nv; v++) {
+      if (!m.vAlive[v]) continue;
+      const i = v * 3;
+      f(P[i], P[i + 1], P[i + 2], q);
+      let best = Infinity;
+      for (let u = 0; u < m.nv; u++) {
+        if (!m.vAlive[u]) continue;
+        const j = u * 3;
+        const d = (P[j] - q[0]) ** 2 + (P[j + 1] - q[1]) ** 2 + (P[j + 2] - q[2]) ** 2;
+        if (d < best) best = d;
+      }
+      if (best > worst) worst = best;
+    }
+    return Math.sqrt(worst);
+  };
+  const flipX = (x, y, z, o) => { o[0] = -x; o[1] = y; o[2] = z; };
+  const flipY = (x, y, z, o) => { o[0] = x; o[1] = -y; o[2] = z; };
+  const flipZ = (x, y, z, o) => { o[0] = x; o[1] = y; o[2] = -z; };
+  const rot180Y = (x, y, z, o) => { o[0] = -x; o[1] = y; o[2] = -z; };
+  const rot90Y = (x, y, z, o) => { o[0] = z; o[1] = y; o[2] = -x; };
+
+  const cases = [
+    ['X 平面', 'sphere', { symmetry: { x: true, y: false, z: false } }, [['X 反転', flipX]], 2],
+    ['Y 平面', 'sphere', { symmetry: { x: false, y: true, z: false } }, [['Y 反転', flipY]], 2],
+    ['X+Y 平面', 'sphere', { symmetry: { x: true, y: true, z: false } },
+      [['X 反転', flipX], ['Y 反転', flipY]], 4],
+    ['X+Y+Z 平面', 'sphere', { symmetry: { x: true, y: true, z: true } },
+      [['X 反転', flipX], ['Y 反転', flipY], ['Z 反転', flipZ]], 8],
+    ['ラジアル 2 (Y)', 'sphere', { radial: { on: true, count: 2, axis: 1 } },
+      [['180 度回転', rot180Y]], 2],
+    ['ラジアル 4 (Y)', 'quadball', { radial: { on: true, count: 4, axis: 1 } },
+      [['90 度回転', rot90Y]], 4],
+    // 合成すると群に別の鏡映が現れる。X 反転 × 180 度回転 = Z 反転。
+    ['X + ラジアル 2', 'sphere',
+      { symmetry: { x: true, y: false, z: false }, radial: { on: true, count: 2, axis: 1 } },
+      [['X 反転', flipX], ['Z 反転', flipZ], ['180 度回転', rot180Y]], 4],
+  ];
+  for (const [label, prim, over, checks, wantMirrors] of cases) {
+    // 彫る前の下限を確かめる（下限が大きい指標では厳密性を判定できない）
+    const base = build(prim, over);
+    for (const [cn, f] of checks) {
+      const floor = err(base.m, f);
+      ok(floor < 1e-12, `${label}: ${cn} の下限が 0 (${floor.toExponential(1)})`);
+    }
+    const { m, s } = build(prim, over);
+    stroke(s);
+    // activeMirrors は beginStroke で組まれるので、彫ったあとに見る
+    ok(s.activeMirrors.length === wantMirrors,
+      `${label}: ミラーが ${wantMirrors} 枚 (${s.activeMirrors.length})`);
+    for (const [cn, f] of checks) {
+      const e = err(m, f);
+      ok(e < 1e-12, `${label}: 彫ったあとも ${cn} で厳密に一致 (${e.toExponential(1)})`);
+    }
+    validate(m, { label });
+  }
+}
+
 head('dyntopo → Divide');
 {
   const g = PRIMITIVES.sphere();

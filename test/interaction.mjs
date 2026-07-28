@@ -263,15 +263,31 @@ async function main() {
       }
       let bad = 0, bnd = 0;
       for (const n of em.values()) { if (n === 1) bnd++; else if (n !== 2) bad++; }
-      return JSON.stringify({ bad, bnd, chi: m.liveVerts - em.size + m.liveTris });
+      // 連結成分の数（ダイナメッシュは細い部分をちぎって別の塊にすることがある）
+      const par = new Int32Array(m.nv);
+      for (let i = 0; i < m.nv; i++) par[i] = i;
+      const find = (x) => { while (par[x] !== x) { par[x] = par[par[x]]; x = par[x]; } return x; };
+      for (let t = 0; t < m.nt; t++) {
+        const i = t*3, a0 = T[i], b0 = T[i+1], c0 = T[i+2];
+        if (a0 === b0 && b0 === c0) continue;
+        let rx = find(a0), ry = find(b0);
+        if (rx !== ry) par[rx] = ry;
+        rx = find(b0); ry = find(c0);
+        if (rx !== ry) par[rx] = ry;
+      }
+      const roots = new Set();
+      for (let v = 0; v < m.nv; v++) if (m.vAlive[v]) roots.add(find(v));
+      return JSON.stringify({ bad, bnd, chi: m.liveVerts - em.size + m.liveTris, parts: roots.size });
     })()`);
     const mf = JSON.parse(manifold);
     ok(mf.bad === 0 && mf.bnd === 0, `ダイナメッシュ出力が閉多様体 (${manifold})`);
-    // 彫った形しだいで自己交差が融合してハンドルができることがあるため、
-    // 球面（χ=2）だと決め打ちしない。閉じた向き付け可能曲面である条件
-    // 「χ が偶数かつ 2 以下」だけを要求する。
-    ok(mf.chi <= 2 && mf.chi % 2 === 0,
-      `ダイナメッシュ出力が閉じた向き付け可能曲面 (χ = ${mf.chi}, 種数 ${(2 - mf.chi) / 2})`);
+    // 彫った形しだいで自己交差が融合してハンドルができたり、細い部分がちぎれて
+    // 別の塊になったりするので、χ=2 だと決め打ちしない。
+    // 閉じた向き付け可能曲面が n 個なら χ = 2n − 2×(総種数) で、必ず偶数かつ 2n 以下。
+    ok(mf.parts >= 1, `連結成分が 1 個以上 (${mf.parts})`);
+    ok(mf.chi % 2 === 0 && mf.chi <= 2 * mf.parts,
+      `ダイナメッシュ出力が閉じた向き付け可能曲面 (χ = ${mf.chi}, 成分 ${mf.parts} 個,`
+      + ` 総種数 ${(2 * mf.parts - mf.chi) / 2})`);
     await shot('16-dynamesh.png');
 
     // ダイナメッシュ後も彫刻できる

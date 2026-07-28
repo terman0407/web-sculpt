@@ -122,6 +122,9 @@ export class BrushEngine {
    *   tangent    : Float32Array(3) ダブ接平面の U 軸
    *   bitangent  : Float32Array(3) ダブ接平面の V 軸
    *   alphaRotation : number アルファの回転（ラジアン）
+   *   own        : Uint8Array|null 領域頂点ごとの「このミラーが書き込む担当か」。
+   *                シンメトリでミラー領域が重なったときに二重適用を防ぐ。
+   *                平均法線と重心は担当外の頂点も含めて計算し、書き込みだけ絞る。
    */
   apply(mesh, c) {
     const n = c.count;
@@ -168,11 +171,25 @@ export class BrushEngine {
       }
     }
     if (wsum < 1e-8) return;
-    {
+    if (c.frameN && c.frameC) {
+      // ブラシの向きと重心を外から与える（シンメトリ用）。
+      // 2 枚目以降のミラーは、1 枚目が求めたフレームを鏡像にしたものを使う。
+      // 自分で計算すると、1 枚目が既に動かした頂点を含んでしまい左右で値が変わる。
+      this.avgN[0] = c.frameN[0]; this.avgN[1] = c.frameN[1]; this.avgN[2] = c.frameN[2];
+      this.centroid[0] = c.frameC[0]; this.centroid[1] = c.frameC[1]; this.centroid[2] = c.frameC[2];
+    } else {
       const l = Math.hypot(anx, any, anz);
       if (l < 1e-12) return;
       this.avgN[0] = anx / l; this.avgN[1] = any / l; this.avgN[2] = anz / l;
       this.centroid[0] = ccx / wsum; this.centroid[1] = ccy / wsum; this.centroid[2] = ccz / wsum;
+    }
+
+    // 担当の持ち分を重みへ掛ける（0 なら書き込まない、1/2 なら半分だけ）。
+    // ここより前（平均法線と重心）では担当外も数に入れておくのが要点で、
+    // 半分だけで平均を取ると法線が平面側に傾き、継ぎ目で折れてしまう。
+    if (c.own) {
+      const own = c.own;
+      for (let k = 0; k < n; k++) w[k] *= own[k];
     }
 
     const nx = this.avgN[0], ny = this.avgN[1], nz = this.avgN[2];

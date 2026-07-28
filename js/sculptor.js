@@ -266,6 +266,24 @@ export class Sculptor {
     this.strokeSeed = 0;
     this._spray = V3.create();
     this._sizeMul = 1;
+    this._mirCenters = null;   // 全ミラーのダブ中心（担当分け用）
+    this._mirCount = 1;
+    this._mirIndex = 0;
+    this._ownBuf = null;
+    this._snapPos = null;      // ダブ開始時の座標（持ち分の判定用）
+    this._snapStamp = null;
+    this._snapId = 0;
+    this._snapTouched = null;
+    this._snapTouchedCount = 0;
+    this._mirMat = null;       // ミラーの 3x3 行列 + 中心（不動点判定用）
+    this._mirMatCount = 0;
+    this._symEps = 1e-9;
+    this._frameN0 = V3.create();   // ミラー 0 のブラシ向き
+    this._frameC0 = V3.create();   // ミラー 0 の重心
+    this._frameN = V3.create();
+    this._frameC = V3.create();
+    this._frameOK = false;
+    this._useFrame = false;
     this._strokeId = DEFAULT_STROKE;
     this._strokeParams = strokeDefaults(DEFAULT_STROKE);
 
@@ -584,6 +602,7 @@ export class Sculptor {
       (this.state.strokeParams && this.state.strokeParams[this._strokeId]) || {});
     this.engine.beginStroke();
     this.activeMirrors = this.buildActiveMirrors();
+    this._buildMirrorMatrices();
     // ラジアルシンメトリでミラー数が増えるので、足りなければ足す
     while (this.mirrors.length < this.activeMirrors.length) this.mirrors.push(new MirrorState());
 
@@ -722,15 +741,250 @@ export class Sculptor {
         this._sizeMul = 1 - hash01(seq * 4 + 3, this.strokeSeed) * sp.sizeJitter * 0.65;
       }
     }
-    for (let i = 0; i < mirrors.length; i++) {
-      const ms = this.mirrors[i];
+    // 担当分けのために、全ミラーのダブ中心を先に集めておく
+    const nm = mirrors.length;
+    if (!this._mirCenters || this._mirCenters.length < nm * 3) this._mirCenters = new Float32Array(nm * 3);
+    const MC = this._mirCenters;
+    this._mirCount = nm;
+    for (let i = 0; i < nm; i++) {
       mirrorPoint(mirrors[i], sPoint, this._mp);
+      MC[i * 3] = this._mp[0]; MC[i * 3 + 1] = this._mp[1]; MC[i * 3 + 2] = this._mp[2];
+    }
+    // ブラシの向き（平均法線）と重心は 1 枚目のミラーが求めたものを鏡像にして使う。
+    // 2 枚目以降が自分で計算すると、1 枚目が既に動かした頂点まで平均に入って
+    // 左右で値が変わり、頂点単位のずれがストロークごとに溜まっていた
+    // （実測: 6 ストロークで 1.5e-3 → 7.1e-3）。
+    this._frameOK = false;
+    if (nm > 1) { this._snapId = (this._snapId || 0) + 1; this._snapTouchedCount = 0; }
+    for (let i = 0; i < nm; i++) {
+      const ms = this.mirrors[i];
+      V3.set(this._mp, MC[i * 3], MC[i * 3 + 1], MC[i * 3 + 2]);
       mirrorVector(mirrors[i], delta, this._pt);
+      this._mirIndex = i;
+      if (nm > 1 && i > 0 && this._frameOK) {
+        mirrorVector(mirrors[i], this._frameN0, this._frameN);
+        mirrorPoint(mirrors[i], this._frameC0, this._frameC);
+        this._useFrame = true;
+      } else {
+        this._useFrame = false;
+      }
       this._dab(ms, this._mp, this._pt, first, sScale);
+      // 1 枚目が実際にブラシを掛けたときのフレームを控える
+      if (nm > 1 && i === 0) {
+        const an = this.engine.avgN;
+        if (an[0] || an[1] || an[2]) {
+          V3.copy(this._frameN0, an);
+          V3.copy(this._frameC0, this.engine.centroid);
+          this._frameOK = true;
+        }
+      }
       V3.copy(ms.lastPoint, this._mp);
     }
+    // 全ミラーを掛けたあとに、平面／軸の上の頂点を制約へ戻す
+    this._enforceSymmetry();
     this.dabCount++;
     this._dabSeq++;
+  }
+
+  /**
+   * ミラー領域が重なる部分の担当を決める。
+   *
+   * シンメトリ平面の近くを彫ると、その頂点は複数のミラーの領域に入る。
+   * 素直に順番へ適用すると
+   *   * 減衰が 2 回掛かって中心線付近だけ倍の深さになる
+   *     （実測: 平面上に 1 ダブで変位 5.46e-2 → 1.08e-1 とちょうど 2 倍）
+   *   * 1 つめのミラーが動かした結果を 2 つめが読むので、左右で結果が違う
+   * という 2 つの問題が出る。
+   *
+   * そこで「その頂点にいちばん近いダブ中心を持つミラーが書き込む」ことにする。
+   * 鏡像なら半空間の分割、ラジアルなら軸まわりの扇形の分割になり、
+   * ミラー群の作用で担当セルが入れ替わるだけなので**構成として対称**になる。
+   * 担当が重ならないので適用順にも依存しない。
+   *
+   * ただし「どれか 1 枚だけ」にすると、シンメトリ平面の**上**にある頂点が
+   * 平面から押し出されてしまう。平面上の頂点は自分自身が鏡像なので、
+   * 以前は 2 枚のミラーの X 成分が打ち消し合って平面上に留まっていたのが、
+   * 1 枚だけにしたことで打ち消されなくなる（実測: 8 頂点が 3.6e-2 ずれた）。
+   * そこで同距離のミラーには 1/枚数 ずつ持ち分を配る。こうすると
+   *   * 合計の大きさは 1 ダブぶん（二重にならない）
+   *   * 平面に垂直な成分は打ち消し合う（平面上に留まる）
+   * の両方が成り立つ。ZBrush で継ぎ目が割れないのと同じ挙動になる。
+   *
+   * 平均法線と重心は担当外の頂点も入れて計算する（brushes 側で重みへ掛けるのは
+   * その計算のあと）。半分だけで平均すると法線が平面側へ傾き、継ぎ目が折れる。
+   *
+   * @returns {Float32Array|null} 領域頂点ごとの持ち分 0..1。ミラーが 1 枚なら null
+   */
+  /**
+   * ダブ開始時の座標を控える（持ち分の判定に使う）。
+   * ミラーごとに、その領域のうちまだ控えていない頂点だけを記録する。
+   * 全頂点ぶんの配列は capV × 3 で 260 万頂点なら 31MB になるので、
+   * シンメトリが 2 枚以上のときだけ確保する。
+   */
+  _snapshotRegion(verts, count) {
+    const m = this.mesh;
+    if (!this._snapPos || this._snapPos.length < m.capV * 3) {
+      this._snapPos = new Float32Array(m.capV * 3);
+      this._snapStamp = new Int32Array(m.capV);
+      this._snapId = 1;
+    }
+    if (!this._snapTouched || this._snapTouched.length < m.capV) {
+      this._snapTouched = new Int32Array(m.capV);
+    }
+    const SP = this._snapPos, SS = this._snapStamp, sid = this._snapId, P = m.positions;
+    const TL = this._snapTouched;
+    let tn = this._snapTouchedCount;
+    for (let k = 0; k < count; k++) {
+      const v = verts[k];
+      if (SS[v] === sid) continue;
+      SS[v] = sid;
+      const i = v * 3;
+      SP[i] = P[i]; SP[i + 1] = P[i + 1]; SP[i + 2] = P[i + 2];
+      if (tn < TL.length) TL[tn++] = v;
+    }
+    this._snapTouchedCount = tn;
+  }
+
+  /**
+   * ミラーの線形部分を 3x3 行列にして控える（ストローク開始時に 1 回）。
+   * 不動点判定はホットループなので、mirrorPoint の呼び出しではなく
+   * ここで作った行列でインライン展開する。
+   * 並びは 1 ミラーあたり 12 要素: m00..m22（行優先）, cx, cy, cz。
+   */
+  _buildMirrorMatrices() {
+    const mirrors = this.activeMirrors;
+    const nm = mirrors.length;
+    if (!this._mirMat || this._mirMat.length < nm * 12) this._mirMat = new Float64Array(nm * 12);
+    const M = this._mirMat;
+    for (let j = 0; j < nm; j++) {
+      const mir = mirrors[j];
+      const s = mir.s, ang = mir.ang, ax = mir.axis;
+      const cs = Math.cos(ang), sn = Math.sin(ang);
+      // R(ax, ang) の 3x3
+      let r00 = 1, r01 = 0, r02 = 0, r10 = 0, r11 = 1, r12 = 0, r20 = 0, r21 = 0, r22 = 1;
+      if (ang !== 0) {
+        if (ax === 0) { r11 = cs; r12 = -sn; r21 = sn; r22 = cs; }
+        else if (ax === 1) { r00 = cs; r02 = sn; r20 = -sn; r22 = cs; }
+        else { r00 = cs; r01 = -sn; r10 = sn; r11 = cs; }
+      }
+      // M = R * diag(s)
+      const o = j * 12;
+      M[o] = r00 * s[0]; M[o + 1] = r01 * s[1]; M[o + 2] = r02 * s[2];
+      M[o + 3] = r10 * s[0]; M[o + 4] = r11 * s[1]; M[o + 5] = r12 * s[2];
+      M[o + 6] = r20 * s[0]; M[o + 7] = r21 * s[1]; M[o + 8] = r22 * s[2];
+      M[o + 9] = mir.c[0]; M[o + 10] = mir.c[1]; M[o + 11] = mir.c[2];
+    }
+    this._mirMatCount = nm;
+    // 不動点判定のしきい値。回転行列の sin(π) が 1.2e-16 なので厳密比較では
+    // 180 度回転を含む群を取りこぼす。bounds() はここで 1 回だけ見る
+    // （毎ダブ呼ぶと 260 万頂点で全体の 3 割を食っていた）。
+    this._symEps = 1e-9 * Math.max(1, this.mesh.bounds().radius);
+  }
+
+  /**
+   * ミラー群の不動点にある頂点を、その制約の上に留める。
+   *
+   * シンメトリ平面の上にある頂点は自分自身が鏡像なので、対称性から
+   * 「平面に垂直な向きには動けない」。これは近似ではなく制約なので、
+   * 明示的に課すのが正しい。
+   *
+   * 課さないと何が起きるか（実測）: 持ち分を 0.5 ずつ配っても、ミラー 1 の
+   * 減衰重みはミラー 0 が動かした後の座標で計算されるため X が完全には
+   * 打ち消されない（+1.32e-3 と -1.10e-3 で残差 2.18e-4）。すると次のダブでは
+   * もう「同距離」と判定されず持ち分が 1.0 と 0.0 に割れて片側だけが動き、
+   * 1 ストロークで 7.8e-3、6 ストロークで 9.1e-2 まで暴走していた。
+   *
+   * どの面／軸が不動点になるかを state のフラグから決めてはいけない。
+   * 例えば「X ミラー + Y 軸まわり 4 分割」の群には Z 平面の鏡映も含まれる
+   * （180 度回転 × X 反転 = Z 反転）。実測でその 8 頂点だけが 6.4e-2 ずれていた。
+   * そこでミラー集合そのものを見て、
+   *   「スナップショット位置を自分自身へ写すミラー」＝ その頂点の安定化部分群
+   * を求め、その群にわたって現在位置を平均する。有限群の平均は不変部分空間への
+   * 射影になるので、面・軸・それらの交わりを区別せず一様に正しく扱える。
+   *
+   * 対象はダブ開始時のスナップショットに入っている頂点だけ（このダブで
+   * 触った可能性がある頂点）。全頂点を毎ダブ走査すると 260 万頂点で重すぎる。
+   */
+  _enforceSymmetry() {
+    const nm = this._mirCount;
+    if (nm <= 1) return;
+    const SS = this._snapStamp, SP = this._snapPos, sid = this._snapId;
+    if (!SS) return;
+    const M = this._mirMat;
+    if (!M || this._mirMatCount < nm) return;
+    const P = this.mesh.positions;
+    const verts = this._snapTouched;
+    const n = this._snapTouchedCount;
+    const eps = this._symEps;
+    const eps2 = eps * eps;
+
+    for (let k = 0; k < n; k++) {
+      const v = verts[k];
+      if (SS[v] !== sid) continue;
+      const i = v * 3;
+      const sx = SP[i], sy = SP[i + 1], sz = SP[i + 2];
+      const cx = P[i], cy = P[i + 1], cz = P[i + 2];
+      let cnt = 0;
+      let ax = cx, ay = cy, az = cz;
+      for (let j = 1; j < nm; j++) {
+        const o = j * 12;
+        const ox = M[o + 9], oy = M[o + 10], oz = M[o + 11];
+        // スナップショット位置の像
+        const dx = sx - ox, dy = sy - oy, dz = sz - oz;
+        const bx = M[o] * dx + M[o + 1] * dy + M[o + 2] * dz + ox;
+        const by = M[o + 3] * dx + M[o + 4] * dy + M[o + 5] * dz + oy;
+        const bz = M[o + 6] * dx + M[o + 7] * dy + M[o + 8] * dz + oz;
+        const ex = bx - sx, ey = by - sy, ez = bz - sz;
+        if (ex * ex + ey * ey + ez * ez > eps2) continue;   // この頂点を動かすミラー
+        // 不動にするミラー: 現在位置の像を足し込む
+        const gx = cx - ox, gy = cy - oy, gz = cz - oz;
+        ax += M[o] * gx + M[o + 1] * gy + M[o + 2] * gz + ox;
+        ay += M[o + 3] * gx + M[o + 4] * gy + M[o + 5] * gz + oy;
+        az += M[o + 6] * gx + M[o + 7] * gy + M[o + 8] * gz + oz;
+        cnt++;
+      }
+      if (cnt === 0) continue;
+      const inv = 1 / (cnt + 1);
+      P[i] = ax * inv; P[i + 1] = ay * inv; P[i + 2] = az * inv;
+    }
+  }
+  _ownership(verts, count, myIndex, radius) {
+    const centers = this._mirCenters;
+    const nm = this._mirCount;
+    if (nm <= 1 || !centers) return null;
+    let own = this._ownBuf;
+    if (!own || own.length < count) own = this._ownBuf = new Float32Array(Math.max(1024, count * 2));
+    const P = this.mesh.positions;
+    // 距離の比較は「このダブを始めた時点」の座標で行う。現在の座標で比べると、
+    // ミラー 0 が既に動かしたぶんだけ頂点が自分の側へ寄って見え、
+    // ミラー 1 が「相手のほうが近い」と判断して持ち分 0 になる。
+    // 実測ではそれで平面上の頂点の X が打ち消されず 7.8e-3 ずれていた。
+    const SP = this._snapPos, SS = this._snapStamp, sid = this._snapId;
+    const mx = centers[myIndex * 3], my = centers[myIndex * 3 + 1], mz = centers[myIndex * 3 + 2];
+    // 「同距離」の判定はブラシ半径に対する相対許容差で行う。厳密等号だと、
+    // 平面上の頂点の x が厳密な 0 ではない（1e-12 程度は乗っている）ために
+    // 同距離を取りこぼし、平面から押し出されてしまう。
+    // 距離差 |dA-dB| < eps*R を二乗距離の差に直すと |d-mine| < 2*eps*R^2。
+    const tol = 2e-5 * radius * radius;
+    for (let k = 0; k < count; k++) {
+      const v = verts[k], i = v * 3;
+      const snap = SS && SS[v] === sid;
+      const px = snap ? SP[i] : P[i];
+      const py = snap ? SP[i + 1] : P[i + 1];
+      const pz = snap ? SP[i + 2] : P[i + 2];
+      const mine = (px - mx) ** 2 + (py - my) ** 2 + (pz - mz) ** 2;
+      // 自分より明確に近いミラーが 1 枚でもあれば担当外。
+      // 同距離のミラーには 1/枚数 ずつ配る。
+      let closer = 0, tied = 1;
+      for (let j = 0; j < nm; j++) {
+        if (j === myIndex) continue;
+        const d = (px - centers[j * 3]) ** 2 + (py - centers[j * 3 + 1]) ** 2 + (pz - centers[j * 3 + 2]) ** 2;
+        if (d < mine - tol) { closer++; break; }
+        if (d <= mine + tol) tied++;
+      }
+      own[k] = closer > 0 ? 0 : 1 / tied;
+    }
+    return own;
   }
 
   /**
@@ -846,6 +1100,7 @@ export class Sculptor {
       }
       if (ms.lockedCount === 0) return;
       const rec = this.recorder;
+      if (this._mirCount > 1) this._snapshotRegion(ms.lockedVerts, ms.lockedCount);
       if (rec) rec.before(m, ms.lockedVerts, ms.lockedCount);
       this.engine.apply(m, {
         type: 'move',
@@ -855,6 +1110,8 @@ export class Sculptor {
         delta, color: st.paintColor, ignoreMask: false,
         focal: st.focalShift, toCamera: st.toCamera, backface: st.backfaceMask,
         alpha: alphaId, tangent: this._tanU, bitangent: this._tanV, alphaRotation: this._alphaRot,
+        own: this._ownership(ms.lockedVerts, ms.lockedCount, this._mirIndex, radius),
+        frameN: this._useFrame ? this._frameN : null, frameC: this._useFrame ? this._frameC : null,
       });
       if (rec) rec.after(m, ms.lockedVerts, ms.lockedCount);
       this._updateNormals(ms.lockedVerts, ms.lockedCount);
@@ -897,6 +1154,7 @@ export class Sculptor {
     if (ms.count === 0) return;
 
     const rec = this.recorder;
+    if (this._mirCount > 1) this._snapshotRegion(ms.verts, ms.count);
     if (rec) rec.before(m, ms.verts, ms.count);
     // モーフブラシは「記憶した形へ戻す」だけで、通常のブラシとは処理が違う。
     // morph.js を sculptor から直接 import すると依存が逆流するので、
@@ -917,6 +1175,8 @@ export class Sculptor {
       ignoreMask: brush === 'mask',
       focal: st.focalShift, toCamera: st.toCamera, backface: st.backfaceMask,
       alpha: alphaId, tangent: this._tanU, bitangent: this._tanV, alphaRotation: this._alphaRot,
+      own: this._ownership(ms.verts, ms.count, this._mirIndex, radius),
+      frameN: this._useFrame ? this._frameN : null, frameC: this._useFrame ? this._frameC : null,
     });
 
     if (rec) rec.after(m, ms.verts, ms.count);
