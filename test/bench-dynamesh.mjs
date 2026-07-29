@@ -7,7 +7,7 @@
 import { SculptMesh, PRIMITIVES, icosphere, torus } from '../js/mesh.js';
 import { SubdivLevels } from '../js/subdiv.js';
 import { dynamesh } from '../js/dynamesh.js';
-import { initWasmFieldFromBytes, wasmFieldReady } from '../js/wasmfield.js';
+import { initWasmFieldFromBytes, wasmFieldReady } from '../js/wasmkernels.js';
 import { readFileSync } from 'node:fs';
 
 const args = process.argv.slice(2);
@@ -45,7 +45,7 @@ if (!args.includes('--nowasm')) {
     // WEBSCULPT_WASM で別ビルド（Rust 版など）を指定して比較できる
     const wp = process.env.WEBSCULPT_WASM
       ? new URL(process.env.WEBSCULPT_WASM, `file://${process.cwd()}/`)
-      : new URL('../wasm/dynafield.wasm', import.meta.url);
+      : new URL('../wasm/kernels.wasm', import.meta.url);
     await initWasmFieldFromBytes(readFileSync(wp));
   } catch { /* 無ければ JS 版のまま */ }
 }

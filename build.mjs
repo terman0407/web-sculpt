@@ -125,12 +125,12 @@ let scriptWasm = script;
 // --- 単一ファイル版では wasm を base64 で埋め込む ---------------------------
 // fetch を使わずに済むので file:// からでも WASM 経路が有効になる。
 {
-  const wasmPath = join(ROOT, 'wasm', 'dynafield.wasm');
+  const wasmPath = join(ROOT, 'wasm', 'kernels.wasm');
   let b64 = '';
   try {
     b64 = readFileSync(wasmPath).toString('base64');
   } catch {
-    console.warn('  wasm/dynafield.wasm が無いので単一ファイル版は JS フォールバックになります');
+    console.warn('  wasm/kernels.wasm が無いので単一ファイル版は JS フォールバックになります');
   }
   if (b64) {
     const marker = "const WASM_B64 = '';";

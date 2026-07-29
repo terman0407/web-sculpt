@@ -2,7 +2,7 @@
 // WASM 版と JS 版の距離場カーネルを同一入力で比較する。
 //   node test/bench-wasm.mjs
 // 速度差と、出力がビット単位で一致するかを確認する。
-// wasm/dynafield.wasm が無い場合は npm run build:wasm で生成する。
+// wasm/kernels.wasm が無い場合は npm run build:wasm で生成する。
 // ---------------------------------------------------------------------------
 
 import { readFileSync } from 'node:fs';
@@ -100,11 +100,11 @@ function splatJS(G, field, closest){
 }
 
 // --- WASM をロード（AssemblyScript / Rust の両方を比べる）---
-// wasm/dynafield.wasm が本番で使うもの（現在は Rust 版）。
+// wasm/kernels.wasm が本番で使うもの（現在は Rust 版）。
 // rust/target 以下と assembly 版があればそれも並べて比べる。
 const CANDIDATES = [
-  { name: '本番 ', url: new URL('../wasm/dynafield.wasm', import.meta.url) },
-  { name: 'Rust', url: new URL('../rust/target/wasm32-unknown-unknown/release/dynafield.wasm', import.meta.url) },
+  { name: '本番 ', url: new URL('../wasm/kernels.wasm', import.meta.url) },
+  { name: 'Rust', url: new URL('../rust/target/wasm32-unknown-unknown/release/kernels.wasm', import.meta.url) },
 ];
 const mods = [];
 for (const c of CANDIDATES) {

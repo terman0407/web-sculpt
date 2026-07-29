@@ -20,7 +20,7 @@ import { Transpose } from './transpose.js';
 import { clipPlane, trimPlane, slicePlane, mirrorWeld, planeFromScreenLine, planeFromAxis } from './clip.js';
 import { STROKES, strokeDefaults } from './alpha.js';
 import { remesh, quadDominant, edgeLengthForTris } from './remesh.js';
-import { initRemeshWorker, remeshInWorker, remeshWorkerState, remeshWorkerError } from './remeshworker.js';
+import { initRemeshWorker, remeshInWorker, remeshWorkerState, remeshWorkerError, remeshWorkerWasm } from './remeshworker.js';
 import { clamp } from './math.js';
 
 /** 変形とマスク操作の既定パラメータ一式（state に置く） */
@@ -467,7 +467,9 @@ export class Tools {
   }
 
   /** リメッシュのワーカーが使える状態か（診断とテスト用） */
-  remeshWorkerInfo() { return { state: remeshWorkerState(), error: remeshWorkerError() }; }
+  remeshWorkerInfo() {
+    return { state: remeshWorkerState(), error: remeshWorkerError(), wasm: remeshWorkerWasm() };
+  }
 
   /** 現在の形を四角優勢にしたときの面の内訳（書き出しと表示用） */
   quadStats() {

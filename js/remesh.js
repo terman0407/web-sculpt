@@ -20,6 +20,7 @@
 
 import { splitEdge, collapseEdge, flipEdge } from './dyntopo.js';
 import { RING_STRIDE } from './mesh.js';
+import { wasmUploadSurface, wasmReleaseSurface, wasmProjectPoints } from './wasmkernels.js';
 
 /** 点と三角形の最短距離の 2 乗と最近点（Ericson, Real-Time Collision Detection） */
 function closestOnTri(px, py, pz, ax, ay, az, bx, by, bz, cx, cy, cz, out) {
@@ -392,6 +393,11 @@ export function remesh(mesh, opts = {}) {
   // 頂点ごとに「前回当たった三角形」を覚えておく。緩和の移動量は小さいので
   // ほとんどの頂点は同じ面に当たり続け、格子を引かずに済む。
   let projHint = doProject ? new Int32Array(mesh.capV).fill(-1) : null;
+  // 格子は反復のあいだ変わらないので WASM 側に置いたまま使い回す。
+  // 反復ごとに入れ直すと 520 万面で毎回 100MB 超のコピーになる。
+  const wasmSurf = ref ? wasmUploadSurface(ref) : null;
+  // 投影しない頂点の印（毎反復で作り直す作業配列）
+  let skip = null;
 
   // 曲率適応の重み。mesh.curv は -1..1 に正規化した平均曲率なので、
   // 絶対値が大きいほど（溝や稜線ほど）短いエッジを目標にする。
@@ -532,29 +538,56 @@ export function remesh(mesh, opts = {}) {
       // ヒントとして信用できる距離。緩和で動く量は目標辺長の一部なので、
       // これより遠い当たりは「別の頂点のヒントを引き継いだ」と判断する。
       const hintMaxD2 = (L * 0.5) * (L * 0.5);
+      // 投影しない頂点（死んでいる / 孤立 / 実質動いていない）に印を付ける。
+      // WASM に出すときも同じ判定を使うので、ここで 1 度だけ作る。
+      if (!skip || skip.length < mesh.nv) skip = new Uint8Array(mesh.capV);
       for (let v = 0; v < mesh.nv; v++) {
-        if (!mesh.vAlive[v] || cnt[v] === 0) continue;
         const i = v * 3;
+        if (!mesh.vAlive[v] || cnt[v] === 0) { skip[v] = 1; continue; }
         const dx = tgt[i] - P[i], dy = tgt[i + 1] - P[i + 1], dz = tgt[i + 2] - P[i + 2];
-        if (dx * dx + dy * dy + dz * dz < moveEps2) continue;   // 実質動いていない
-        if (ref) {
-          // まず前回当たった面だけを試す。緩和の移動量は小さいので大半はここで済む。
-          const hint = projHint[v];
-          const dh = ref.tryHint(tgt[i], tgt[i + 1], tgt[i + 2], hint, tmp, hintMaxD2);
-          if (dh >= 0) {
-            P[i] = tmp[0]; P[i + 1] = tmp[1]; P[i + 2] = tmp[2];
-            stats.projected++; stats.hinted++;
-            continue;
-          }
-          const ti = ref.closest(tgt[i], tgt[i + 1], tgt[i + 2], tmp);
-          if (ti >= 0) {
-            projHint[v] = ti;
-            P[i] = tmp[0]; P[i + 1] = tmp[1]; P[i + 2] = tmp[2];
-            stats.projected++;
-            continue;
+        skip[v] = dx * dx + dy * dy + dz * dz < moveEps2 ? 1 : 0;
+      }
+      // 表面がある場合はまとめて WASM へ。1 反復で 90 万クエリ走るので、
+      // 頂点ごとに JS へ戻ってくる形だと呼び出しだけで効かなくなる。
+      let didWasm = false;
+      if (ref && wasmSurf) {
+        const r = wasmProjectPoints(wasmSurf, tgt, projHint, skip, mesh.nv, hintMaxD2);
+        if (r) {
+          didWasm = true;
+          stats.projected += r.projected;
+          stats.hinted += r.hinted;
+          // 投影しなかった点も含めて tgt をそのまま採用する（skip の点は
+          // tgt = P のままなので上書きしても変わらない）
+          for (let v = 0; v < mesh.nv; v++) {
+            if (skip[v]) continue;
+            const i = v * 3;
+            P[i] = tgt[i]; P[i + 1] = tgt[i + 1]; P[i + 2] = tgt[i + 2];
           }
         }
-        P[i] = tgt[i]; P[i + 1] = tgt[i + 1]; P[i + 2] = tgt[i + 2];
+      }
+      if (!didWasm) {
+        for (let v = 0; v < mesh.nv; v++) {
+          if (skip[v]) continue;
+          const i = v * 3;
+          if (ref) {
+            // まず前回当たった面だけを試す。緩和の移動量は小さいので大半はここで済む。
+            const hint = projHint[v];
+            const dh = ref.tryHint(tgt[i], tgt[i + 1], tgt[i + 2], hint, tmp, hintMaxD2);
+            if (dh >= 0) {
+              P[i] = tmp[0]; P[i + 1] = tmp[1]; P[i + 2] = tmp[2];
+              stats.projected++; stats.hinted++;
+              continue;
+            }
+            const ti = ref.closest(tgt[i], tgt[i + 1], tgt[i + 2], tmp);
+            if (ti >= 0) {
+              projHint[v] = ti;
+              P[i] = tmp[0]; P[i + 1] = tmp[1]; P[i + 2] = tmp[2];
+              stats.projected++;
+              continue;
+            }
+          }
+          P[i] = tgt[i]; P[i + 1] = tgt[i + 1]; P[i + 2] = tgt[i + 2];
+        }
       }
       phase.project += now() - _tj;
     }
@@ -577,6 +610,7 @@ export function remesh(mesh, opts = {}) {
     }
   }
 
+  if (wasmSurf) wasmReleaseSurface(wasmSurf);
   donePasses = estPasses;
   tell('仕上げ');
   mesh.compact(true);
@@ -605,31 +639,41 @@ export function remesh(mesh, opts = {}) {
  * 見積もり、良い順に取っていく。質は
  *   * 2 枚の法線がそろっているか（平坦なペアほど良い）
  *   * できる四角の角が 90 度に近いか
- * の積。完全マッチングを解くほどの差は出ないので、ソート + 貪欲で十分。
+ * の積。完全マッチングを解くほどの差は出ないので、良い順の貪欲で十分。
+ *
+ * 全部を型付き配列でやる。以前は
+ *   * 辺 → 三角形を `Map<number, number|number[]>` で持ち、内部辺ごとに配列を確保
+ *   * 候補を `{t0,t1,quad:[...],score}` のオブジェクト配列にして比較関数でソート
+ * としていて、131 万面（65 万頂点）で 1.5 秒かかっていた。ボタン 1 回で 1.5 秒
+ * 固まるので、隣接は ring から引き（確保ゼロ）、順序は数え上げソートにした。
  *
  * @returns {{ faces: Int32Array, offsets: Int32Array, quads: number, tris: number }}
  *   faces は面ごとの頂点を並べたもの、offsets[i]..offsets[i+1] が i 番目の面。
  */
 export function quadDominant(mesh) {
   const T = mesh.tris, P = mesh.positions;
-  // 辺 → 隣接三角形（最大 2）
-  const edgeMap = new Map();
-  const alive = [];
+  const RC = mesh.ringCount, RD = mesh.ringData, RX = mesh.ringExt;
+
+  const alive = new Int32Array(mesh.liveTris);
+  let na = 0;
   for (let t = 0; t < mesh.nt; t++) {
-    const i = t * 3, a = T[i], b = T[i + 1], c = T[i + 2];
-    if (a === b && b === c) continue;
-    alive.push(t);
-    for (let e = 0; e < 3; e++) {
-      let x = e === 0 ? a : (e === 1 ? b : c);
-      let y = e === 0 ? b : (e === 1 ? c : a);
-      if (x > y) { const s = x; x = y; y = s; }
-      const key = x * 8388608 + y;
-      const cur = edgeMap.get(key);
-      if (cur === undefined) edgeMap.set(key, t);
-      else if (typeof cur === 'number') edgeMap.set(key, [cur, t]);
-    }
+    const i = t * 3;
+    if (T[i] === T[i + 1] && T[i + 1] === T[i + 2]) continue;
+    alive[na++] = t;
+  }
+  if (na === 0) {
+    return { faces: new Int32Array(0), offsets: new Int32Array(1), quads: 0, tris: 0, ratio: 0 };
   }
 
+  // 内部辺は閉多様体なら 3F/2 本。境界があればそれより少ないので上限として使える。
+  const maxPair = ((na * 3) >> 1) + 1;
+  const pT0 = new Int32Array(maxPair);
+  const pT1 = new Int32Array(maxPair);
+  const pQuad = new Int32Array(maxPair * 4);
+  const pScore = new Float32Array(maxPair);
+  let np = 0;
+
+  // 三角形 t の単位法線を out へ
   const nrm = (t, out) => {
     const i = t * 3, a = T[i] * 3, b = T[i + 1] * 3, c = T[i + 2] * 3;
     const abx = P[b] - P[a], aby = P[b + 1] - P[a + 1], abz = P[b + 2] - P[a + 2];
@@ -639,61 +683,103 @@ export function quadDominant(mesh) {
     out[0] /= l; out[1] /= l; out[2] /= l;
   };
   const n0 = new Float64Array(3), n1 = new Float64Array(3);
+  const quad = new Int32Array(4);
 
-  // 候補ペアを質つきで集める
-  const cand = [];
-  for (const [key, val] of edgeMap) {
-    if (typeof val === 'number') continue;
-    const [t0, t1] = val;
-    const x = Math.floor(key / 8388608), y = key % 8388608;
-    // 四角の順序 (x, o1, y, o0) を作る
-    const opp = (t) => {
-      const i = t * 3;
-      for (let e = 0; e < 3; e++) { const v = T[i + e]; if (v !== x && v !== y) return v; }
-      return -1;
-    };
-    const o0 = opp(t0), o1 = opp(t1);
-    if (o0 < 0 || o1 < 0 || o0 === o1) continue;
-    nrm(t0, n0); nrm(t1, n1);
-    const flat = Math.max(0, n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2]);
-    // 角の質: 四角 (x, o1, y, o0) の 4 角が 90 度に近いか
-    const q = [x, o1, y, o0];
-    let ang = 1;
-    for (let i = 0; i < 4; i++) {
-      const p = q[i] * 3, pv = q[(i + 3) % 4] * 3, nx2 = q[(i + 1) % 4] * 3;
-      const ux = P[pv] - P[p], uy = P[pv + 1] - P[p + 1], uz = P[pv + 2] - P[p + 2];
-      const vx = P[nx2] - P[p], vy = P[nx2 + 1] - P[p + 1], vz = P[nx2 + 2] - P[p + 2];
-      const lu = Math.hypot(ux, uy, uz) || 1, lv = Math.hypot(vx, vy, vz) || 1;
-      const cs = (ux * vx + uy * vy + uz * vz) / (lu * lv);
-      // cos が 0 に近いほど良い
-      ang *= 1 - Math.min(1, Math.abs(cs));
+  for (let k = 0; k < na; k++) {
+    const t0 = alive[k], i0 = t0 * 3;
+    const va = T[i0], vb = T[i0 + 1], vc = T[i0 + 2];
+    for (let e = 0; e < 3; e++) {
+      const x = e === 0 ? va : (e === 1 ? vb : vc);
+      const y = e === 0 ? vb : (e === 1 ? vc : va);
+      // 辺 (x,y) を共有するもう 1 枚を ring から引く。x の隣接三角形のうち
+      // y を含むもの。1 辺 1 回だけ見るために t1 > t0 に限る。
+      const c = RC[x];
+      if (c === 0) continue;
+      const base = c <= RING_STRIDE ? x * RING_STRIDE : -1;
+      const ex = base < 0 ? RX[x] : null;
+      let t1 = -1;
+      for (let j = 0; j < c; j++) {
+        const t = ex ? ex[j] : RD[base + j];
+        if (t <= t0) continue;
+        const i = t * 3;
+        if (T[i] === y || T[i + 1] === y || T[i + 2] === y) { t1 = t; break; }
+      }
+      if (t1 < 0) continue;
+
+      // 四角は (x, o1, y, o0) の順。o0 / o1 は各三角形の「辺に乗っていない頂点」
+      let o0 = -1, o1 = -1;
+      for (let j = 0; j < 3; j++) { const v = T[i0 + j]; if (v !== x && v !== y) { o0 = v; break; } }
+      const i1 = t1 * 3;
+      for (let j = 0; j < 3; j++) { const v = T[i1 + j]; if (v !== x && v !== y) { o1 = v; break; } }
+      if (o0 < 0 || o1 < 0 || o0 === o1) continue;
+
+      nrm(t0, n0); nrm(t1, n1);
+      const flat = Math.max(0, n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2]);
+      quad[0] = x; quad[1] = o1; quad[2] = y; quad[3] = o0;
+      let ang = 1;
+      for (let j = 0; j < 4; j++) {
+        const p = quad[j] * 3, pv = quad[(j + 3) & 3] * 3, nx2 = quad[(j + 1) & 3] * 3;
+        const ux = P[pv] - P[p], uy = P[pv + 1] - P[p + 1], uz = P[pv + 2] - P[p + 2];
+        const vx = P[nx2] - P[p], vy = P[nx2 + 1] - P[p + 1], vz = P[nx2 + 2] - P[p + 2];
+        const lu = Math.hypot(ux, uy, uz) || 1, lv = Math.hypot(vx, vy, vz) || 1;
+        const cs = (ux * vx + uy * vy + uz * vz) / (lu * lv);
+        ang *= 1 - Math.min(1, Math.abs(cs));   // cos が 0 に近いほど良い
+      }
+      if (np >= maxPair) break;                  // 非多様体で上限を超えたら打ち切る
+      pT0[np] = t0; pT1[np] = t1;
+      pQuad[np * 4] = quad[0]; pQuad[np * 4 + 1] = quad[1];
+      pQuad[np * 4 + 2] = quad[2]; pQuad[np * 4 + 3] = quad[3];
+      pScore[np] = flat * (0.2 + 0.8 * Math.pow(ang, 0.25));
+      np++;
     }
-    cand.push({ t0, t1, quad: q, score: flat * (0.2 + 0.8 * Math.pow(ang, 0.25)) });
   }
-  cand.sort((a, b) => b.score - a.score);
 
+  // 質の高い順に並べる。比較関数でソートすると 200 万本でそれだけで 1 秒近い。
+  // 質は 0..1 に収まるので 1024 段のバケットに入れて数え上げで並べる。
+  // 同じバケット内（質の差 0.001 未満）の順序は貪欲の結果をほぼ変えない。
+  const NB = 1024;
+  const bucket = new Int32Array(np);
+  const start = new Int32Array(NB);
+  for (let i = 0; i < np; i++) {
+    let b = (pScore[i] * NB) | 0;
+    if (b >= NB) b = NB - 1; else if (b < 0) b = 0;
+    bucket[i] = b;
+    start[b]++;
+  }
+  // 質の高いバケットを先頭にする（後ろから累積）
+  let acc = 0;
+  for (let b = NB - 1; b >= 0; b--) { const n = start[b]; start[b] = acc; acc += n; }
+  const order = new Int32Array(np);
+  for (let i = 0; i < np; i++) order[start[bucket[i]]++] = i;
+
+  // 面数の上限: 全部が四角なら 2·na、全部が三角なら 3·na
+  const faces = new Int32Array(na * 3);
+  const offsets = new Int32Array(na + 1);
   const used = new Uint8Array(mesh.nt);
-  const faces = [];
-  const offsets = [0];
-  let quads = 0;
-  for (const c of cand) {
-    if (used[c.t0] || used[c.t1]) continue;
-    used[c.t0] = 1; used[c.t1] = 1;
-    faces.push(c.quad[0], c.quad[1], c.quad[2], c.quad[3]);
-    offsets.push(faces.length);
+  let fw = 0, ow = 1, quads = 0;
+  for (let k = 0; k < np; k++) {
+    const i = order[k];
+    const t0 = pT0[i], t1 = pT1[i];
+    if (used[t0] || used[t1]) continue;
+    used[t0] = 1; used[t1] = 1;
+    const q = i * 4;
+    faces[fw++] = pQuad[q]; faces[fw++] = pQuad[q + 1];
+    faces[fw++] = pQuad[q + 2]; faces[fw++] = pQuad[q + 3];
+    offsets[ow++] = fw;
     quads++;
   }
   let leftover = 0;
-  for (const t of alive) {
+  for (let k = 0; k < na; k++) {
+    const t = alive[k];
     if (used[t]) continue;
     const i = t * 3;
-    faces.push(T[i], T[i + 1], T[i + 2]);
-    offsets.push(faces.length);
+    faces[fw++] = T[i]; faces[fw++] = T[i + 1]; faces[fw++] = T[i + 2];
+    offsets[ow++] = fw;
     leftover++;
   }
   return {
-    faces: new Int32Array(faces), offsets: new Int32Array(offsets),
+    faces: faces.subarray(0, fw), offsets: offsets.subarray(0, ow),
     quads, tris: leftover,
-    ratio: quads * 2 / Math.max(1, alive.length),
+    ratio: quads * 2 / na,
   };
 }

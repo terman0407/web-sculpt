@@ -9,69 +9,157 @@ function buildRemap(mesh) {
   const remap = new Int32Array(mesh.nv).fill(-1);
   let n = 0;
   for (let v = 0; v < mesh.nv; v++) if (mesh.vAlive[v]) remap[v] = n++;
-  const tris = [];
+  // JS 配列の push だと 131 万面で 400 万回になる。生きている数は分かっているので
+  // 先に確保して詰める。
+  const tris = new Int32Array(mesh.liveTris * 3);
   const T = mesh.tris;
+  let w = 0;
   for (let t = 0; t < mesh.nt; t++) {
     const i = t * 3;
     const a = T[i], b = T[i + 1], c = T[i + 2];
     if (a === b && b === c) continue;
     const ra = remap[a], rb = remap[b], rc = remap[c];
     if (ra < 0 || rb < 0 || rc < 0) continue;
-    tris.push(ra, rb, rc);
+    tris[w++] = ra; tris[w++] = rb; tris[w++] = rc;
   }
-  return { remap, count: n, tris };
+  return { remap, count: n, tris: tris.subarray(0, w) };
+}
+
+// --- ASCII を直接バイト列へ書くための道具 ----------------------------------
+// OBJ は 1 面 1 行のテキストなので、行を JS 文字列で作って join すると
+// 面数ぶんの文字列確保になる。131 万面で 400 万個の文字列を作って 80MB へ
+// join していて 970ms、520 万面では 4.2 秒かかっていた。
+// 数字を自分で 10 進へ落として Uint8Array に詰めれば確保は 1 回で済む。
+
+/** 符号なし整数を 10 進で書く */
+function putUint(b, w, n) {
+  if (n === 0) { b[w++] = 48; return w; }
+  const s = w;
+  while (n > 0) { b[w++] = 48 + (n % 10); n = (n / 10) | 0; }
+  for (let i = s, j = w - 1; i < j; i++, j--) { const t = b[i]; b[i] = b[j]; b[j] = t; }
+  return w;
+}
+
+/**
+ * 小数 6 桁までで書く（末尾の 0 は落とす）。
+ * `Math.round(x * 1e6) / 1e6` を toString するのと同じ表現になる範囲を狙う。
+ * 指数表記は使わないので、極端に大きい値は桁が並ぶだけで壊れはしない。
+ */
+function putFloat(b, w, x) {
+  if (!isFinite(x)) x = 0;
+  if (x < 0) { b[w++] = 45; x = -x; }        // '-'
+  const n = Math.round(x * 1e6);
+  const ip = Math.floor(n / 1e6);
+  let fp = n - ip * 1e6;
+  w = putUint(b, w, ip);
+  if (fp > 0) {
+    b[w++] = 46;                             // '.'
+    // 末尾の 0 を落とすと桁数が減るので、先頭ゼロ埋めの桁数も一緒に減らす
+    let width = 6;
+    while (fp % 10 === 0) { fp /= 10; width--; }
+    let digits = 0;
+    for (let t = fp; t > 0; t = (t / 10) | 0) digits++;
+    for (let k = digits; k < width; k++) b[w++] = 48;
+    w = putUint(b, w, fp);
+  }
+  return w;
+}
+
+/** ASCII 文字列をそのまま詰める */
+function putStr(b, w, s) {
+  for (let i = 0; i < s.length; i++) b[w++] = s.charCodeAt(i) & 0x7f;
+  return w;
 }
 
 /**
  * @param {object} opt
  *   quads: remesh.quadDominant() の出力を渡すと四角優勢の面リストで書き出す。
  *          ZRemesher の出力は四角なので、他のツールで開いたときの見た目を近づけられる。
+ * @returns {Uint8Array} OBJ のバイト列（Blob へそのまま渡せる）
  */
 export function exportOBJ(mesh, { withColor = true, name = 'websculpt', quads = null } = {}) {
   const { remap, count, tris } = buildRemap(mesh);
   const P = mesh.positions, N = mesh.normals, C = mesh.colors;
-  const out = [];
-  out.push(`# WebSculpt export`);
-  out.push(`# verts ${count} tris ${tris.length / 3}`);
-  out.push(`o ${name}`);
-  const f = (x) => (Math.round(x * 1e6) / 1e6);
+
+  // 行ごとの上限を見て、足りなくなったら倍にする。1 行の最大長を数え上げるより
+  // 「1 行書く前に余裕があるか見る」ほうが、桁数の見積もり違いで壊れない。
+  const LINE_MAX = 512;
+  let cap = 4096 + count * (withColor ? 96 : 56) + count * 56
+    + (quads ? quads.faces.length : tris.length) * 24;
+  let b = new Uint8Array(cap);
+  let w = 0;
+  const room = () => {
+    if (w + LINE_MAX <= b.length) return;
+    const nb = new Uint8Array(Math.max(b.length * 2, w + LINE_MAX));
+    nb.set(b.subarray(0, w));
+    b = nb;
+  };
+
+  room(); w = putStr(b, w, '# WebSculpt export\n# verts ');
+  w = putUint(b, w, count); w = putStr(b, w, ' tris ');
+  w = putUint(b, w, tris.length / 3); w = putStr(b, w, '\no ');
+  w = putStr(b, w, name); b[w++] = 10;
+
   for (let v = 0; v < mesh.nv; v++) {
     if (remap[v] < 0) continue;
     const i = v * 3;
+    room();
+    b[w++] = 118; b[w++] = 32;               // 'v '
+    w = putFloat(b, w, P[i]); b[w++] = 32;
+    w = putFloat(b, w, P[i + 1]); b[w++] = 32;
+    w = putFloat(b, w, P[i + 2]);
     if (withColor) {
-      out.push(`v ${f(P[i])} ${f(P[i + 1])} ${f(P[i + 2])} ${f(C[i])} ${f(C[i + 1])} ${f(C[i + 2])}`);
-    } else {
-      out.push(`v ${f(P[i])} ${f(P[i + 1])} ${f(P[i + 2])}`);
+      b[w++] = 32; w = putFloat(b, w, C[i]);
+      b[w++] = 32; w = putFloat(b, w, C[i + 1]);
+      b[w++] = 32; w = putFloat(b, w, C[i + 2]);
     }
+    b[w++] = 10;
   }
   for (let v = 0; v < mesh.nv; v++) {
     if (remap[v] < 0) continue;
     const i = v * 3;
-    out.push(`vn ${f(N[i])} ${f(N[i + 1])} ${f(N[i + 2])}`);
+    room();
+    b[w++] = 118; b[w++] = 110; b[w++] = 32; // 'vn '
+    w = putFloat(b, w, N[i]); b[w++] = 32;
+    w = putFloat(b, w, N[i + 1]); b[w++] = 32;
+    w = putFloat(b, w, N[i + 2]);
+    b[w++] = 10;
   }
+
   if (quads && quads.offsets && quads.offsets.length > 1) {
     // 四角優勢の面リストが渡されたらそれを書く（remesh.quadDominant の出力）。
     // 三角形も混ざるので、面ごとに頂点数が変わる形で出す。
     // 頂点番号はメッシュ側のものなので remap を通す。
     const F = quads.faces, O = quads.offsets;
     for (let k = 0; k + 1 < O.length; k++) {
-      let line = 'f';
+      const s = O[k], e = O[k + 1];
       let bad = false;
-      for (let i = O[k]; i < O[k + 1]; i++) {
-        const r = remap[F[i]];
-        if (r < 0) { bad = true; break; }
-        const n = r + 1;
-        line += ' ' + n + '//' + n;
+      for (let i = s; i < e; i++) if (remap[F[i]] < 0) { bad = true; break; }
+      if (bad) continue;
+      room();
+      b[w++] = 102;                          // 'f'
+      for (let i = s; i < e; i++) {
+        const n = remap[F[i]] + 1;
+        b[w++] = 32;
+        w = putUint(b, w, n); b[w++] = 47; b[w++] = 47;
+        w = putUint(b, w, n);
       }
-      if (!bad) out.push(line);
+      b[w++] = 10;
     }
   } else {
     for (let i = 0; i < tris.length; i += 3) {
-      const a = tris[i] + 1, b = tris[i + 1] + 1, c = tris[i + 2] + 1;
-      out.push(`f ${a}//${a} ${b}//${b} ${c}//${c}`);
+      room();
+      b[w++] = 102;                          // 'f'
+      for (let k = 0; k < 3; k++) {
+        const n = tris[i + k] + 1;
+        b[w++] = 32;
+        w = putUint(b, w, n); b[w++] = 47; b[w++] = 47;
+        w = putUint(b, w, n);
+      }
+      b[w++] = 10;
     }
   }
-  return out.join('\n') + '\n';
+  return b.subarray(0, w);
 }
 
 export function exportSTL(mesh) {

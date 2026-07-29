@@ -18,6 +18,8 @@
 // initRemeshWorker() が false を返し、呼び出し側がメインスレッドで実行する。
 // ---------------------------------------------------------------------------
 
+import { wasmFieldModule } from './wasmkernels.js';
+
 // ワーカーは「モジュール URL を受け取って import する」だけの薄い殻にする。
 // これなら remesh の実装はワーカー側でも本体と同じものが 1 つだけになる。
 const WORKER_SRC = `
@@ -30,7 +32,14 @@ self.onmessage = async (ev) => {
     if (m.type === 'init') {
       remeshMod = await import(m.url);
       meshMod = await import(m.meshUrl);
-      self.postMessage({ type: 'ready' });
+      // WASM カーネル（法線 / 曲率 / 表面投影）もワーカー側で立ち上げる。
+      // コンパイル済みモジュールを貰うので再コンパイルは要らない。
+      let wasm = false;
+      if (m.wasmModule) {
+        const k = await import(m.kernelUrl);
+        wasm = await k.initWasmFieldFromModule(m.wasmModule);
+      }
+      self.postMessage({ type: 'ready', wasm });
       return;
     }
     if (m.type === 'remesh') {
@@ -87,9 +96,12 @@ let state = 'idle';      // idle | ready | failed
 let failReason = '';
 let initPromise = null;
 let jobId = 0;
+let wasmInWorker = false;
 
 export function remeshWorkerState() { return state; }
 export function remeshWorkerError() { return failReason; }
+/** ワーカー側で WASM カーネルが立ち上がったか（診断とテスト用） */
+export function remeshWorkerWasm() { return wasmInWorker; }
 
 /**
  * ワーカーを用意する。読み込めなければ静かに失敗して false を返す
@@ -123,17 +135,24 @@ async function _init() {
     if (!/^https?:$/.test(base.protocol)) throw new Error('http 経由でないため import できません');
     const remeshUrl = new URL('./remesh.js', base).href;
     const meshUrl = new URL('./mesh.js', base).href;
+    const kernelUrl = new URL('./wasmkernels.js', base).href;
 
     blobUrl = URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' }));
     worker = new Worker(blobUrl, { type: 'module' });
     await new Promise((res, rej) => {
       const to = setTimeout(() => rej(new Error('ワーカー初期化がタイムアウト')), 10000);
       worker.onmessage = (ev) => {
-        if (ev.data && ev.data.type === 'ready') { clearTimeout(to); res(); }
-        else if (ev.data && ev.data.type === 'error') { clearTimeout(to); rej(new Error(ev.data.message)); }
+        if (ev.data && ev.data.type === 'ready') {
+          clearTimeout(to);
+          wasmInWorker = !!ev.data.wasm;
+          res();
+        } else if (ev.data && ev.data.type === 'error') { clearTimeout(to); rej(new Error(ev.data.message)); }
       };
       worker.onerror = (e) => { clearTimeout(to); rej(new Error(e.message || 'ワーカーエラー')); };
-      worker.postMessage({ type: 'init', url: remeshUrl, meshUrl });
+      worker.postMessage({
+        type: 'init', url: remeshUrl, meshUrl, kernelUrl,
+        wasmModule: wasmFieldModule(),
+      });
     });
     meshModUrl = meshUrl;
     state = 'ready';

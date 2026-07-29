@@ -1358,6 +1358,346 @@ class OrbitCamera {
   return { OrbitCamera };
 })();
 
+/* ===== wasmkernels.js ===== */
+__M['wasmkernels.js'] = (function () {
+// ---------------------------------------------------------------------------
+// wasmkernels.js
+// 平坦な配列だけを触る重いループを WebAssembly で実行する。読み込めなければ
+// 静かに JS 版へ戻るので、このモジュールが失敗しても機能は落ちない。
+//
+// 入っているもの:
+//   splat         ダイナメッシュの距離場（3M ポリゴンでは全体の約 9 割）
+//   normals       頂点法線。トポロジが変わるたびに走る
+//   curvature     平均曲率。同じく毎回走り、法線の 2 倍かかる
+//   projectPoints リメッシュの表面投影。反復あたり 90 万クエリ
+//
+// 「WASM に出す価値があるか」は往復のコストと比べて決めた。2,621,442 頂点
+// （位置 30MB + 三角形 60MB）の出し入れは実測 3.2ms で、上のどれも 50ms 以上
+// かかるので、往復は問題にならない。逆にブラシの 1 ダブのような小さい領域は
+// 出しても意味がないので JS のままにしてある。
+//
+// スレッドも SharedArrayBuffer も使わない単一スレッド WASM なので、
+// COOP/COEP ヘッダを付けられない GitHub Pages でもそのまま動く。
+// 単一ファイル版では下の WASM_B64 をビルド時に埋め込むため、
+// fetch を一切使わず file:// からも動く。
+// ---------------------------------------------------------------------------
+
+// build.mjs が単一ファイル版を作るとき、この行を base64 文字列に差し替える。
+const WASM_B64 = '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';
+
+// wasm/ の場所はページからの相対。GitHub Pages のサブパス配信でも正しく解決される。
+const WASM_URL = 'wasm/kernels.wasm';
+
+let W = null;             // instance.exports
+let WMod = null;          // WebAssembly.Module（ワーカーへ渡す）
+let state = 'idle';       // idle | loading | ready | failed
+let failReason = '';
+let enabled = true;       // false にすると全カーネルが JS フォールバックに落ちる
+
+function wasmFieldState() { return state; }
+function wasmFieldReady() { return state === 'ready' && enabled; }
+function wasmFieldError() { return failReason; }
+/**
+ * WASM 経路を切る / 戻す。JS 版との突き合わせテストと、
+ * 「WASM のせいで結果が変わっていないか」を切り分ける診断のためにある。
+ */
+function setWasmKernels(on) { enabled = !!on; }
+
+/** 各カーネルの入口で使う共通判定 */
+function usable() { return enabled && state === 'ready' && W !== null; }
+/** ワーカーに渡す用のコンパイル済みモジュール */
+function wasmFieldModule() { return WMod; }
+
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/**
+ * すでに手元にあるバイト列から初期化する（Node のテスト / ベンチ用）。
+ */
+async function initWasmFieldFromBytes(bytes) {
+  try {
+    const { instance, module } = await WebAssembly.instantiate(bytes, {
+      env: { abort() { throw new Error('wasm abort'); } },
+    });
+    W = instance.exports;
+    WMod = module;
+    state = 'ready';
+    return true;
+  } catch (err) {
+    failReason = String(err && err.message || err);
+    state = 'failed';
+    W = null;
+    return false;
+  }
+}
+
+/**
+ * すでにコンパイル済みのモジュールから初期化する（ワーカー用）。
+ * WebAssembly.Module は構造化複製で渡せるので、ワーカーで再コンパイルせずに済む。
+ */
+async function initWasmFieldFromModule(mod) {
+  if (state === 'ready') return true;
+  try {
+    const instance = await WebAssembly.instantiate(mod, {
+      env: { abort() { throw new Error('wasm abort'); } },
+    });
+    W = instance.exports;
+    WMod = mod;
+    state = 'ready';
+    return true;
+  } catch (err) {
+    failReason = String(err && err.message || err);
+    state = 'failed';
+    W = null;
+    return false;
+  }
+}
+
+/**
+ * WASM を読み込む。起動時に一度だけ呼べばよい（await しなくてもよい）。
+ * 失敗しても例外は投げず、JS 版フォールバックのままになる。
+ */
+async function initWasmField() {
+  if (state !== 'idle') return state === 'ready';
+  state = 'loading';
+  try {
+    let bytes;
+    if (WASM_B64) {
+      bytes = base64ToBytes(WASM_B64);
+    } else {
+      if (typeof fetch !== 'function') throw new Error('fetch が使えません');
+      const res = await fetch(WASM_URL);
+      if (!res.ok) throw new Error(`${WASM_URL} が ${res.status}`);
+      bytes = new Uint8Array(await res.arrayBuffer());
+    }
+    const { instance, module } = await WebAssembly.instantiate(bytes, {
+      env: { abort() { throw new Error('wasm abort'); } },
+    });
+    WMod = module;
+    const e = instance.exports;
+    for (const fn of ['alloc', 'release', 'splat', 'fillField', 'fillClosest',
+      'normals', 'curvature', 'projectPoints', 'memory']) {
+      if (!e[fn]) throw new Error(`export ${fn} がありません`);
+    }
+    W = e;
+    state = 'ready';
+    return true;
+  } catch (err) {
+    failReason = String(err && err.message || err);
+    state = 'failed';
+    W = null;
+    return false;
+  }
+}
+
+/**
+ * 距離場スプラットを WASM で実行して field / closest を埋める。
+ * @returns {boolean} 実行できたか（false なら呼び出し側が JS 版を走らせる）
+ */
+function wasmSplat(mesh, field, closest, g) {
+  if (!usable()) return false;
+  const nv = mesh.nv, nt = mesh.nt;
+  const total = field.length;
+  if (nv === 0 || nt === 0 || total === 0) return false;
+
+  let pPos = 0, pTri = 0, pField = 0, pClose = 0;
+  try {
+    // 先にすべて確保する。alloc でメモリが伸びるとビューが無効になるため、
+    // ビューは確保が全部終わってから作る。
+    pPos = W.alloc(nv * 12);
+    pTri = W.alloc(nt * 12);
+    pField = W.alloc(total * 4);
+    pClose = closest ? W.alloc(total * 4) : 0;
+    if (!pPos || !pTri || !pField || (closest && !pClose)) throw new Error('alloc 失敗');
+
+    const buf = W.memory.buffer;
+    new Float32Array(buf, pPos, nv * 3).set(mesh.positions.subarray(0, nv * 3));
+    new Int32Array(buf, pTri, nt * 3).set(mesh.tris.subarray(0, nt * 3));
+    W.fillField(pField, total, g.band);
+    if (pClose) W.fillClosest(pClose, total);
+
+    W.splat(pPos, pTri, nt, pField, pClose,
+      g.nx, g.ny, g.nz, 0, g.nz - 1, g.ox, g.oy, g.oz, g.h, g.band);
+
+    // 結果を JS 側の配列へ戻す（以降の処理は通常の TypedArray 上で行う）
+    const b2 = W.memory.buffer;
+    field.set(new Float32Array(b2, pField, total));
+    if (closest) closest.set(new Int32Array(b2, pClose, total));
+    return true;
+  } catch (err) {
+    failReason = String(err && err.message || err);
+    return false;
+  } finally {
+    if (pClose) W.release(pClose);
+    if (pField) W.release(pField);
+    if (pTri) W.release(pTri);
+    if (pPos) W.release(pPos);
+  }
+}
+
+// --- 法線 / 曲率 -----------------------------------------------------------
+// どちらもトポロジが変わるたびに全頂点で走る。260 万頂点で JS だと
+// 法線 58ms + 曲率 122ms かかり、Divide・変形・リメッシュ・ダイナメッシュの
+// すべてがこの 180ms を共通で払っていた。
+//
+// alloc でメモリが伸びるとビューが無効になるので、確保を全部済ませてから
+// ビューを作るという順序は崩さないこと（splat と同じ）。
+
+/**
+ * 頂点法線を WASM で作って mesh.normals へ書き戻す。
+ * @returns {boolean} 実行できたか（false なら呼び出し側が JS 版を走らせる）
+ */
+function wasmNormals(mesh) {
+  if (!usable()) return false;
+  const nv = mesh.nv, nt = mesh.nt;
+  if (nv === 0 || nt === 0) return false;
+  let pPos = 0, pTri = 0, pNrm = 0;
+  try {
+    pPos = W.alloc(nv * 12);
+    pTri = W.alloc(nt * 12);
+    pNrm = W.alloc(nv * 12);
+    if (!pPos || !pTri || !pNrm) throw new Error('alloc 失敗');
+    const buf = W.memory.buffer;
+    new Float32Array(buf, pPos, nv * 3).set(mesh.positions.subarray(0, nv * 3));
+    new Int32Array(buf, pTri, nt * 3).set(mesh.tris.subarray(0, nt * 3));
+    W.normals(pPos, pTri, nt, pNrm, nv);
+    mesh.normals.set(new Float32Array(W.memory.buffer, pNrm, nv * 3));
+    return true;
+  } catch (err) {
+    failReason = String(err && err.message || err);
+    return false;
+  } finally {
+    if (pNrm) W.release(pNrm);
+    if (pTri) W.release(pTri);
+    if (pPos) W.release(pPos);
+  }
+}
+
+/**
+ * 平均曲率を WASM で作って mesh.curv へ書き戻す。
+ * 法線が最新であることを前提にする（JS 版と同じ）。
+ * @returns {boolean} 実行できたか
+ */
+function wasmCurvature(mesh) {
+  if (!usable()) return false;
+  const nv = mesh.nv, nt = mesh.nt;
+  if (nv === 0 || nt === 0) return false;
+  let pPos = 0, pNrm = 0, pTri = 0, pCv = 0, pScr = 0;
+  try {
+    pPos = W.alloc(nv * 12);
+    pNrm = W.alloc(nv * 12);
+    pTri = W.alloc(nt * 12);
+    pCv = W.alloc(nv * 4);
+    pScr = W.alloc(nv * 20);          // sum(3) + e2(1) + cnt(1) を f32 で
+    if (!pPos || !pNrm || !pTri || !pCv || !pScr) throw new Error('alloc 失敗');
+    const buf = W.memory.buffer;
+    new Float32Array(buf, pPos, nv * 3).set(mesh.positions.subarray(0, nv * 3));
+    new Float32Array(buf, pNrm, nv * 3).set(mesh.normals.subarray(0, nv * 3));
+    new Int32Array(buf, pTri, nt * 3).set(mesh.tris.subarray(0, nt * 3));
+    W.curvature(pPos, pNrm, pTri, nt, pCv, nv, pScr);
+    mesh.curv.set(new Float32Array(W.memory.buffer, pCv, nv));
+    return true;
+  } catch (err) {
+    failReason = String(err && err.message || err);
+    return false;
+  } finally {
+    if (pScr) W.release(pScr);
+    if (pCv) W.release(pCv);
+    if (pTri) W.release(pTri);
+    if (pNrm) W.release(pNrm);
+    if (pPos) W.release(pPos);
+  }
+}
+
+// --- リメッシュの表面投影 --------------------------------------------------
+// 格子（CSR）は反復のあいだ変わらないので、WASM 側に置いたまま使い回す。
+// 反復ごとに入れ直すと 520 万面で毎回 100MB 超のコピーになる。
+
+/**
+ * SurfaceRef の格子を WASM メモリへ載せる。返ったハンドルを projectPoints へ渡す。
+ * @returns {object|null} 載せられなければ null
+ */
+function wasmUploadSurface(ref) {
+  if (!usable()) return null;
+  const np = ref.P.length, ni = ref.I.length;
+  const nOff = ref.off.length, nCell = ref.tri.length;
+  let pPos = 0, pIdx = 0, pOff = 0, pCell = 0;
+  try {
+    pPos = W.alloc(np * 4);
+    pIdx = W.alloc(ni * 4);
+    pOff = W.alloc(nOff * 4);
+    pCell = W.alloc(Math.max(4, nCell * 4));
+    if (!pPos || !pIdx || !pOff || !pCell) throw new Error('alloc 失敗');
+    const buf = W.memory.buffer;
+    new Float32Array(buf, pPos, np).set(ref.P);
+    new Int32Array(buf, pIdx, ni).set(ref.I);
+    new Int32Array(buf, pOff, nOff).set(ref.off);
+    if (nCell) new Int32Array(buf, pCell, nCell).set(ref.tri);
+    return { pPos, pIdx, pOff, pCell, ref };
+  } catch (err) {
+    failReason = String(err && err.message || err);
+    if (pCell) W.release(pCell);
+    if (pOff) W.release(pOff);
+    if (pIdx) W.release(pIdx);
+    if (pPos) W.release(pPos);
+    return null;
+  }
+}
+
+/** wasmUploadSurface で取ったものを返す */
+function wasmReleaseSurface(h) {
+  if (!h || !usable()) return;
+  W.release(h.pCell); W.release(h.pOff); W.release(h.pIdx); W.release(h.pPos);
+}
+
+/**
+ * 点群をまとめて表面へ投影する。tgt / hint はその場で更新される。
+ * @param {object} h wasmUploadSurface の戻り値
+ * @param {Float32Array} tgt 投影したい点（count*3）。結果を書き戻す
+ * @param {Int32Array} hint 点ごとの前回当たった三角形（count）。-1 で無し
+ * @param {Uint8Array} skip 0 以外なら投影しない（count）
+ * @returns {{projected: number, hinted: number}|null}
+ */
+function wasmProjectPoints(h, tgt, hint, skip, count, hintMaxD2) {
+  if (!h || !usable()) return null;
+  if (count === 0) return { projected: 0, hinted: 0 };
+  let pTgt = 0, pHint = 0, pSkip = 0, pStats = 0;
+  try {
+    pTgt = W.alloc(count * 12);
+    pHint = W.alloc(count * 4);
+    pSkip = W.alloc(count);
+    pStats = W.alloc(8);
+    if (!pTgt || !pHint || !pSkip || !pStats) throw new Error('alloc 失敗');
+    const buf = W.memory.buffer;
+    new Float32Array(buf, pTgt, count * 3).set(tgt.subarray(0, count * 3));
+    new Int32Array(buf, pHint, count).set(hint.subarray(0, count));
+    new Uint8Array(buf, pSkip, count).set(skip.subarray(0, count));
+    const r = h.ref;
+    W.projectPoints(pTgt, pHint, pSkip, count,
+      h.pPos, h.pIdx, h.pOff, h.pCell,
+      r.nx, r.ny, r.nz, r.ox, r.oy, r.oz, r.h, hintMaxD2, pStats);
+    const b2 = W.memory.buffer;
+    tgt.set(new Float32Array(b2, pTgt, count * 3), 0);
+    hint.set(new Int32Array(b2, pHint, count), 0);
+    const st = new Int32Array(b2, pStats, 2);
+    return { projected: st[0], hinted: st[1] };
+  } catch (err) {
+    failReason = String(err && err.message || err);
+    return null;
+  } finally {
+    if (pStats) W.release(pStats);
+    if (pSkip) W.release(pSkip);
+    if (pHint) W.release(pHint);
+    if (pTgt) W.release(pTgt);
+  }
+}
+  return { wasmFieldState, wasmFieldReady, wasmFieldError, setWasmKernels, wasmFieldModule, initWasmFieldFromBytes, initWasmFieldFromModule, initWasmField, wasmSplat, wasmNormals, wasmCurvature, wasmUploadSurface, wasmReleaseSurface, wasmProjectPoints };
+})();
+
 /* ===== mesh.js ===== */
 __M['mesh.js'] = (function () {
 // ---------------------------------------------------------------------------
@@ -1372,6 +1712,8 @@ __M['mesh.js'] = (function () {
 //  * 頂点ごとの隣接三角形リスト(ring)を常に維持する。
 //  * GPU 転送は dirty レンジ（最小/最大インデックス）のみ。
 // ---------------------------------------------------------------------------
+
+const { wasmNormals, wasmCurvature } = __M['wasmkernels.js'];
 
 const MAX_VERTS_HARD = 2000000;
 
@@ -1900,6 +2242,9 @@ class SculptMesh {
   computeAllCurvature() {
     const nv = this.nv;
     if (nv === 0) return;
+    // 平坦な配列だけを触るループなので WASM に出す。260 万頂点で 122ms → 34ms。
+    // トポロジが変わるたびに走るので、ここが効くと全機能が速くなる。
+    if (wasmCurvature(this)) { this.markAllDirty(); return; }
     const P = this.positions, N = this.normals, T = this.tris, CV = this.curv;
 
     if (!this._cvSum || this._cvSum.length < nv * 3) {
@@ -1958,6 +2303,7 @@ class SculptMesh {
   }
 
   computeAllNormals() {
+    if (wasmNormals(this)) { this.markAllDirty(); return; }
     const P = this.positions, N = this.normals, T = this.tris;
     N.fill(0, 0, this.nv * 3);
     for (let t = 0; t < this.nt; t++) {
@@ -4076,150 +4422,6 @@ function refineRegion(mesh, regionTris, regionCount, center, radius, targetLen, 
   return { splitEdge, collapseEdge, flipEdge, refineRegion };
 })();
 
-/* ===== wasmfield.js ===== */
-__M['wasmfield.js'] = (function () {
-// ---------------------------------------------------------------------------
-// wasmfield.js
-// ダイナメッシュの距離場スプラットを WebAssembly で実行する（js/dynamesh.js の
-// フォールバック付き高速版）。読み込めなければ静かに JS 版へ戻るので、
-// このモジュールが失敗しても機能は落ちない。
-//
-// 3M ポリゴンのダイナメッシュでは距離場が全体の約 9 割を占めるため、
-// ここだけ WASM 化すると全体で 1.4〜1.5 倍になる。
-//
-// スレッドも SharedArrayBuffer も使わない単一スレッド WASM なので、
-// COOP/COEP ヘッダを付けられない GitHub Pages でもそのまま動く。
-// 単一ファイル版では下の WASM_B64 をビルド時に埋め込むため、
-// fetch を一切使わず file:// からも動く。
-// ---------------------------------------------------------------------------
-
-// build.mjs が単一ファイル版を作るとき、この行を base64 文字列に差し替える。
-const WASM_B64 = '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';
-
-// wasm/ の場所はページからの相対。GitHub Pages のサブパス配信でも正しく解決される。
-const WASM_URL = 'wasm/dynafield.wasm';
-
-let W = null;             // instance.exports
-let WMod = null;          // WebAssembly.Module（ワーカーへ渡す）
-let state = 'idle';       // idle | loading | ready | failed
-let failReason = '';
-
-function wasmFieldState() { return state; }
-function wasmFieldReady() { return state === 'ready'; }
-function wasmFieldError() { return failReason; }
-/** ワーカーに渡す用のコンパイル済みモジュール */
-function wasmFieldModule() { return WMod; }
-
-function base64ToBytes(b64) {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
-/**
- * すでに手元にあるバイト列から初期化する（Node のテスト / ベンチ用）。
- */
-async function initWasmFieldFromBytes(bytes) {
-  try {
-    const { instance, module } = await WebAssembly.instantiate(bytes, {
-      env: { abort() { throw new Error('wasm abort'); } },
-    });
-    W = instance.exports;
-    WMod = module;
-    state = 'ready';
-    return true;
-  } catch (err) {
-    failReason = String(err && err.message || err);
-    state = 'failed';
-    W = null;
-    return false;
-  }
-}
-
-/**
- * WASM を読み込む。起動時に一度だけ呼べばよい（await しなくてもよい）。
- * 失敗しても例外は投げず、JS 版フォールバックのままになる。
- */
-async function initWasmField() {
-  if (state !== 'idle') return state === 'ready';
-  state = 'loading';
-  try {
-    let bytes;
-    if (WASM_B64) {
-      bytes = base64ToBytes(WASM_B64);
-    } else {
-      if (typeof fetch !== 'function') throw new Error('fetch が使えません');
-      const res = await fetch(WASM_URL);
-      if (!res.ok) throw new Error(`${WASM_URL} が ${res.status}`);
-      bytes = new Uint8Array(await res.arrayBuffer());
-    }
-    const { instance, module } = await WebAssembly.instantiate(bytes, {
-      env: { abort() { throw new Error('wasm abort'); } },
-    });
-    WMod = module;
-    const e = instance.exports;
-    for (const fn of ['alloc', 'release', 'splat', 'fillField', 'fillClosest', 'memory']) {
-      if (!e[fn]) throw new Error(`export ${fn} がありません`);
-    }
-    W = e;
-    state = 'ready';
-    return true;
-  } catch (err) {
-    failReason = String(err && err.message || err);
-    state = 'failed';
-    W = null;
-    return false;
-  }
-}
-
-/**
- * 距離場スプラットを WASM で実行して field / closest を埋める。
- * @returns {boolean} 実行できたか（false なら呼び出し側が JS 版を走らせる）
- */
-function wasmSplat(mesh, field, closest, g) {
-  if (state !== 'ready' || !W) return false;
-  const nv = mesh.nv, nt = mesh.nt;
-  const total = field.length;
-  if (nv === 0 || nt === 0 || total === 0) return false;
-
-  let pPos = 0, pTri = 0, pField = 0, pClose = 0;
-  try {
-    // 先にすべて確保する。alloc でメモリが伸びるとビューが無効になるため、
-    // ビューは確保が全部終わってから作る。
-    pPos = W.alloc(nv * 12);
-    pTri = W.alloc(nt * 12);
-    pField = W.alloc(total * 4);
-    pClose = closest ? W.alloc(total * 4) : 0;
-    if (!pPos || !pTri || !pField || (closest && !pClose)) throw new Error('alloc 失敗');
-
-    const buf = W.memory.buffer;
-    new Float32Array(buf, pPos, nv * 3).set(mesh.positions.subarray(0, nv * 3));
-    new Int32Array(buf, pTri, nt * 3).set(mesh.tris.subarray(0, nt * 3));
-    W.fillField(pField, total, g.band);
-    if (pClose) W.fillClosest(pClose, total);
-
-    W.splat(pPos, pTri, nt, pField, pClose,
-      g.nx, g.ny, g.nz, 0, g.nz - 1, g.ox, g.oy, g.oz, g.h, g.band);
-
-    // 結果を JS 側の配列へ戻す（以降の処理は通常の TypedArray 上で行う）
-    const b2 = W.memory.buffer;
-    field.set(new Float32Array(b2, pField, total));
-    if (closest) closest.set(new Int32Array(b2, pClose, total));
-    return true;
-  } catch (err) {
-    failReason = String(err && err.message || err);
-    return false;
-  } finally {
-    if (pClose) W.release(pClose);
-    if (pField) W.release(pField);
-    if (pTri) W.release(pTri);
-    if (pPos) W.release(pPos);
-  }
-}
-  return { wasmFieldState, wasmFieldReady, wasmFieldError, wasmFieldModule, initWasmFieldFromBytes, initWasmField, wasmSplat };
-})();
-
 /* ===== parallelfield.js ===== */
 __M['parallelfield.js'] = (function () {
 // ---------------------------------------------------------------------------
@@ -4557,7 +4759,7 @@ __M['dynamesh.js'] = (function () {
 // ---------------------------------------------------------------------------
 
 const { clamp } = __M['math.js'];
-const { wasmSplat, wasmFieldReady } = __M['wasmfield.js'];
+const { wasmSplat, wasmFieldReady } = __M['wasmkernels.js'];
 const { parallelSplat, parallelState, lastTiming, buildTiming } = __M['parallelfield.js'];
 
 const LARGE = 1e9;
@@ -5356,10 +5558,6 @@ __M['subdiv.js'] = (function () {
 // Sculptris Pro と SDiv は併用できない）。topoVersion で検出して破棄する。
 // ---------------------------------------------------------------------------
 
-const EKEY = 2097152;
-
-function edgeKey(a, b) { return a < b ? a * EKEY + b : b * EKEY + a; }
-
 /** 粗いメッシュの頂点法線を求める（面積加重） */
 function coarseNormals(pos, tris, nv) {
   const N = new Float32Array(nv * 3);
@@ -5425,28 +5623,59 @@ function midFrame(pos, nrm, a, b, out) {
 
 /**
  * 中点分割の接続を作る。
- * @returns {{indices, edgeA, edgeB, midOf}} midOf は edgeKey → 中点インデックス
+ *
+ * 辺 → 中点の対応は開番地法のハッシュ表を型付き配列で持つ。以前は
+ * `Map<number, number>` に `a * 2^21 + b` を入れていたが、キーが 2^31 を超えて
+ * 小整数として扱えず、131 万面の Divide で 400 万回の Map 操作に 750ms
+ * かかっていた。Divide は一番よく使う重い操作なのでここが効く。
+ *
+ * @returns {{indices, edgeA, edgeB, midIdx}}
+ *   midIdx は粗い三角形ごとの中点番号 (ab, bc, ca)。これを取っておくと
+ *   SDiv 上げのときにハッシュ表を作り直さずに接続を復元できる。
  */
 function buildSubdivision(coarseTris, coarseNv) {
-  const midOf = new Map();
-  const edgeA = [];
-  const edgeB = [];
+  // 閉多様体なら辺は 3F/2 本。境界があると増えるので 3F を上限にする。
+  const maxEdge = coarseTris.length;
+  let cap = 16;
+  while (cap < maxEdge * 2) cap <<= 1;        // 使用率 50% 以下に保つ
+  const hmask = cap - 1;
+  const kA = new Int32Array(cap).fill(-1);    // -1 = 空きスロット
+  const kB = new Int32Array(cap);
+  const kM = new Int32Array(cap);
+  const edgeA = new Int32Array(maxEdge);
+  const edgeB = new Int32Array(maxEdge);
+  let nEdge = 0;
   let next = coarseNv;
-  const mid = (a, b) => {
-    const k = edgeKey(a, b);
-    let m = midOf.get(k);
-    if (m === undefined) {
-      m = next++;
-      midOf.set(k, m);
-      edgeA.push(a); edgeB.push(b);
-    }
-    return m;
-  };
+
   const idx = new Uint32Array(coarseTris.length * 4);
+  const midIdx = new Int32Array(coarseTris.length);
   let w = 0;
   for (let i = 0; i < coarseTris.length; i += 3) {
     const a = coarseTris[i], b = coarseTris[i + 1], c = coarseTris[i + 2];
-    const ab = mid(a, b), bc = mid(b, c), ca = mid(c, a);
+    let ab = -1, bc = -1, ca = -1;
+    // 3 辺を同じ手順で処理する。関数にすると 400 万回の呼び出しになるので展開する。
+    for (let e = 0; e < 3; e++) {
+      const u = e === 0 ? a : (e === 1 ? b : c);
+      const v = e === 0 ? b : (e === 1 ? c : a);
+      const lo = u < v ? u : v, hi = u < v ? v : u;
+      // 32bit で混ぜる。imul でないと浮動小数になってビット演算前に丸められる。
+      let h = (Math.imul(lo, 0x9e3779b1) ^ Math.imul(hi, 0x85ebca77)) >>> 0;
+      h = (h ^ (h >>> 15)) & hmask;
+      let m = -1;
+      for (;;) {
+        const sa = kA[h];
+        if (sa === -1) {
+          m = next++;
+          kA[h] = lo; kB[h] = hi; kM[h] = m;
+          edgeA[nEdge] = lo; edgeB[nEdge] = hi; nEdge++;
+          break;
+        }
+        if (sa === lo && kB[h] === hi) { m = kM[h]; break; }
+        h = (h + 1) & hmask;
+      }
+      if (e === 0) ab = m; else if (e === 1) bc = m; else ca = m;
+    }
+    midIdx[i] = ab; midIdx[i + 1] = bc; midIdx[i + 2] = ca;
     idx[w++] = a; idx[w++] = ab; idx[w++] = ca;
     idx[w++] = b; idx[w++] = bc; idx[w++] = ab;
     idx[w++] = c; idx[w++] = ca; idx[w++] = bc;
@@ -5454,10 +5683,29 @@ function buildSubdivision(coarseTris, coarseNv) {
   }
   return {
     indices: idx,
-    edgeA: new Int32Array(edgeA),
-    edgeB: new Int32Array(edgeB),
-    midOf,
+    edgeA: edgeA.subarray(0, nEdge),
+    edgeB: edgeB.subarray(0, nEdge),
+    midIdx,
   };
+}
+
+/**
+ * 保存しておいた中点番号から細かい接続を組み直す。
+ * buildSubdivision の後半と同じ並べ方でなければならない（下げ / 上げの往復が
+ * 同じインデックスになる前提が崩れる）。
+ */
+function rebuildIndices(coarseTris, midIdx) {
+  const idx = new Uint32Array(coarseTris.length * 4);
+  let w = 0;
+  for (let i = 0; i < coarseTris.length; i += 3) {
+    const a = coarseTris[i], b = coarseTris[i + 1], c = coarseTris[i + 2];
+    const ab = midIdx[i], bc = midIdx[i + 1], ca = midIdx[i + 2];
+    idx[w++] = a; idx[w++] = ab; idx[w++] = ca;
+    idx[w++] = b; idx[w++] = bc; idx[w++] = ab;
+    idx[w++] = c; idx[w++] = ca; idx[w++] = bc;
+    idx[w++] = ab; idx[w++] = bc; idx[w++] = ca;
+  }
+  return idx;
 }
 
 class SubdivLevels {
@@ -5542,6 +5790,9 @@ class SubdivLevels {
       coarseNv: nv,
       edgeA: sub.edgeA,
       edgeB: sub.edgeB,
+      // 中点番号を取っておく。上げるたびにハッシュ表を作り直すと、
+      // 131 万面で 270ms ほど「すでに分かっていること」を計算し直すことになる。
+      midIdx: sub.midIdx,
       // 下げるときに埋める
       local: null,
       fineCol: null,
@@ -5638,18 +5889,21 @@ class SubdivLevels {
       msk[nv + k] = L.fineMask[k];
     }
 
-    // 接続は保存済みの粗い面から決まるので、下げたときと同じものが再現される
-    const sub = buildSubdivision(L.coarseTris, nv);
-    mesh.setGeometry(pos, sub.indices, col, msk);
+    // 接続は分割したときに確定しているので、取っておいた中点番号から組み直す。
+    // 古い保存データには midIdx が無いので、そのときだけハッシュ表を作り直す。
+    if (!L.midIdx) L.midIdx = buildSubdivision(L.coarseTris, nv).midIdx;
+    const indices = rebuildIndices(L.coarseTris, L.midIdx);
+    mesh.setGeometry(pos, indices, col, msk);
     this.cur++;
     this._sync(mesh);
-    return { level: this.cur, maxLevel: this.levels.length, verts: fineNv, tris: sub.indices.length / 3 };
+    return { level: this.cur, maxLevel: this.levels.length, verts: fineNv, tris: indices.length / 3 };
   }
 
   bytes() {
     let b = 0;
     for (const L of this.levels) {
       b += L.coarseTris.byteLength + L.edgeA.byteLength + L.edgeB.byteLength;
+      if (L.midIdx) b += L.midIdx.byteLength;
       if (L.local) b += L.local.byteLength + L.fineCol.byteLength + L.fineMask.byteLength;
     }
     return b;
@@ -12145,69 +12399,157 @@ function buildRemap(mesh) {
   const remap = new Int32Array(mesh.nv).fill(-1);
   let n = 0;
   for (let v = 0; v < mesh.nv; v++) if (mesh.vAlive[v]) remap[v] = n++;
-  const tris = [];
+  // JS 配列の push だと 131 万面で 400 万回になる。生きている数は分かっているので
+  // 先に確保して詰める。
+  const tris = new Int32Array(mesh.liveTris * 3);
   const T = mesh.tris;
+  let w = 0;
   for (let t = 0; t < mesh.nt; t++) {
     const i = t * 3;
     const a = T[i], b = T[i + 1], c = T[i + 2];
     if (a === b && b === c) continue;
     const ra = remap[a], rb = remap[b], rc = remap[c];
     if (ra < 0 || rb < 0 || rc < 0) continue;
-    tris.push(ra, rb, rc);
+    tris[w++] = ra; tris[w++] = rb; tris[w++] = rc;
   }
-  return { remap, count: n, tris };
+  return { remap, count: n, tris: tris.subarray(0, w) };
+}
+
+// --- ASCII を直接バイト列へ書くための道具 ----------------------------------
+// OBJ は 1 面 1 行のテキストなので、行を JS 文字列で作って join すると
+// 面数ぶんの文字列確保になる。131 万面で 400 万個の文字列を作って 80MB へ
+// join していて 970ms、520 万面では 4.2 秒かかっていた。
+// 数字を自分で 10 進へ落として Uint8Array に詰めれば確保は 1 回で済む。
+
+/** 符号なし整数を 10 進で書く */
+function putUint(b, w, n) {
+  if (n === 0) { b[w++] = 48; return w; }
+  const s = w;
+  while (n > 0) { b[w++] = 48 + (n % 10); n = (n / 10) | 0; }
+  for (let i = s, j = w - 1; i < j; i++, j--) { const t = b[i]; b[i] = b[j]; b[j] = t; }
+  return w;
+}
+
+/**
+ * 小数 6 桁までで書く（末尾の 0 は落とす）。
+ * `Math.round(x * 1e6) / 1e6` を toString するのと同じ表現になる範囲を狙う。
+ * 指数表記は使わないので、極端に大きい値は桁が並ぶだけで壊れはしない。
+ */
+function putFloat(b, w, x) {
+  if (!isFinite(x)) x = 0;
+  if (x < 0) { b[w++] = 45; x = -x; }        // '-'
+  const n = Math.round(x * 1e6);
+  const ip = Math.floor(n / 1e6);
+  let fp = n - ip * 1e6;
+  w = putUint(b, w, ip);
+  if (fp > 0) {
+    b[w++] = 46;                             // '.'
+    // 末尾の 0 を落とすと桁数が減るので、先頭ゼロ埋めの桁数も一緒に減らす
+    let width = 6;
+    while (fp % 10 === 0) { fp /= 10; width--; }
+    let digits = 0;
+    for (let t = fp; t > 0; t = (t / 10) | 0) digits++;
+    for (let k = digits; k < width; k++) b[w++] = 48;
+    w = putUint(b, w, fp);
+  }
+  return w;
+}
+
+/** ASCII 文字列をそのまま詰める */
+function putStr(b, w, s) {
+  for (let i = 0; i < s.length; i++) b[w++] = s.charCodeAt(i) & 0x7f;
+  return w;
 }
 
 /**
  * @param {object} opt
  *   quads: remesh.quadDominant() の出力を渡すと四角優勢の面リストで書き出す。
  *          ZRemesher の出力は四角なので、他のツールで開いたときの見た目を近づけられる。
+ * @returns {Uint8Array} OBJ のバイト列（Blob へそのまま渡せる）
  */
 function exportOBJ(mesh, { withColor = true, name = 'websculpt', quads = null } = {}) {
   const { remap, count, tris } = buildRemap(mesh);
   const P = mesh.positions, N = mesh.normals, C = mesh.colors;
-  const out = [];
-  out.push(`# WebSculpt export`);
-  out.push(`# verts ${count} tris ${tris.length / 3}`);
-  out.push(`o ${name}`);
-  const f = (x) => (Math.round(x * 1e6) / 1e6);
+
+  // 行ごとの上限を見て、足りなくなったら倍にする。1 行の最大長を数え上げるより
+  // 「1 行書く前に余裕があるか見る」ほうが、桁数の見積もり違いで壊れない。
+  const LINE_MAX = 512;
+  let cap = 4096 + count * (withColor ? 96 : 56) + count * 56
+    + (quads ? quads.faces.length : tris.length) * 24;
+  let b = new Uint8Array(cap);
+  let w = 0;
+  const room = () => {
+    if (w + LINE_MAX <= b.length) return;
+    const nb = new Uint8Array(Math.max(b.length * 2, w + LINE_MAX));
+    nb.set(b.subarray(0, w));
+    b = nb;
+  };
+
+  room(); w = putStr(b, w, '# WebSculpt export\n# verts ');
+  w = putUint(b, w, count); w = putStr(b, w, ' tris ');
+  w = putUint(b, w, tris.length / 3); w = putStr(b, w, '\no ');
+  w = putStr(b, w, name); b[w++] = 10;
+
   for (let v = 0; v < mesh.nv; v++) {
     if (remap[v] < 0) continue;
     const i = v * 3;
+    room();
+    b[w++] = 118; b[w++] = 32;               // 'v '
+    w = putFloat(b, w, P[i]); b[w++] = 32;
+    w = putFloat(b, w, P[i + 1]); b[w++] = 32;
+    w = putFloat(b, w, P[i + 2]);
     if (withColor) {
-      out.push(`v ${f(P[i])} ${f(P[i + 1])} ${f(P[i + 2])} ${f(C[i])} ${f(C[i + 1])} ${f(C[i + 2])}`);
-    } else {
-      out.push(`v ${f(P[i])} ${f(P[i + 1])} ${f(P[i + 2])}`);
+      b[w++] = 32; w = putFloat(b, w, C[i]);
+      b[w++] = 32; w = putFloat(b, w, C[i + 1]);
+      b[w++] = 32; w = putFloat(b, w, C[i + 2]);
     }
+    b[w++] = 10;
   }
   for (let v = 0; v < mesh.nv; v++) {
     if (remap[v] < 0) continue;
     const i = v * 3;
-    out.push(`vn ${f(N[i])} ${f(N[i + 1])} ${f(N[i + 2])}`);
+    room();
+    b[w++] = 118; b[w++] = 110; b[w++] = 32; // 'vn '
+    w = putFloat(b, w, N[i]); b[w++] = 32;
+    w = putFloat(b, w, N[i + 1]); b[w++] = 32;
+    w = putFloat(b, w, N[i + 2]);
+    b[w++] = 10;
   }
+
   if (quads && quads.offsets && quads.offsets.length > 1) {
     // 四角優勢の面リストが渡されたらそれを書く（remesh.quadDominant の出力）。
     // 三角形も混ざるので、面ごとに頂点数が変わる形で出す。
     // 頂点番号はメッシュ側のものなので remap を通す。
     const F = quads.faces, O = quads.offsets;
     for (let k = 0; k + 1 < O.length; k++) {
-      let line = 'f';
+      const s = O[k], e = O[k + 1];
       let bad = false;
-      for (let i = O[k]; i < O[k + 1]; i++) {
-        const r = remap[F[i]];
-        if (r < 0) { bad = true; break; }
-        const n = r + 1;
-        line += ' ' + n + '//' + n;
+      for (let i = s; i < e; i++) if (remap[F[i]] < 0) { bad = true; break; }
+      if (bad) continue;
+      room();
+      b[w++] = 102;                          // 'f'
+      for (let i = s; i < e; i++) {
+        const n = remap[F[i]] + 1;
+        b[w++] = 32;
+        w = putUint(b, w, n); b[w++] = 47; b[w++] = 47;
+        w = putUint(b, w, n);
       }
-      if (!bad) out.push(line);
+      b[w++] = 10;
     }
   } else {
     for (let i = 0; i < tris.length; i += 3) {
-      const a = tris[i] + 1, b = tris[i + 1] + 1, c = tris[i + 2] + 1;
-      out.push(`f ${a}//${a} ${b}//${b} ${c}//${c}`);
+      room();
+      b[w++] = 102;                          // 'f'
+      for (let k = 0; k < 3; k++) {
+        const n = tris[i + k] + 1;
+        b[w++] = 32;
+        w = putUint(b, w, n); b[w++] = 47; b[w++] = 47;
+        w = putUint(b, w, n);
+      }
+      b[w++] = 10;
     }
   }
-  return out.join('\n') + '\n';
+  return b.subarray(0, w);
 }
 
 function exportSTL(mesh) {
@@ -15049,6 +15391,7 @@ __M['remesh.js'] = (function () {
 
 const { splitEdge, collapseEdge, flipEdge } = __M['dyntopo.js'];
 const { RING_STRIDE } = __M['mesh.js'];
+const { wasmUploadSurface, wasmReleaseSurface, wasmProjectPoints } = __M['wasmkernels.js'];
 
 /** 点と三角形の最短距離の 2 乗と最近点（Ericson, Real-Time Collision Detection） */
 function closestOnTri(px, py, pz, ax, ay, az, bx, by, bz, cx, cy, cz, out) {
@@ -15421,6 +15764,11 @@ function remesh(mesh, opts = {}) {
   // 頂点ごとに「前回当たった三角形」を覚えておく。緩和の移動量は小さいので
   // ほとんどの頂点は同じ面に当たり続け、格子を引かずに済む。
   let projHint = doProject ? new Int32Array(mesh.capV).fill(-1) : null;
+  // 格子は反復のあいだ変わらないので WASM 側に置いたまま使い回す。
+  // 反復ごとに入れ直すと 520 万面で毎回 100MB 超のコピーになる。
+  const wasmSurf = ref ? wasmUploadSurface(ref) : null;
+  // 投影しない頂点の印（毎反復で作り直す作業配列）
+  let skip = null;
 
   // 曲率適応の重み。mesh.curv は -1..1 に正規化した平均曲率なので、
   // 絶対値が大きいほど（溝や稜線ほど）短いエッジを目標にする。
@@ -15561,29 +15909,56 @@ function remesh(mesh, opts = {}) {
       // ヒントとして信用できる距離。緩和で動く量は目標辺長の一部なので、
       // これより遠い当たりは「別の頂点のヒントを引き継いだ」と判断する。
       const hintMaxD2 = (L * 0.5) * (L * 0.5);
+      // 投影しない頂点（死んでいる / 孤立 / 実質動いていない）に印を付ける。
+      // WASM に出すときも同じ判定を使うので、ここで 1 度だけ作る。
+      if (!skip || skip.length < mesh.nv) skip = new Uint8Array(mesh.capV);
       for (let v = 0; v < mesh.nv; v++) {
-        if (!mesh.vAlive[v] || cnt[v] === 0) continue;
         const i = v * 3;
+        if (!mesh.vAlive[v] || cnt[v] === 0) { skip[v] = 1; continue; }
         const dx = tgt[i] - P[i], dy = tgt[i + 1] - P[i + 1], dz = tgt[i + 2] - P[i + 2];
-        if (dx * dx + dy * dy + dz * dz < moveEps2) continue;   // 実質動いていない
-        if (ref) {
-          // まず前回当たった面だけを試す。緩和の移動量は小さいので大半はここで済む。
-          const hint = projHint[v];
-          const dh = ref.tryHint(tgt[i], tgt[i + 1], tgt[i + 2], hint, tmp, hintMaxD2);
-          if (dh >= 0) {
-            P[i] = tmp[0]; P[i + 1] = tmp[1]; P[i + 2] = tmp[2];
-            stats.projected++; stats.hinted++;
-            continue;
-          }
-          const ti = ref.closest(tgt[i], tgt[i + 1], tgt[i + 2], tmp);
-          if (ti >= 0) {
-            projHint[v] = ti;
-            P[i] = tmp[0]; P[i + 1] = tmp[1]; P[i + 2] = tmp[2];
-            stats.projected++;
-            continue;
+        skip[v] = dx * dx + dy * dy + dz * dz < moveEps2 ? 1 : 0;
+      }
+      // 表面がある場合はまとめて WASM へ。1 反復で 90 万クエリ走るので、
+      // 頂点ごとに JS へ戻ってくる形だと呼び出しだけで効かなくなる。
+      let didWasm = false;
+      if (ref && wasmSurf) {
+        const r = wasmProjectPoints(wasmSurf, tgt, projHint, skip, mesh.nv, hintMaxD2);
+        if (r) {
+          didWasm = true;
+          stats.projected += r.projected;
+          stats.hinted += r.hinted;
+          // 投影しなかった点も含めて tgt をそのまま採用する（skip の点は
+          // tgt = P のままなので上書きしても変わらない）
+          for (let v = 0; v < mesh.nv; v++) {
+            if (skip[v]) continue;
+            const i = v * 3;
+            P[i] = tgt[i]; P[i + 1] = tgt[i + 1]; P[i + 2] = tgt[i + 2];
           }
         }
-        P[i] = tgt[i]; P[i + 1] = tgt[i + 1]; P[i + 2] = tgt[i + 2];
+      }
+      if (!didWasm) {
+        for (let v = 0; v < mesh.nv; v++) {
+          if (skip[v]) continue;
+          const i = v * 3;
+          if (ref) {
+            // まず前回当たった面だけを試す。緩和の移動量は小さいので大半はここで済む。
+            const hint = projHint[v];
+            const dh = ref.tryHint(tgt[i], tgt[i + 1], tgt[i + 2], hint, tmp, hintMaxD2);
+            if (dh >= 0) {
+              P[i] = tmp[0]; P[i + 1] = tmp[1]; P[i + 2] = tmp[2];
+              stats.projected++; stats.hinted++;
+              continue;
+            }
+            const ti = ref.closest(tgt[i], tgt[i + 1], tgt[i + 2], tmp);
+            if (ti >= 0) {
+              projHint[v] = ti;
+              P[i] = tmp[0]; P[i + 1] = tmp[1]; P[i + 2] = tmp[2];
+              stats.projected++;
+              continue;
+            }
+          }
+          P[i] = tgt[i]; P[i + 1] = tgt[i + 1]; P[i + 2] = tgt[i + 2];
+        }
       }
       phase.project += now() - _tj;
     }
@@ -15606,6 +15981,7 @@ function remesh(mesh, opts = {}) {
     }
   }
 
+  if (wasmSurf) wasmReleaseSurface(wasmSurf);
   donePasses = estPasses;
   tell('仕上げ');
   mesh.compact(true);
@@ -15634,31 +16010,41 @@ function remesh(mesh, opts = {}) {
  * 見積もり、良い順に取っていく。質は
  *   * 2 枚の法線がそろっているか（平坦なペアほど良い）
  *   * できる四角の角が 90 度に近いか
- * の積。完全マッチングを解くほどの差は出ないので、ソート + 貪欲で十分。
+ * の積。完全マッチングを解くほどの差は出ないので、良い順の貪欲で十分。
+ *
+ * 全部を型付き配列でやる。以前は
+ *   * 辺 → 三角形を `Map<number, number|number[]>` で持ち、内部辺ごとに配列を確保
+ *   * 候補を `{t0,t1,quad:[...],score}` のオブジェクト配列にして比較関数でソート
+ * としていて、131 万面（65 万頂点）で 1.5 秒かかっていた。ボタン 1 回で 1.5 秒
+ * 固まるので、隣接は ring から引き（確保ゼロ）、順序は数え上げソートにした。
  *
  * @returns {{ faces: Int32Array, offsets: Int32Array, quads: number, tris: number }}
  *   faces は面ごとの頂点を並べたもの、offsets[i]..offsets[i+1] が i 番目の面。
  */
 function quadDominant(mesh) {
   const T = mesh.tris, P = mesh.positions;
-  // 辺 → 隣接三角形（最大 2）
-  const edgeMap = new Map();
-  const alive = [];
+  const RC = mesh.ringCount, RD = mesh.ringData, RX = mesh.ringExt;
+
+  const alive = new Int32Array(mesh.liveTris);
+  let na = 0;
   for (let t = 0; t < mesh.nt; t++) {
-    const i = t * 3, a = T[i], b = T[i + 1], c = T[i + 2];
-    if (a === b && b === c) continue;
-    alive.push(t);
-    for (let e = 0; e < 3; e++) {
-      let x = e === 0 ? a : (e === 1 ? b : c);
-      let y = e === 0 ? b : (e === 1 ? c : a);
-      if (x > y) { const s = x; x = y; y = s; }
-      const key = x * 8388608 + y;
-      const cur = edgeMap.get(key);
-      if (cur === undefined) edgeMap.set(key, t);
-      else if (typeof cur === 'number') edgeMap.set(key, [cur, t]);
-    }
+    const i = t * 3;
+    if (T[i] === T[i + 1] && T[i + 1] === T[i + 2]) continue;
+    alive[na++] = t;
+  }
+  if (na === 0) {
+    return { faces: new Int32Array(0), offsets: new Int32Array(1), quads: 0, tris: 0, ratio: 0 };
   }
 
+  // 内部辺は閉多様体なら 3F/2 本。境界があればそれより少ないので上限として使える。
+  const maxPair = ((na * 3) >> 1) + 1;
+  const pT0 = new Int32Array(maxPair);
+  const pT1 = new Int32Array(maxPair);
+  const pQuad = new Int32Array(maxPair * 4);
+  const pScore = new Float32Array(maxPair);
+  let np = 0;
+
+  // 三角形 t の単位法線を out へ
   const nrm = (t, out) => {
     const i = t * 3, a = T[i] * 3, b = T[i + 1] * 3, c = T[i + 2] * 3;
     const abx = P[b] - P[a], aby = P[b + 1] - P[a + 1], abz = P[b + 2] - P[a + 2];
@@ -15668,62 +16054,104 @@ function quadDominant(mesh) {
     out[0] /= l; out[1] /= l; out[2] /= l;
   };
   const n0 = new Float64Array(3), n1 = new Float64Array(3);
+  const quad = new Int32Array(4);
 
-  // 候補ペアを質つきで集める
-  const cand = [];
-  for (const [key, val] of edgeMap) {
-    if (typeof val === 'number') continue;
-    const [t0, t1] = val;
-    const x = Math.floor(key / 8388608), y = key % 8388608;
-    // 四角の順序 (x, o1, y, o0) を作る
-    const opp = (t) => {
-      const i = t * 3;
-      for (let e = 0; e < 3; e++) { const v = T[i + e]; if (v !== x && v !== y) return v; }
-      return -1;
-    };
-    const o0 = opp(t0), o1 = opp(t1);
-    if (o0 < 0 || o1 < 0 || o0 === o1) continue;
-    nrm(t0, n0); nrm(t1, n1);
-    const flat = Math.max(0, n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2]);
-    // 角の質: 四角 (x, o1, y, o0) の 4 角が 90 度に近いか
-    const q = [x, o1, y, o0];
-    let ang = 1;
-    for (let i = 0; i < 4; i++) {
-      const p = q[i] * 3, pv = q[(i + 3) % 4] * 3, nx2 = q[(i + 1) % 4] * 3;
-      const ux = P[pv] - P[p], uy = P[pv + 1] - P[p + 1], uz = P[pv + 2] - P[p + 2];
-      const vx = P[nx2] - P[p], vy = P[nx2 + 1] - P[p + 1], vz = P[nx2 + 2] - P[p + 2];
-      const lu = Math.hypot(ux, uy, uz) || 1, lv = Math.hypot(vx, vy, vz) || 1;
-      const cs = (ux * vx + uy * vy + uz * vz) / (lu * lv);
-      // cos が 0 に近いほど良い
-      ang *= 1 - Math.min(1, Math.abs(cs));
+  for (let k = 0; k < na; k++) {
+    const t0 = alive[k], i0 = t0 * 3;
+    const va = T[i0], vb = T[i0 + 1], vc = T[i0 + 2];
+    for (let e = 0; e < 3; e++) {
+      const x = e === 0 ? va : (e === 1 ? vb : vc);
+      const y = e === 0 ? vb : (e === 1 ? vc : va);
+      // 辺 (x,y) を共有するもう 1 枚を ring から引く。x の隣接三角形のうち
+      // y を含むもの。1 辺 1 回だけ見るために t1 > t0 に限る。
+      const c = RC[x];
+      if (c === 0) continue;
+      const base = c <= RING_STRIDE ? x * RING_STRIDE : -1;
+      const ex = base < 0 ? RX[x] : null;
+      let t1 = -1;
+      for (let j = 0; j < c; j++) {
+        const t = ex ? ex[j] : RD[base + j];
+        if (t <= t0) continue;
+        const i = t * 3;
+        if (T[i] === y || T[i + 1] === y || T[i + 2] === y) { t1 = t; break; }
+      }
+      if (t1 < 0) continue;
+
+      // 四角は (x, o1, y, o0) の順。o0 / o1 は各三角形の「辺に乗っていない頂点」
+      let o0 = -1, o1 = -1;
+      for (let j = 0; j < 3; j++) { const v = T[i0 + j]; if (v !== x && v !== y) { o0 = v; break; } }
+      const i1 = t1 * 3;
+      for (let j = 0; j < 3; j++) { const v = T[i1 + j]; if (v !== x && v !== y) { o1 = v; break; } }
+      if (o0 < 0 || o1 < 0 || o0 === o1) continue;
+
+      nrm(t0, n0); nrm(t1, n1);
+      const flat = Math.max(0, n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2]);
+      quad[0] = x; quad[1] = o1; quad[2] = y; quad[3] = o0;
+      let ang = 1;
+      for (let j = 0; j < 4; j++) {
+        const p = quad[j] * 3, pv = quad[(j + 3) & 3] * 3, nx2 = quad[(j + 1) & 3] * 3;
+        const ux = P[pv] - P[p], uy = P[pv + 1] - P[p + 1], uz = P[pv + 2] - P[p + 2];
+        const vx = P[nx2] - P[p], vy = P[nx2 + 1] - P[p + 1], vz = P[nx2 + 2] - P[p + 2];
+        const lu = Math.hypot(ux, uy, uz) || 1, lv = Math.hypot(vx, vy, vz) || 1;
+        const cs = (ux * vx + uy * vy + uz * vz) / (lu * lv);
+        ang *= 1 - Math.min(1, Math.abs(cs));   // cos が 0 に近いほど良い
+      }
+      if (np >= maxPair) break;                  // 非多様体で上限を超えたら打ち切る
+      pT0[np] = t0; pT1[np] = t1;
+      pQuad[np * 4] = quad[0]; pQuad[np * 4 + 1] = quad[1];
+      pQuad[np * 4 + 2] = quad[2]; pQuad[np * 4 + 3] = quad[3];
+      pScore[np] = flat * (0.2 + 0.8 * Math.pow(ang, 0.25));
+      np++;
     }
-    cand.push({ t0, t1, quad: q, score: flat * (0.2 + 0.8 * Math.pow(ang, 0.25)) });
   }
-  cand.sort((a, b) => b.score - a.score);
 
+  // 質の高い順に並べる。比較関数でソートすると 200 万本でそれだけで 1 秒近い。
+  // 質は 0..1 に収まるので 1024 段のバケットに入れて数え上げで並べる。
+  // 同じバケット内（質の差 0.001 未満）の順序は貪欲の結果をほぼ変えない。
+  const NB = 1024;
+  const bucket = new Int32Array(np);
+  const start = new Int32Array(NB);
+  for (let i = 0; i < np; i++) {
+    let b = (pScore[i] * NB) | 0;
+    if (b >= NB) b = NB - 1; else if (b < 0) b = 0;
+    bucket[i] = b;
+    start[b]++;
+  }
+  // 質の高いバケットを先頭にする（後ろから累積）
+  let acc = 0;
+  for (let b = NB - 1; b >= 0; b--) { const n = start[b]; start[b] = acc; acc += n; }
+  const order = new Int32Array(np);
+  for (let i = 0; i < np; i++) order[start[bucket[i]]++] = i;
+
+  // 面数の上限: 全部が四角なら 2·na、全部が三角なら 3·na
+  const faces = new Int32Array(na * 3);
+  const offsets = new Int32Array(na + 1);
   const used = new Uint8Array(mesh.nt);
-  const faces = [];
-  const offsets = [0];
-  let quads = 0;
-  for (const c of cand) {
-    if (used[c.t0] || used[c.t1]) continue;
-    used[c.t0] = 1; used[c.t1] = 1;
-    faces.push(c.quad[0], c.quad[1], c.quad[2], c.quad[3]);
-    offsets.push(faces.length);
+  let fw = 0, ow = 1, quads = 0;
+  for (let k = 0; k < np; k++) {
+    const i = order[k];
+    const t0 = pT0[i], t1 = pT1[i];
+    if (used[t0] || used[t1]) continue;
+    used[t0] = 1; used[t1] = 1;
+    const q = i * 4;
+    faces[fw++] = pQuad[q]; faces[fw++] = pQuad[q + 1];
+    faces[fw++] = pQuad[q + 2]; faces[fw++] = pQuad[q + 3];
+    offsets[ow++] = fw;
     quads++;
   }
   let leftover = 0;
-  for (const t of alive) {
+  for (let k = 0; k < na; k++) {
+    const t = alive[k];
     if (used[t]) continue;
     const i = t * 3;
-    faces.push(T[i], T[i + 1], T[i + 2]);
-    offsets.push(faces.length);
+    faces[fw++] = T[i]; faces[fw++] = T[i + 1]; faces[fw++] = T[i + 2];
+    offsets[ow++] = fw;
     leftover++;
   }
   return {
-    faces: new Int32Array(faces), offsets: new Int32Array(offsets),
+    faces: faces.subarray(0, fw), offsets: offsets.subarray(0, ow),
     quads, tris: leftover,
-    ratio: quads * 2 / Math.max(1, alive.length),
+    ratio: quads * 2 / na,
   };
 }
   return { SurfaceRef, edgeLengthForTris, remesh, quadDominant };
@@ -15751,6 +16179,8 @@ __M['remeshworker.js'] = (function () {
 // initRemeshWorker() が false を返し、呼び出し側がメインスレッドで実行する。
 // ---------------------------------------------------------------------------
 
+const { wasmFieldModule } = __M['wasmkernels.js'];
+
 // ワーカーは「モジュール URL を受け取って import する」だけの薄い殻にする。
 // これなら remesh の実装はワーカー側でも本体と同じものが 1 つだけになる。
 const WORKER_SRC = `
@@ -15763,7 +16193,14 @@ self.onmessage = async (ev) => {
     if (m.type === 'init') {
       remeshMod = await import(m.url);
       meshMod = await import(m.meshUrl);
-      self.postMessage({ type: 'ready' });
+      // WASM カーネル（法線 / 曲率 / 表面投影）もワーカー側で立ち上げる。
+      // コンパイル済みモジュールを貰うので再コンパイルは要らない。
+      let wasm = false;
+      if (m.wasmModule) {
+        const k = await import(m.kernelUrl);
+        wasm = await k.initWasmFieldFromModule(m.wasmModule);
+      }
+      self.postMessage({ type: 'ready', wasm });
       return;
     }
     if (m.type === 'remesh') {
@@ -15820,9 +16257,12 @@ let state = 'idle';      // idle | ready | failed
 let failReason = '';
 let initPromise = null;
 let jobId = 0;
+let wasmInWorker = false;
 
 function remeshWorkerState() { return state; }
 function remeshWorkerError() { return failReason; }
+/** ワーカー側で WASM カーネルが立ち上がったか（診断とテスト用） */
+function remeshWorkerWasm() { return wasmInWorker; }
 
 /**
  * ワーカーを用意する。読み込めなければ静かに失敗して false を返す
@@ -15856,17 +16296,24 @@ async function _init() {
     if (!/^https?:$/.test(base.protocol)) throw new Error('http 経由でないため import できません');
     const remeshUrl = new URL('./remesh.js', base).href;
     const meshUrl = new URL('./mesh.js', base).href;
+    const kernelUrl = new URL('./wasmkernels.js', base).href;
 
     blobUrl = URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' }));
     worker = new Worker(blobUrl, { type: 'module' });
     await new Promise((res, rej) => {
       const to = setTimeout(() => rej(new Error('ワーカー初期化がタイムアウト')), 10000);
       worker.onmessage = (ev) => {
-        if (ev.data && ev.data.type === 'ready') { clearTimeout(to); res(); }
-        else if (ev.data && ev.data.type === 'error') { clearTimeout(to); rej(new Error(ev.data.message)); }
+        if (ev.data && ev.data.type === 'ready') {
+          clearTimeout(to);
+          wasmInWorker = !!ev.data.wasm;
+          res();
+        } else if (ev.data && ev.data.type === 'error') { clearTimeout(to); rej(new Error(ev.data.message)); }
       };
       worker.onerror = (e) => { clearTimeout(to); rej(new Error(e.message || 'ワーカーエラー')); };
-      worker.postMessage({ type: 'init', url: remeshUrl, meshUrl });
+      worker.postMessage({
+        type: 'init', url: remeshUrl, meshUrl, kernelUrl,
+        wasmModule: wasmFieldModule(),
+      });
     });
     meshModUrl = meshUrl;
     state = 'ready';
@@ -15957,7 +16404,7 @@ async function remeshInWorker(mesh, opts, onProgress = null) {
     return null;
   }
 }
-  return { remeshWorkerState, remeshWorkerError, initRemeshWorker, disposeRemeshWorker, remeshInWorker };
+  return { remeshWorkerState, remeshWorkerError, remeshWorkerWasm, initRemeshWorker, disposeRemeshWorker, remeshInWorker };
 })();
 
 /* ===== tools.js ===== */
@@ -15984,7 +16431,7 @@ const { Transpose } = __M['transpose.js'];
 const { clipPlane, trimPlane, slicePlane, mirrorWeld, planeFromScreenLine, planeFromAxis } = __M['clip.js'];
 const { STROKES, strokeDefaults } = __M['alpha.js'];
 const { remesh, quadDominant, edgeLengthForTris } = __M['remesh.js'];
-const { initRemeshWorker, remeshInWorker, remeshWorkerState, remeshWorkerError } = __M['remeshworker.js'];
+const { initRemeshWorker, remeshInWorker, remeshWorkerState, remeshWorkerError, remeshWorkerWasm } = __M['remeshworker.js'];
 const { clamp } = __M['math.js'];
 
 /** 変形とマスク操作の既定パラメータ一式（state に置く） */
@@ -16431,7 +16878,9 @@ class Tools {
   }
 
   /** リメッシュのワーカーが使える状態か（診断とテスト用） */
-  remeshWorkerInfo() { return { state: remeshWorkerState(), error: remeshWorkerError() }; }
+  remeshWorkerInfo() {
+    return { state: remeshWorkerState(), error: remeshWorkerError(), wasm: remeshWorkerWasm() };
+  }
 
   /** 現在の形を四角優勢にしたときの面の内訳（書き出しと表示用） */
   quadStats() {
@@ -17001,7 +17450,7 @@ const { BRUSH_IDS, BRUSHES, usesGrabPlane } = __M['brushes.js'];
 const { buildUI } = __M['ui.js'];
 const { exportOBJ, exportSTL, exportPLY, importOBJ, download } = __M['io.js'];
 const store = __M['store.js'];
-const { initWasmField, wasmFieldState, wasmFieldError, wasmFieldModule } = __M['wasmfield.js'];
+const { initWasmField, wasmFieldState, wasmFieldError, wasmFieldModule } = __M['wasmkernels.js'];
 const { dynamesh } = __M['dynamesh.js'];
 const { initParallelField, parallelState, parallelWorkers } = __M['parallelfield.js'];
 const { Tools, defaultToolState } = __M['tools.js'];

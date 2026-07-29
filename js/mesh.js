@@ -11,6 +11,8 @@
 //  * GPU 転送は dirty レンジ（最小/最大インデックス）のみ。
 // ---------------------------------------------------------------------------
 
+import { wasmNormals, wasmCurvature } from './wasmkernels.js';
+
 export const MAX_VERTS_HARD = 2000000;
 
 // dirty 管理のブロックサイズ（2^11 = 2048 要素ごと）
@@ -538,6 +540,9 @@ export class SculptMesh {
   computeAllCurvature() {
     const nv = this.nv;
     if (nv === 0) return;
+    // 平坦な配列だけを触るループなので WASM に出す。260 万頂点で 122ms → 34ms。
+    // トポロジが変わるたびに走るので、ここが効くと全機能が速くなる。
+    if (wasmCurvature(this)) { this.markAllDirty(); return; }
     const P = this.positions, N = this.normals, T = this.tris, CV = this.curv;
 
     if (!this._cvSum || this._cvSum.length < nv * 3) {
@@ -596,6 +601,7 @@ export class SculptMesh {
   }
 
   computeAllNormals() {
+    if (wasmNormals(this)) { this.markAllDirty(); return; }
     const P = this.positions, N = this.normals, T = this.tris;
     N.fill(0, 0, this.nv * 3);
     for (let t = 0; t < this.nt; t++) {

@@ -13,10 +13,6 @@
 // Sculptris Pro と SDiv は併用できない）。topoVersion で検出して破棄する。
 // ---------------------------------------------------------------------------
 
-const EKEY = 2097152;
-
-function edgeKey(a, b) { return a < b ? a * EKEY + b : b * EKEY + a; }
-
 /** 粗いメッシュの頂点法線を求める（面積加重） */
 function coarseNormals(pos, tris, nv) {
   const N = new Float32Array(nv * 3);
@@ -82,28 +78,59 @@ function midFrame(pos, nrm, a, b, out) {
 
 /**
  * 中点分割の接続を作る。
- * @returns {{indices, edgeA, edgeB, midOf}} midOf は edgeKey → 中点インデックス
+ *
+ * 辺 → 中点の対応は開番地法のハッシュ表を型付き配列で持つ。以前は
+ * `Map<number, number>` に `a * 2^21 + b` を入れていたが、キーが 2^31 を超えて
+ * 小整数として扱えず、131 万面の Divide で 400 万回の Map 操作に 750ms
+ * かかっていた。Divide は一番よく使う重い操作なのでここが効く。
+ *
+ * @returns {{indices, edgeA, edgeB, midIdx}}
+ *   midIdx は粗い三角形ごとの中点番号 (ab, bc, ca)。これを取っておくと
+ *   SDiv 上げのときにハッシュ表を作り直さずに接続を復元できる。
  */
 function buildSubdivision(coarseTris, coarseNv) {
-  const midOf = new Map();
-  const edgeA = [];
-  const edgeB = [];
+  // 閉多様体なら辺は 3F/2 本。境界があると増えるので 3F を上限にする。
+  const maxEdge = coarseTris.length;
+  let cap = 16;
+  while (cap < maxEdge * 2) cap <<= 1;        // 使用率 50% 以下に保つ
+  const hmask = cap - 1;
+  const kA = new Int32Array(cap).fill(-1);    // -1 = 空きスロット
+  const kB = new Int32Array(cap);
+  const kM = new Int32Array(cap);
+  const edgeA = new Int32Array(maxEdge);
+  const edgeB = new Int32Array(maxEdge);
+  let nEdge = 0;
   let next = coarseNv;
-  const mid = (a, b) => {
-    const k = edgeKey(a, b);
-    let m = midOf.get(k);
-    if (m === undefined) {
-      m = next++;
-      midOf.set(k, m);
-      edgeA.push(a); edgeB.push(b);
-    }
-    return m;
-  };
+
   const idx = new Uint32Array(coarseTris.length * 4);
+  const midIdx = new Int32Array(coarseTris.length);
   let w = 0;
   for (let i = 0; i < coarseTris.length; i += 3) {
     const a = coarseTris[i], b = coarseTris[i + 1], c = coarseTris[i + 2];
-    const ab = mid(a, b), bc = mid(b, c), ca = mid(c, a);
+    let ab = -1, bc = -1, ca = -1;
+    // 3 辺を同じ手順で処理する。関数にすると 400 万回の呼び出しになるので展開する。
+    for (let e = 0; e < 3; e++) {
+      const u = e === 0 ? a : (e === 1 ? b : c);
+      const v = e === 0 ? b : (e === 1 ? c : a);
+      const lo = u < v ? u : v, hi = u < v ? v : u;
+      // 32bit で混ぜる。imul でないと浮動小数になってビット演算前に丸められる。
+      let h = (Math.imul(lo, 0x9e3779b1) ^ Math.imul(hi, 0x85ebca77)) >>> 0;
+      h = (h ^ (h >>> 15)) & hmask;
+      let m = -1;
+      for (;;) {
+        const sa = kA[h];
+        if (sa === -1) {
+          m = next++;
+          kA[h] = lo; kB[h] = hi; kM[h] = m;
+          edgeA[nEdge] = lo; edgeB[nEdge] = hi; nEdge++;
+          break;
+        }
+        if (sa === lo && kB[h] === hi) { m = kM[h]; break; }
+        h = (h + 1) & hmask;
+      }
+      if (e === 0) ab = m; else if (e === 1) bc = m; else ca = m;
+    }
+    midIdx[i] = ab; midIdx[i + 1] = bc; midIdx[i + 2] = ca;
     idx[w++] = a; idx[w++] = ab; idx[w++] = ca;
     idx[w++] = b; idx[w++] = bc; idx[w++] = ab;
     idx[w++] = c; idx[w++] = ca; idx[w++] = bc;
@@ -111,10 +138,29 @@ function buildSubdivision(coarseTris, coarseNv) {
   }
   return {
     indices: idx,
-    edgeA: new Int32Array(edgeA),
-    edgeB: new Int32Array(edgeB),
-    midOf,
+    edgeA: edgeA.subarray(0, nEdge),
+    edgeB: edgeB.subarray(0, nEdge),
+    midIdx,
   };
+}
+
+/**
+ * 保存しておいた中点番号から細かい接続を組み直す。
+ * buildSubdivision の後半と同じ並べ方でなければならない（下げ / 上げの往復が
+ * 同じインデックスになる前提が崩れる）。
+ */
+function rebuildIndices(coarseTris, midIdx) {
+  const idx = new Uint32Array(coarseTris.length * 4);
+  let w = 0;
+  for (let i = 0; i < coarseTris.length; i += 3) {
+    const a = coarseTris[i], b = coarseTris[i + 1], c = coarseTris[i + 2];
+    const ab = midIdx[i], bc = midIdx[i + 1], ca = midIdx[i + 2];
+    idx[w++] = a; idx[w++] = ab; idx[w++] = ca;
+    idx[w++] = b; idx[w++] = bc; idx[w++] = ab;
+    idx[w++] = c; idx[w++] = ca; idx[w++] = bc;
+    idx[w++] = ab; idx[w++] = bc; idx[w++] = ca;
+  }
+  return idx;
 }
 
 export class SubdivLevels {
@@ -199,6 +245,9 @@ export class SubdivLevels {
       coarseNv: nv,
       edgeA: sub.edgeA,
       edgeB: sub.edgeB,
+      // 中点番号を取っておく。上げるたびにハッシュ表を作り直すと、
+      // 131 万面で 270ms ほど「すでに分かっていること」を計算し直すことになる。
+      midIdx: sub.midIdx,
       // 下げるときに埋める
       local: null,
       fineCol: null,
@@ -295,18 +344,21 @@ export class SubdivLevels {
       msk[nv + k] = L.fineMask[k];
     }
 
-    // 接続は保存済みの粗い面から決まるので、下げたときと同じものが再現される
-    const sub = buildSubdivision(L.coarseTris, nv);
-    mesh.setGeometry(pos, sub.indices, col, msk);
+    // 接続は分割したときに確定しているので、取っておいた中点番号から組み直す。
+    // 古い保存データには midIdx が無いので、そのときだけハッシュ表を作り直す。
+    if (!L.midIdx) L.midIdx = buildSubdivision(L.coarseTris, nv).midIdx;
+    const indices = rebuildIndices(L.coarseTris, L.midIdx);
+    mesh.setGeometry(pos, indices, col, msk);
     this.cur++;
     this._sync(mesh);
-    return { level: this.cur, maxLevel: this.levels.length, verts: fineNv, tris: sub.indices.length / 3 };
+    return { level: this.cur, maxLevel: this.levels.length, verts: fineNv, tris: indices.length / 3 };
   }
 
   bytes() {
     let b = 0;
     for (const L of this.levels) {
       b += L.coarseTris.byteLength + L.edgeA.byteLength + L.edgeB.byteLength;
+      if (L.midIdx) b += L.midIdx.byteLength;
       if (L.local) b += L.local.byteLength + L.fineCol.byteLength + L.fineMask.byteLength;
     }
     return b;

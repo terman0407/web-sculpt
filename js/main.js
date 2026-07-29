@@ -11,7 +11,7 @@ import { BRUSH_IDS, BRUSHES, usesGrabPlane } from './brushes.js';
 import { buildUI } from './ui.js';
 import { exportOBJ, exportSTL, exportPLY, importOBJ, download } from './io.js';
 import * as store from './store.js';
-import { initWasmField, wasmFieldState, wasmFieldError, wasmFieldModule } from './wasmfield.js';
+import { initWasmField, wasmFieldState, wasmFieldError, wasmFieldModule } from './wasmkernels.js';
 import { dynamesh } from './dynamesh.js';
 import { initParallelField, parallelState, parallelWorkers } from './parallelfield.js';
 import { Tools, defaultToolState } from './tools.js';

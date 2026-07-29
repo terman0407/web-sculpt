@@ -14,7 +14,7 @@
 // ---------------------------------------------------------------------------
 
 import { clamp } from './math.js';
-import { wasmSplat, wasmFieldReady } from './wasmfield.js';
+import { wasmSplat, wasmFieldReady } from './wasmkernels.js';
 import { parallelSplat, parallelState, lastTiming, buildTiming } from './parallelfield.js';
 
 const LARGE = 1e9;

@@ -5,7 +5,8 @@ import { splitEdge, collapseEdge, refineRegion } from '../js/dyntopo.js';
 import { exportOBJ, exportSTL, exportPLY, importOBJ } from '../js/io.js';
 import { BRUSH_IDS } from '../js/brushes.js';
 import { dynamesh, hasBoundary, taubinSmooth } from '../js/dynamesh.js';
-import { initWasmFieldFromBytes, wasmFieldReady } from '../js/wasmfield.js';
+import { initWasmFieldFromBytes, wasmFieldReady, setWasmKernels } from '../js/wasmkernels.js';
+import { remesh } from '../js/remesh.js';
 import { readFileSync as _readFileSync } from 'node:fs';
 import { SubdivLevels } from '../js/subdiv.js';
 import { falloff } from '../js/brushes.js';
@@ -285,7 +286,10 @@ head('入出力');
   const m = new SculptMesh();
   m.setGeometry(g.positions, g.indices);
   m.removeTriangle(5);        // 穴あきでも書き出せるか
-  const obj = exportOBJ(m);
+  // exportOBJ はバイト列を返す（Blob へそのまま渡せる形）
+  const objBytes = exportOBJ(m);
+  ok(objBytes instanceof Uint8Array, 'exportOBJ が Uint8Array を返していない');
+  const obj = new TextDecoder().decode(objBytes);
   ok(obj.split('\n').filter(l => l.startsWith('v ')).length === m.liveVerts, 'OBJ の頂点数が合わない');
   ok(obj.split('\n').filter(l => l.startsWith('f ')).length === m.liveTris, 'OBJ の面数が合わない');
   const stl = exportSTL(m);
@@ -875,8 +879,8 @@ head('保存用のパック');
 head('WASM 距離場（JS 版との一致）');
 {
   let bytes = null;
-  try { bytes = _readFileSync(new URL('../wasm/dynafield.wasm', import.meta.url)); }
-  catch { console.log('  wasm/dynafield.wasm が無いのでスキップ（npm run build:wasm で生成）'); }
+  try { bytes = _readFileSync(new URL('../wasm/kernels.wasm', import.meta.url)); }
+  catch { console.log('  wasm/kernels.wasm が無いのでスキップ（npm run build:wasm で生成）'); }
 
   if (bytes) {
     const g = PRIMITIVES.sphere();
@@ -943,6 +947,84 @@ head('WASM 距離場（JS 版との一致）');
       ok(allOk && pages() === base, `LIFO 解放を 10 回繰り返してもメモリが増えない (${base} → ${pages()} ページ)`);
       for (let r = 0; r < 10; r++) allOk = batch([0, 1, 3, 2]) && allOk;
       ok(allOk && pages() === base, `順不同の解放でも増えない (${pages()} ページ)`);
+    }
+
+    // --- 法線 / 曲率 / 投影が JS 版と一致するか -----------------------------
+    // これらは全機能の下敷きなので、WASM 版がわずかにずれるだけで
+    // 「WASM のときだけ形が変わる」類のバグになる。ビット単位で突き合わせる。
+    head('WASM カーネル（JS 版との一致）');
+    {
+      const build = () => {
+        const gg = PRIMITIVES.sphere();
+        const mm = new SculptMesh();
+        mm.setGeometry(gg.positions, gg.indices);
+        const stt = makeState();
+        const ss = new Sculptor(mm, stt);
+        stt.worldRadius = 0.3;
+        ss.divide();
+        // 曲率が場所によって変わる形にする（平らな球のままだと差が出ない）
+        const p = new Float32Array(3);
+        for (let seed = 0; seed < 6; seed++) {
+          const at = (u) => {
+            const th = seed * 0.9 + u * 1.4, ph = -0.7 + Math.sin(seed + u * 2) * 0.8;
+            p[0] = Math.cos(ph) * Math.cos(th); p[1] = Math.sin(ph); p[2] = Math.cos(ph) * Math.sin(th);
+            return p;
+          };
+          ss.beginStroke(seed % 2 ? 'clay' : 'pinch', at(0), 1);
+          for (let k = 1; k <= 12; k++) ss.addSample(at(k / 12));
+          ss.endStroke();
+        }
+        return mm;
+      };
+      const mw = build();
+      const mj = build();
+      // 同じ形から出発していることを確かめてから比べる
+      let seed0 = 0;
+      for (let i = 0; i < mw.nv * 3; i++) if (mw.positions[i] !== mj.positions[i]) seed0++;
+      ok(seed0 === 0, `突き合わせの入力が同一 (差 ${seed0})`);
+      console.log(`  入力 ${mw.liveVerts.toLocaleString()} 頂点 / ${mw.liveTris.toLocaleString()} 面`);
+
+      setWasmKernels(true);
+      mw.computeAllNormals();
+      mw.computeAllCurvature();
+      setWasmKernels(false);
+      mj.computeAllNormals();
+      mj.computeAllCurvature();
+      setWasmKernels(true);
+
+      let dn = 0, maxN = 0, dc = 0, maxC = 0;
+      for (let i = 0; i < mw.nv * 3; i++) {
+        const d = Math.abs(mw.normals[i] - mj.normals[i]);
+        if (d !== 0) { dn++; if (d > maxN) maxN = d; }
+      }
+      for (let v = 0; v < mw.nv; v++) {
+        const d = Math.abs(mw.curv[v] - mj.curv[v]);
+        if (d !== 0) { dc++; if (d > maxC) maxC = d; }
+      }
+      ok(dn === 0, `法線がビット単位で一致 (差のある成分 ${dn} / 最大 ${maxN.toExponential(2)})`);
+      ok(dc === 0, `曲率がビット単位で一致 (差のある頂点 ${dc} / 最大 ${maxC.toExponential(2)})`);
+
+      // リメッシュ（投影カーネル）も突き合わせる。
+      // 分割 / 統合の順序は決定的なので、投影が一致すれば結果も一致する。
+      const rw = build(), rj = build();
+      const opt = { targetTris: 4000, iterations: 4, adaptive: 0.5, relax: 0.5 };
+      setWasmKernels(true);
+      const resW = remesh(rw, opt);
+      setWasmKernels(false);
+      const resJ = remesh(rj, opt);
+      setWasmKernels(true);
+      ok(resW.ok && resJ.ok, 'どちらもリメッシュできる');
+      ok(resW.tris === resJ.tris && resW.verts === resJ.verts,
+        `リメッシュの頂点/面数が一致 (WASM ${resW.verts}/${resW.tris} vs JS ${resJ.verts}/${resJ.tris})`);
+      let dp = 0, maxP = 0;
+      const n = Math.min(rw.nv, rj.nv) * 3;
+      for (let i = 0; i < n; i++) {
+        const d = Math.abs(rw.positions[i] - rj.positions[i]);
+        if (d !== 0) { dp++; if (d > maxP) maxP = d; }
+      }
+      ok(dp === 0, `リメッシュ後の座標がビット単位で一致 (差 ${dp} / 最大 ${maxP.toExponential(2)})`);
+      console.log(`       投影 WASM ${resW.phase.project}ms / JS ${resJ.phase.project}ms`
+        + ` （ヒント率 ${(resW.hinted / Math.max(1, resW.projected) * 100).toFixed(0)}%）`);
     }
   }
 }

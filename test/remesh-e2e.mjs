@@ -132,10 +132,13 @@ try {
       for(let e=0;e<3;e++){const x=vv[e],y=vv[(e+1)%3];const k=x<y?x+':'+y:y+':'+x;em.set(k,(em.get(k)||0)+1);}}
     let bad=0,bnd=0; for(const n of em.values()){if(n===1)bnd++;else if(n!==2)bad++;}
     return { used, info: W.tools.remeshWorkerInfo(), nprog: prog.length,
+      wasm: window.__wasmState ? window.__wasmState() : '(未公開)',
       stages: [...new Set(prog.map(p => p.stage))],
       tris: m.liveTris, bad, bnd, chi: m.liveVerts - em.size + m.liveTris,
       upRatio: up ? upRed / up : 0, dnRatio: dn ? dnBlue / dn : 0 };`);
   ok(r.used === true, `ワーカーで実行される (state=${r.info.state} ${r.info.error || ''})`);
+  ok(r.wasm === 'ready', `メインスレッドで WASM カーネルが有効 (${r.wasm})`);
+  ok(r.info.wasm === true, 'ワーカー側でも WASM カーネルが有効');
   ok(r.nprog >= 4, `進捗が届く (${r.nprog} 回 / ${r.stages.join(',')})`);
   ok(Math.abs(r.tris - 8000) / 8000 < 0.15, `ワーカーでも目標面数に近づく (${r.tris})`);
   ok(r.bad === 0 && r.bnd === 0 && r.chi === 2,
