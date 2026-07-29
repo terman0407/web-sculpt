@@ -1,0 +1,318 @@
+// ---------------------------------------------------------------------------
+// モデリング操作（エッジループ / ループカット / 押し出し / インセット / 細分化）の検証。
+//   node test/editops.test.mjs
+//
+// この手の操作は「見た目は合っているのにトポロジが壊れている」が起きやすい。
+// 毎回:
+//   * オイラー標数が期待どおりか（V - E + F）
+//   * 全部の辺がちょうど 2 面に共有されているか（閉じた形なら）
+//   * 面の巻き方が保たれているか（法線が外を向いているか）
+//   * 同じ位置に別頂点ができていないか（繋がっていないメッシュ）
+// を見る。
+// ---------------------------------------------------------------------------
+
+import { EditMesh, editMeshFromSculpt } from '../js/editmesh.js';
+import {
+  edgeOf, edgeRing, edgeLoop, selectLoopOrRing, loopCut,
+  extrudeSelectedFaces, insetSelectedFaces, subdivideSelectedFaces,
+} from '../js/editops.js';
+import { SculptMesh, PRIMITIVES } from '../js/mesh.js';
+import { quadDominant } from '../js/remesh.js';
+
+let failures = 0;
+const ok = (c, m) => { if (!c) { failures++; console.log('  FAIL: ' + m); } };
+const head = (t) => console.log('\n== ' + t + ' ==');
+
+/** 単位立方体（四角 6 枚）。巻き方は外向き */
+function cube() {
+  const P = new Float32Array([
+    -1, -1, -1, 1, -1, -1, 1, 1, -1, -1, 1, -1,
+    -1, -1, 1, 1, -1, 1, 1, 1, 1, -1, 1, 1,
+  ]);
+  const F = [
+    [0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4],
+    [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7],
+  ];
+  const verts = [], starts = [0];
+  for (const f of F) { verts.push(...f); starts.push(verts.length); }
+  const em = new EditMesh();
+  em.setGeometry(P, Int32Array.from(verts), Int32Array.from(starts));
+  return em;
+}
+
+/** 構造の検証。closed なら境界辺なし、chi でオイラー標数を見る */
+function check(em, { closed = true, chi = 2, label = '', outward = true } = {}) {
+  const errs = em.validate();
+  let bnd = 0;
+  for (let e = 0; e < em.ne; e++) if (em.edgeFace[e * 2 + 1] < 0) bnd++;
+  if (closed && bnd) errs.push(`境界辺が ${bnd} 本`);
+  if (em.nonManifold) errs.push(`非多様体辺 ${em.nonManifold} 本`);
+  const st = em.faceStats();
+  const c = em.nv - em.ne + st.faces;
+  if (chi !== null && c !== chi) errs.push(`オイラー標数 ${c}（期待 ${chi}）`);
+
+  // 同じ位置に別の頂点ができていないか（繋がっていないメッシュの検出）
+  const seen = new Map();
+  let dup = 0;
+  for (let v = 0; v < em.nv; v++) {
+    const k = [0, 1, 2].map(j => em.positions[v * 3 + j].toFixed(5)).join(',');
+    if (seen.has(k)) dup++; else seen.set(k, v);
+  }
+  if (dup) errs.push(`同じ位置の頂点が ${dup} 組`);
+
+  // 面の法線が外を向いているか（重心から見て）。閉じた凸形でだけ意味がある
+  if (outward && closed) {
+    const bb = em.bounds();
+    const n = new Float64Array(3), ctr = new Float64Array(3);
+    let inward = 0;
+    for (let f = 0; f < em.nf; f++) {
+      if (!em.faceAlive[f]) continue;
+      em.faceNormal(f, n);
+      em.faceCenter(f, ctr);
+      const dx = ctr[0] - bb.center[0], dy = ctr[1] - bb.center[1], dz = ctr[2] - bb.center[2];
+      if (n[0] * dx + n[1] * dy + n[2] * dz < 0) inward++;
+    }
+    if (inward) errs.push(`裏返った面が ${inward} 枚`);
+  }
+
+  if (errs.length) { failures++; console.log(`  FAIL ${label}: ${errs.join(' / ')}`); return false; }
+  console.log(`  ok   ${label}  V=${em.nv} E=${em.ne} F=${st.faces}`
+    + ` (四角 ${st.quad} / 三角 ${st.tri} / n-gon ${st.ngon}) χ=${c}`);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+head('エッジリングとエッジループ');
+{
+  const em = cube();
+  // 立方体はどの辺も、4 枚の四角を跨いで一周する（閉じたリング）
+  const r = edgeRing(em, 0);
+  ok(r.closed, 'リングが閉じない');
+  ok(r.edges.length === 4, `リングが 4 辺でない (${r.edges.length})`);
+  ok(r.faces.length === 4, `リングが 4 面を跨がない (${r.faces.length})`);
+  console.log(`  リング: 辺 ${r.edges.length} / 面 ${r.faces.length} / 閉 ${r.closed}`);
+
+  // 立方体の頂点は価数 3 なので、エッジループは伸びない（自分だけ）
+  const l = edgeLoop(em, 0);
+  ok(l.edges.length === 1, `価数 3 でループが伸びてしまう (${l.edges.length})`);
+
+  // 円柱を四角化すると価数 4 の頂点があり、そこはループが伸びる
+  const g = PRIMITIVES.cylinder();
+  const m = new SculptMesh();
+  m.setGeometry(g.positions, g.indices);
+  const em2 = editMeshFromSculpt(m, quadDominant);
+  let best = 0, bestE = -1;
+  for (let e = 0; e < em2.ne; e++) {
+    const L = edgeLoop(em2, e);
+    if (L.edges.length > best) { best = L.edges.length; bestE = e; }
+  }
+  ok(best > 4, `円柱でエッジループが伸びない (最長 ${best})`);
+  console.log(`  円柱の最長エッジループ: ${best} 辺（辺 ${bestE} から）`);
+
+  // リングを選択に足す
+  em2.clearSelection();
+  em2.selEdge[bestE] = 1;
+  const sr = selectLoopOrRing(em2, 'ring');
+  ok(sr.added > 0, `リング選択で増えない (${sr.added})`);
+  em2.clearSelection();
+  em2.selEdge[bestE] = 1;
+  const sl = selectLoopOrRing(em2, 'loop');
+  ok(sl.added === best - 1, `ループ選択の本数が合わない (${sl.added + 1} != ${best})`);
+}
+
+// ---------------------------------------------------------------------------
+head('ループカット');
+{
+  // 立方体に 1 本入れる: リングは 4 面 4 辺。V+4, E+8, F+4 → χ は 2 のまま
+  const em = cube();
+  em.clearSelection();
+  em.selEdge[0] = 1;
+  const r = loopCut(em, 1);
+  ok(r.faces === 4, `4 面が割られていない (${r.faces})`);
+  ok(r.edges === 4, `4 辺に分割点が入っていない (${r.edges})`);
+  ok(em.nv === 12, `頂点が 8+4=12 にならない (${em.nv})`);
+  ok(em.liveFaces === 10, `面が 6+4=10 にならない (${em.liveFaces})`);
+  check(em, { closed: true, chi: 2, label: 'ループカット 1 本' });
+  // 入れた辺が選択されている（続けて動かせる）
+  const sel = em.selectionCount();
+  ok(sel.edges === 4, `入れた 4 辺が選択されていない (${sel.edges})`);
+
+  // 3 本まとめて
+  const em2 = cube();
+  em2.clearSelection();
+  em2.selEdge[0] = 1;
+  const r2 = loopCut(em2, 3);
+  ok(r2.cuts === 3, 'cuts が伝わっていない');
+  ok(em2.nv === 8 + 4 * 3, `頂点が 8+12 にならない (${em2.nv})`);
+  ok(em2.liveFaces === 6 + 4 * 3, `面が 6+12 にならない (${em2.liveFaces})`);
+  check(em2, { closed: true, chi: 2, label: 'ループカット 3 本' });
+
+  // 面を取り合う 2 リングを同時に指定したら、片方だけ通して残りは断ること。
+  // 直交リングは同じ四角を共有するので、両方切るならその四角を 4 分割しないと
+  // 分割点が浮いて穴が開く（実測で境界辺 12 本、χ=-2）。Blender の Ctrl+R も
+  // 1 リングずつなので、断る側に倒すのが素直。
+  const em3 = cube();
+  em3.clearSelection();
+  const ring0 = edgeRing(em3, 0);
+  let other = -1;
+  for (let e = 0; e < em3.ne; e++) if (!ring0.edges.includes(e)) { other = e; break; }
+  em3.selEdge[0] = 1; em3.selEdge[other] = 1;
+  const r3 = loopCut(em3, 1);
+  ok(r3.rings === 1 && r3.refused === 1,
+    `面を取り合うリングを同時に切ってしまった (通 ${r3.rings} / 断 ${r3.refused})`);
+  check(em3, { closed: true, chi: 2, label: '面を取り合う 2 リング（1 つだけ通す）' });
+
+  // 三角形だけの形はリングが張れないので断る
+  {
+    const g = PRIMITIVES.sphere();
+    const m = new SculptMesh();
+    m.setGeometry(g.positions, g.indices);
+    const tri = new EditMesh();
+    // 三角形のまま面にする
+    const starts = [0], verts = [];
+    for (let t = 0; t < m.nt; t++) {
+      verts.push(m.tris[t * 3], m.tris[t * 3 + 1], m.tris[t * 3 + 2]);
+      starts.push(verts.length);
+    }
+    tri.setGeometry(m.positions.slice(0, m.nv * 3), Int32Array.from(verts), Int32Array.from(starts));
+    tri.clearSelection();
+    tri.selEdge[0] = 1;
+    const rt = loopCut(tri, 1);
+    ok(rt.faces === 0, `三角形メッシュでループカットしてしまった (${rt.faces})`);
+    ok(rt.refused > 0, '断った数が返らない');
+  }
+}
+
+// ---------------------------------------------------------------------------
+head('押し出し');
+{
+  // 1 面を押し出す: V+4, F は -1+1+4=+4, E+8 → χ は 2 のまま
+  const em = cube();
+  em.clearSelection();
+  em.selFace[0] = 1;
+  em.syncSelection('face');
+  const r = extrudeSelectedFaces(em, 0.5);
+  ok(r.faces === 1 && r.walls === 4, `1 面 4 壁にならない (面 ${r.faces} / 壁 ${r.walls})`);
+  ok(em.nv === 12, `頂点が 8+4 にならない (${em.nv})`);
+  ok(em.liveFaces === 10, `面が 6-1+1+4=10 にならない (${em.liveFaces})`);
+  check(em, { closed: true, chi: 2, label: '1 面を押し出し', outward: true });
+  // 押し出した面が選択されている
+  ok(em.selectionCount().faces === 1, `押し出した面が選択されていない (${em.selectionCount().faces})`);
+  // 実際に伸びているか
+  const bb = em.bounds();
+  ok(bb.max[2] - bb.min[2] > 2.4 || bb.max[1] - bb.min[1] > 2.4 || bb.max[0] - bb.min[0] > 2.4,
+    `押し出しで伸びていない (${(bb.max[0] - bb.min[0]).toFixed(2)}, `
+    + `${(bb.max[1] - bb.min[1]).toFixed(2)}, ${(bb.max[2] - bb.min[2]).toFixed(2)})`);
+
+  // 隣り合う 2 面をまとめて押し出す → 共有辺には壁を張らない
+  const em2 = cube();
+  em2.clearSelection();
+  // 辺を共有する 2 面を探す
+  let fa = -1, fb = -1;
+  for (let e = 0; e < em2.ne && fa < 0; e++) {
+    const f0 = em2.edgeFace[e * 2], f1 = em2.edgeFace[e * 2 + 1];
+    if (f0 >= 0 && f1 >= 0 && f0 !== f1) { fa = f0; fb = f1; }
+  }
+  em2.selFace[fa] = 1; em2.selFace[fb] = 1;
+  em2.syncSelection('face');
+  const r2 = extrudeSelectedFaces(em2, 0.4);
+  ok(r2.walls === 6, `共有辺に壁を張ってしまった（壁 ${r2.walls}、期待 6）`);
+  check(em2, { closed: true, chi: 2, label: '2 面をまとめて押し出し', outward: false });
+
+  // 押し出しを 3 回繰り返しても壊れない
+  const em3 = cube();
+  em3.clearSelection();
+  em3.selFace[0] = 1;
+  em3.syncSelection('face');
+  for (let k = 0; k < 3; k++) extrudeSelectedFaces(em3, 0.3);
+  check(em3, { closed: true, chi: 2, label: '押し出し 3 回', outward: false });
+}
+
+// ---------------------------------------------------------------------------
+head('インセット');
+{
+  const em = cube();
+  em.clearSelection();
+  em.selFace[0] = 1;
+  em.syncSelection('face');
+  const r = insetSelectedFaces(em, 0.3);
+  ok(r.faces === 1 && r.verts === 4, `1 面 4 頂点にならない (${r.faces} / ${r.verts})`);
+  ok(em.liveFaces === 6 - 1 + 1 + 4, `面が 10 にならない (${em.liveFaces})`);
+  check(em, { closed: true, chi: 2, label: '1 面をインセット' });
+  ok(em.selectionCount().faces === 1, '内側の面が選択されていない');
+
+  // インセット → 押し出しの連携（Blender で一番よく使う流れ）
+  const r2 = extrudeSelectedFaces(em, -0.4);
+  ok(r2.faces === 1, 'インセット後に押し出せない');
+  check(em, { closed: true, chi: 2, label: 'インセット → 押し出し（凹み）', outward: false });
+
+  // 全面インセット
+  const em2 = cube();
+  em2.selectAll('face');
+  insetSelectedFaces(em2, 0.25);
+  check(em2, { closed: true, chi: 2, label: '全面インセット' });
+}
+
+// ---------------------------------------------------------------------------
+head('面の細分化');
+{
+  const em = cube();
+  em.selectAll('face');
+  const r = subdivideSelectedFaces(em);
+  ok(r.faces === 6, `6 面が細分化されない (${r.faces})`);
+  // 各四角 → 4 枚。辺の中点 12 + 面の中心 6 = 18 頂点追加
+  ok(em.nv === 8 + 12 + 6, `頂点が 26 にならない (${em.nv})`);
+  ok(em.liveFaces === 24, `面が 24 にならない (${em.liveFaces})`);
+  check(em, { closed: true, chi: 2, label: '全面を細分化' });
+
+  // 一部だけ細分化しても、隣と中点を共有していること（穴が開かない）
+  const em2 = cube();
+  em2.clearSelection();
+  em2.selFace[0] = 1; em2.selFace[1] = 1;
+  em2.syncSelection('face');
+  subdivideSelectedFaces(em2);
+  // 隣の未選択面には中点が差し込まれて n-gon になる（T 字接合を作らない）
+  let bnd = 0;
+  for (let e = 0; e < em2.ne; e++) if (em2.edgeFace[e * 2 + 1] < 0) bnd++;
+  ok(bnd === 0, `一部細分化で境界辺ができた (${bnd})`);
+  ok(em2.validate().length === 0, `一部細分化で構造が壊れた (${em2.validate().join(' / ')})`);
+  const st2 = em2.faceStats();
+  ok(st2.ngon > 0, '隣の面が n-gon になっていない（中点が差し込まれていない）');
+  const chi2 = em2.nv - em2.ne + em2.liveFaces;
+  ok(chi2 === 2, `一部細分化でオイラー標数が崩れた (${chi2})`);
+  console.log(`  一部細分化: V=${em2.nv} E=${em2.ne} F=${em2.liveFaces}`
+    + ` (四角 ${st2.quad} / n-gon ${st2.ngon}) χ=${chi2}`);
+}
+
+// ---------------------------------------------------------------------------
+head('組み合わせ（実際の使い方に近い流れ）');
+{
+  // 立方体 → ループカット → 一部を選んで押し出し → インセット → 押し出し
+  const em = cube();
+  em.clearSelection();
+  em.selEdge[0] = 1;
+  loopCut(em, 1);
+  check(em, { closed: true, chi: 2, label: '1) ループカット' });
+
+  em.clearSelection();
+  let n = 0;
+  for (let f = 0; f < em.nf && n < 2; f++) if (em.faceAlive[f]) { em.selFace[f] = 1; n++; }
+  em.syncSelection('face');
+  extrudeSelectedFaces(em, 0.5);
+  check(em, { closed: true, chi: 2, label: '2) 押し出し', outward: false });
+
+  insetSelectedFaces(em, 0.3);
+  check(em, { closed: true, chi: 2, label: '3) インセット', outward: false });
+
+  extrudeSelectedFaces(em, -0.35);
+  check(em, { closed: true, chi: 2, label: '4) 内側へ押し出し', outward: false });
+
+  subdivideSelectedFaces(em);
+  ok(em.validate().length === 0, `5) 細分化で壊れた (${em.validate().join(' / ')})`);
+  console.log(`  最終: V=${em.nv} E=${em.ne} F=${em.liveFaces}`
+    + ` χ=${em.nv - em.ne + em.liveFaces}`);
+}
+
+// ---------------------------------------------------------------------------
+console.log(failures === 0 ? '\n✅ すべて通過' : `\n❌ ${failures} 件の失敗`);
+process.exit(failures === 0 ? 0 : 1);

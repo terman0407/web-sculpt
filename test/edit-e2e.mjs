@@ -23,6 +23,8 @@ try {
   if (fatal === 'flex') throw new Error('起動エラー: ' + await cdp.eval("document.getElementById('fatalMsg').textContent"));
   await cdp.eval('new Promise(r=>setTimeout(r,800))');
   const run = async (code) => JSON.parse(await cdp.eval('JSON.stringify((() => { ' + code + ' })())'));
+  const runA = async (code) => JSON.parse(
+    await cdp.eval('(async () => JSON.stringify(await (async () => { ' + code + ' })()))()', 300000));
   const frames = (n = 3) => cdp.eval(
     `new Promise(r=>{let i=0;const t=()=>{if(++i>=${n})r(1);else requestAnimationFrame(t)};requestAnimationFrame(t)})`);
   const mouse = (type, x, y, opts = {}) => cdp.send('Input.dispatchMouseEvent', Object.assign({
@@ -188,6 +190,95 @@ try {
     return { want, have: window.WebSculpt.mesh.liveTris };`);
   ok(r.want === r.have, `表示の三角形数が Σ(n-2) と一致 (${r.have} / ${r.want})`);
 
+  // --- モデリング操作（段 2 / 段 3）の配線 --------------------------------
+  r = await runA(`const W = window.WebSculpt, T = W.tools;
+    // 立方体からやり直す（前の編集で形が変わっているので）
+    W.app.setEditMode(false);
+    W.app.newMesh('cube');
+    W.app.setEditMode(true);
+    W.app.editSetSelectMode('edge');
+    const before = T.editInfo();
+
+    // エッジリング選択 → ループカット
+    T.editSelect('none');
+    T.edit.selEdge[0] = 1;
+    T.edit.syncSelection('edge');
+    T.editModel('ringSelect');
+    const ring = T.editInfo().sel;
+    T.editModel('loopCut');
+    const afterCut = T.editInfo();
+
+    // 面モードにして押し出し
+    W.app.editSetSelectMode('face');
+    T.editSelect('none');
+    let n = 0;
+    for (let f = 0; f < T.edit.nf && n < 1; f++) if (T.edit.faceAlive[f]) { T.edit.selFace[f] = 1; n++; }
+    T.edit.syncSelection('face');
+    W.state.editExtrude = 0.3;
+    T.editModel('extrude');
+    const afterExt = T.editInfo();
+
+    // 続けてインセット → 内側へ押し出し
+    W.state.editInset = 0.3;
+    T.editModel('inset');
+    const afterIns = T.editInfo();
+    W.state.editExtrude = -0.2;
+    T.editModel('extrude');
+    const afterIn = T.editInfo();
+
+    // 細分化
+    T.editSelect('all');
+    T.editModel('subdivide');
+    const afterSub = T.editInfo();
+
+    // 表示の三角形数と χ を確かめる
+    const em = T.edit;
+    let want = 0;
+    for (let f = 0; f < em.nf; f++) if (em.faceAlive[f]) want += em.faceSize(f) - 2;
+    let bnd = 0;
+    for (let e = 0; e < em.ne; e++) if (em.edgeFace[e*2+1] < 0) bnd++;
+    return { before, ring, afterCut, afterExt, afterIns, afterIn, afterSub,
+      want, have: W.mesh.liveTris, bnd,
+      chi: em.nv - em.ne + afterSub.faces, errs: em.validate() };`);
+  // newMesh('cube') は分割済みの立方体（1 面 16×16 の四角）なので、
+  // リングは 1 周ぶん（64 辺）になる。手作りの立方体の 4 辺ではない。
+  ok(r.ring.edges > 4, `エッジリングが伸びる (${r.ring.edges} 辺)`);
+  ok(r.afterCut.faces === r.before.faces + r.ring.edges,
+    `ループカットでリングの辺数だけ面が増える`
+    + ` (${r.before.faces} + ${r.ring.edges} != ${r.afterCut.faces})`);
+  ok(r.afterExt.faces === r.afterCut.faces + 4,
+    `押し出しで 4 面増える (${r.afterCut.faces} → ${r.afterExt.faces})`);
+  ok(r.afterIns.faces === r.afterExt.faces + 4,
+    `インセットで 4 面増える (${r.afterExt.faces} → ${r.afterIns.faces})`);
+  ok(r.afterIn.faces === r.afterIns.faces + 4,
+    `内側へ押し出しで 4 面増える (${r.afterIns.faces} → ${r.afterIn.faces})`);
+  ok(r.afterSub.faces > r.afterIn.faces * 3,
+    `細分化で面が 4 倍近くになる (${r.afterIn.faces} → ${r.afterSub.faces})`);
+  ok(r.bnd === 0, `一連の操作で穴が開いていない (境界辺 ${r.bnd})`);
+  ok(r.chi === 2, `オイラー標数が 2 のまま (${r.chi})`);
+  ok(r.errs.length === 0, `構造が壊れていない (${r.errs.join(' / ')})`);
+  ok(r.want === r.have, `表示の三角形数が Σ(n-2) と一致 (${r.have} / ${r.want})`);
+  console.log(`       立方体 → リング選択 → ループカット → 押し出し → インセット`
+    + ` → 内側へ押し出し → 細分化: 面 ${r.before.faces} → ${r.afterSub.faces} / χ=${r.chi}`);
+
+  // 辺が選択されていないときは断る（黙って何もしないのではなく）
+  r = await runA(`const W = window.WebSculpt, T = W.tools;
+    T.editSelect('none');
+    const before = T.editInfo().faces;
+    T.editModel('loopCut');
+    T.editModel('extrude');
+    T.editModel('inset');
+    return { before, after: T.editInfo().faces, errs: T.edit.validate() };`);
+  ok(r.before === r.after, `選択が無いときは何もしない (${r.before} → ${r.after})`);
+  ok(r.errs.length === 0, '選択が無いときの操作でも構造が保たれる');
+
+  // UI にボタンが出ているか
+  r = await run(`const t = [...document.querySelectorAll('#rightPanel .btn')].map(b => b.textContent);
+    return { t };`);
+  for (const label of ['エッジループ', 'エッジリング', 'ループカット', '押し出し', 'インセット', '面を細分化']) {
+    ok(r.t.includes(label), `ボタン「${label}」がある`);
+  }
+
   // --- ギズモで動かす -----------------------------------------------------
   r = await run(`const W = window.WebSculpt, T = W.tools;
     T.editSelect('none');
@@ -251,21 +342,31 @@ try {
     for (let v = 0; v < W.mesh.nv; v++) W.mesh.mask[v] = 0;
     W.state.worldRadius = 0.4; W.state.strength = 1.0; W.state.dynTopo = false;
     const before = W.mesh.positions.slice(0, W.mesh.nv * 3);
-    // 決め打ちの座標だと表面から外れる（ギズモで形が動いている）。
-    // 実際の頂点の位置を掴んでそこから彫る。
-    const v0 = 10;
+    // 決め打ちの座標だと表面から外れる（一連の編集で形が変わっている）。
+    // 原点から一番遠い頂点を掴んでそこから彫る。確実に表面の上にある。
+    let v0 = 0, far = -1;
+    for (let v = 0; v < W.mesh.nv; v++) {
+      const i = v * 3;
+      const d = W.mesh.positions[i] ** 2 + W.mesh.positions[i+1] ** 2 + W.mesh.positions[i+2] ** 2;
+      if (d > far) { far = d; v0 = v; }
+    }
+    const bb = W.mesh.bounds();
+    W.state.worldRadius = bb.radius * 0.5;
     const pt = new Float32Array([
       W.mesh.positions[v0 * 3], W.mesh.positions[v0 * 3 + 1], W.mesh.positions[v0 * 3 + 2]]);
     W.sculptor.beginStroke('clay', pt, 1);
     for (let k = 1; k <= 6; k++) {
-      pt[0] += 0.03; pt[1] += 0.01;
+      pt[0] += bb.radius * 0.02; pt[1] += bb.radius * 0.01;
       W.sculptor.addSample(pt);
     }
     W.sculptor.endStroke();
     let moved = 0;
     for (let i = 0; i < before.length; i++) if (Math.abs(W.mesh.positions[i] - before[i]) > 1e-5) moved++;
-    return { moved };`);
-  ok(r.moved > 0, `編集モードを出たあと彫刻できる (${r.moved} 成分が動いた)`);
+    return { moved, v0, radius: W.state.worldRadius, nv: W.mesh.nv,
+      mask0: W.mesh.mask[v0], transpose: W.state.transposeMode, editMode: W.state.editMode };`);
+  ok(r.moved > 0, `編集モードを出たあと彫刻できる (${r.moved} 成分が動いた`
+    + ` / 頂点 ${r.v0} / 半径 ${r.radius.toFixed(3)} / マスク ${r.mask0}`
+    + ` / transpose ${r.transpose} / editMode ${r.editMode})`);
 
   const errs = await cdp.eval('JSON.stringify(window.__errs || [])');
   ok(errs === '[]', 'ページ例外なし ' + errs);

@@ -106,6 +106,9 @@ const state = {
   // ポリゴンモデリング（編集モード）
   editMode: false,        // 編集モードに入っているか
   editSelect: 'face',     // 'vert' | 'edge' | 'face'
+  editCuts: 1,            // ループカットの本数
+  editExtrude: 0.25,      // 押し出し量（モデル半径に対する割合）
+  editInset: 0.2,         // インセット量 0..1
   invertOrbitY: false,
   bgPreset: 'dark',
   bgTop: BG_PRESETS.dark.top,

@@ -990,7 +990,52 @@ export function buildUI(app) {
       { label: '繋がり', title: '繋がっている塊を全部選ぶ', onClick: () => app.tools.editSelect('linked') },
     ]);
 
-    el('div', 'subhead', ed).textContent = '編集';
+    el('div', 'subhead', ed).textContent = 'ループ（辺モードで使います）';
+    btnRow(ed, [
+      { label: 'エッジループ', title: '選択した辺から、頂点を跨いで一列に伸びる辺を選びます（Blender の Alt+クリック）',
+        onClick: () => app.tools.editModel('loopSelect') },
+      { label: 'エッジリング', title: '選択した辺から、四角を跨いで向かい側へ渡る辺を選びます',
+        onClick: () => app.tools.editModel('ringSelect') },
+    ]);
+    slider(ed, {
+      label: 'ループカットの本数', min: 1, max: 10, step: 1, value: state.editCuts,
+      fmt: v => v.toFixed(0) + ' 本',
+      title: '1 本なら中点。2 本なら 1/3 と 2/3 の位置に入ります',
+      onInput: (v) => { state.editCuts = v; },
+    });
+    btnRow(ed, [
+      { label: 'ループカット', cls: 'wide',
+        title: '選択した辺のエッジリングに沿って四角を割ります（Blender の Ctrl+R）',
+        onClick: () => app.tools.editModel('loopCut') },
+    ]);
+
+    el('div', 'subhead', ed).textContent = '面を増やす（面モードで使います）';
+    slider(ed, {
+      label: '押し出し量', min: -1, max: 1, step: 0.02, value: state.editExtrude,
+      title: '法線方向に動かす量（モデルの大きさに対する割合）。0 でも押し出しは成立します',
+      onInput: (v) => { state.editExtrude = v; },
+    });
+    btnRow(ed, [
+      { label: '押し出し', cls: 'wide',
+        title: '選択した面を複製して、縁に側面を張ります（Blender の E）',
+        onClick: () => app.tools.editModel('extrude') },
+    ]);
+    slider(ed, {
+      label: 'インセット量', min: 0.02, max: 0.9, step: 0.02, value: state.editInset,
+      title: '重心へ寄せる割合',
+      onInput: (v) => { state.editInset = v; },
+    });
+    btnRow(ed, [
+      { label: 'インセット', title: '面の内側に一段小さい面を作ります（Blender の Shift+I 相当。面ごと）',
+        onClick: () => app.tools.editModel('inset') },
+      { label: '面を細分化', title: '選択した面を 4 分割します',
+        onClick: () => app.tools.editModel('subdivide') },
+    ]);
+    el('p', 'note', ed).textContent =
+      '押し出しとインセットのあとは新しくできた面が選択されたままなので、続けて押せます'
+      + '（インセット → 内側へ押し出しで凹みになります）。';
+
+    el('div', 'subhead', ed).textContent = '減らす / 直す';
     btnRow(ed, [
       { label: '面を削除', title: '選択した面を消します（使われなくなった頂点も消えます）',
         onClick: () => app.tools.editApply('delete') },

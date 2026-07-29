@@ -25,6 +25,10 @@ import { clamp } from './math.js';
 import {
   editMeshFromSculpt, editMeshToSculpt, pickVert, pickEdge, pickFace, boxSelect,
 } from './editmesh.js';
+import {
+  selectLoopOrRing, loopCut, extrudeSelectedFaces, insetSelectedFaces,
+  subdivideSelectedFaces,
+} from './editops.js';
 
 /** 変形とマスク操作の既定パラメータ一式（state に置く） */
 export function defaultToolState() {
@@ -822,6 +826,57 @@ export class Tools {
     this.redraw();
     if (this.ui && this.ui.refreshEdit) this.ui.refreshEdit();
     return r;
+  }
+
+  /**
+   * モデリング操作（段 2 / 段 3）。
+   * op は 'loopSelect' | 'ringSelect' | 'loopCut' | 'extrude' | 'inset' | 'subdivide'
+   */
+  editModel(op) {
+    if (!this.edit) return;
+    const em = this.edit;
+    const st = this.state;
+    if (op === 'loopSelect' || op === 'ringSelect') {
+      const r = selectLoopOrRing(em, op === 'ringSelect' ? 'ring' : 'loop');
+      if (r.seeds === 0) { this.toast('辺が選択されていません'); return; }
+      if (r.added === 0) {
+        this.toast(op === 'ringSelect'
+          ? 'リングが伸びませんでした（四角でない面に囲まれています）'
+          : 'ループが伸びませんでした（辺が 4 本集まる頂点がありません）', 4500);
+        return;
+      }
+      this.toast(`${op === 'ringSelect' ? 'エッジリング' : 'エッジループ'}: ${r.added} 辺を追加`);
+      this.editSyncOverlay();
+      this.redraw();
+      if (this.ui && this.ui.refreshEdit) this.ui.refreshEdit();
+      return;
+    }
+    if (op === 'loopCut') {
+      const r = loopCut(em, st.editCuts || 1);
+      if (r.faces === 0) {
+        this.toast(r.refused > 0
+          ? 'ループカットできませんでした（四角のリングが張れません）'
+          : '辺が選択されていません', 4500);
+        return;
+      }
+      this.toast(`ループカット: ${r.rings} リング / ${r.faces} 面を分割`
+        + `${r.refused ? `（${r.refused} リングは面を取り合うため断りました）` : ''}`, 4500);
+    } else if (op === 'extrude') {
+      const bb = em.bounds();
+      const r = extrudeSelectedFaces(em, bb.radius * (st.editExtrude || 0));
+      if (r.faces === 0) { this.toast('面が選択されていません'); return; }
+      this.toast(`押し出し: ${r.faces} 面 / 側面 ${r.walls} 枚`);
+    } else if (op === 'inset') {
+      const r = insetSelectedFaces(em, st.editInset || 0.2);
+      if (r.faces === 0) { this.toast('面が選択されていません'); return; }
+      this.toast(`インセット: ${r.faces} 面（面ごと）`);
+    } else if (op === 'subdivide') {
+      const r = subdivideSelectedFaces(em);
+      if (r.faces === 0) { this.toast('面が選択されていません'); return; }
+      this.toast(`細分化: ${r.faces} 面 → ${r.faces * 4} 面（頂点 +${r.verts}）`);
+    }
+    this.editRefreshDisplay();
+    if (this.ui && this.ui.refreshEdit) this.ui.refreshEdit();
   }
 
   /** 編集操作。op は 'delete' | 'dissolve' | 'flip' */
