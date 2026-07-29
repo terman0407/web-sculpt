@@ -356,7 +356,7 @@ export function buildUI(app) {
     { label: '↻ やり直し', title: 'Ctrl+Shift+Z', onClick: () => app.redo() },
   ]);
   btnRow(meshBar, [
-    { label: '読み込み OBJ', title: 'OBJ ファイルを読み込む', onClick: () => app.importOBJ() },
+    { label: '読み込み', title: 'OBJ / STL を読み込む', onClick: () => app.importMesh() },
     { label: 'OBJ', title: 'OBJ で書き出し（頂点カラー付き）', onClick: () => app.exportFile('obj') },
     { label: 'PLY', title: 'PLY で書き出し（ポリペイント保持）', onClick: () => app.exportFile('ply') },
     { label: 'STL', title: 'STL で書き出し（3D プリント向け）', onClick: () => app.exportFile('stl') },
@@ -954,6 +954,145 @@ export function buildUI(app) {
       + 'レイヤー・モーフは破棄されます。';
   }
 
+  // --- 仕上げレンダリング（BPR 相当）------------------------------------
+  //
+  // プレビューは 1x で描く（実測 13ms 程度）。設定を動かすたびに描き直せる
+  // 速さなので、スライダーを掴んだまま光の向きを回して見られる。
+  // 保存だけは指定倍率で描き直す。
+  const rpv = document.getElementById('rpv');
+  const rpvImg = document.getElementById('rpvImg');
+  const rpvInfo = document.getElementById('rpvInfo');
+  let rpvUrl = null;
+  let rpvPending = false, rpvQueued = false;
+
+  const rpvIsOpen = () => rpv.classList.contains('show');
+  /**
+   * プレビューを描き直す。描画中に呼ばれたら 1 回だけ予約する
+   * （スライダーのドラッグで呼び出しが溜まらないように）。
+   */
+  const rpvRender = async () => {
+    if (!rpvIsOpen()) return;
+    if (rpvPending) { rpvQueued = true; return; }
+    rpvPending = true;
+    rpv.classList.add('busy');
+    try {
+      for (;;) {
+        rpvQueued = false;
+        // プレビューは倍率 1（速さ優先）。保存時に本来の倍率で描き直す。
+        const r = await app.renderStill({ download: false, scale: 1, preview: true });
+        if (r) {
+          if (rpvUrl) URL.revokeObjectURL(rpvUrl);
+          rpvUrl = URL.createObjectURL(r.blob);
+          rpvImg.src = rpvUrl;
+          rpvInfo.textContent = `${r.width}×${r.height} / ${r.ms}ms`
+            + `（保存は ${state.bprScale}x = ${r.width * state.bprScale}×${r.height * state.bprScale}）`;
+        }
+        if (!rpvQueued || !rpvIsOpen()) break;
+      }
+    } finally {
+      rpvPending = false;
+      rpv.classList.remove('busy');
+    }
+  };
+  const rpvOpen = () => { rpv.classList.add('show'); rpvRender(); };
+  const rpvClose = () => {
+    rpv.classList.remove('show');
+    if (rpvUrl) { URL.revokeObjectURL(rpvUrl); rpvUrl = null; }
+    rpvImg.removeAttribute('src');
+  };
+  document.getElementById('rpvClose').onclick = rpvClose;
+  document.getElementById('rpvSave').onclick = () => app.renderStill();
+  rpv.addEventListener('pointerdown', (e) => { if (e.target === rpv) rpvClose(); });
+
+  {
+    const rd = section(right, 'レンダリング', true);
+    el('p', 'note', rd).textContent =
+      '影・高品質 AO・輪郭線を入れて解像度を上げ、静止画として PNG に書き出します。'
+      + 'ビューポートの表示は変わりません（押したときだけ別に描きます）。';
+
+    el('div', 'subhead', rd).textContent = '解像度';
+    segmented(rd, [
+      { label: '1x', value: 1, title: '画面と同じ解像度' },
+      { label: '2x', value: 2, title: '2 倍で描いて縮小（輪郭がなめらかになる）' },
+      { label: '4x', value: 4, title: '4 倍で描いて縮小（いちばんきれい。時間はかかる）' },
+    ], state.bprScale, (v) => { state.bprScale = v; rpvRender(); });
+
+    el('div', 'subhead', rd).textContent = '光と影';
+    slider(rd, {
+      label: '影の強さ', min: 0, max: 1, step: 0.05, value: state.bprShadow,
+      title: '0 で影なし。上げるほど影が濃くなります',
+      onInput: (v) => { state.bprShadow = v; rpvRender(); },
+    });
+    slider(rd, {
+      label: '影のやわらかさ', min: 0, max: 6, step: 0.25, value: state.bprShadowSoft,
+      fmt: v => v.toFixed(2),
+      title: '影の輪郭のにじみ幅。上げるとふんわりしますが、細部の影が消えます',
+      onInput: (v) => { state.bprShadowSoft = v; rpvRender(); },
+    });
+    slider(rd, {
+      label: '光の向き（水平）', min: -180, max: 180, step: 5, value: state.bprLightAz,
+      fmt: v => v.toFixed(0) + '°',
+      title: 'モデルのまわりを光が回ります',
+      onInput: (v) => { state.bprLightAz = v; rpvRender(); },
+    });
+    slider(rd, {
+      label: '光の高さ', min: -80, max: 89, step: 1, value: state.bprLightEl,
+      fmt: v => v.toFixed(0) + '°',
+      title: '上げると真上から、下げると下から照らします',
+      onInput: (v) => { state.bprLightEl = v; rpvRender(); },
+    });
+    slider(rd, {
+      label: '拡散光', min: 0, max: 1.5, step: 0.05, value: state.bprDiffuse,
+      title: '光が当たっている面をどれだけ明るくするか',
+      onInput: (v) => { state.bprDiffuse = v; rpvRender(); },
+    });
+    slider(rd, {
+      label: '環境光', min: 0, max: 1.5, step: 0.05, value: state.bprAmbient,
+      title: '影の中の明るさ。下げるほど影が黒くなります',
+      onInput: (v) => { state.bprAmbient = v; rpvRender(); },
+    });
+
+    el('div', 'subhead', rd).textContent = '陰影と線';
+    slider(rd, {
+      label: 'AO サンプル数', min: 8, max: 64, step: 8, value: state.bprAoSamples,
+      fmt: v => v.toFixed(0),
+      title: '窪みの陰影の精度。実時間表示は 24 で、上げるとざらつきが減ります',
+      onInput: (v) => { state.bprAoSamples = v; rpvRender(); },
+    });
+    slider(rd, {
+      label: '輪郭線の太さ', min: 0, max: 4, step: 1, value: state.bprOutline,
+      fmt: v => (v === 0 ? 'なし' : v.toFixed(0) + 'px'),
+      title: '深度の段差と法線の折れから線を出します（0 で無し）',
+      onInput: (v) => { state.bprOutline = v; rpvRender(); },
+    });
+    slider(rd, {
+      label: '輪郭線の濃さ', min: 0, max: 1, step: 0.05, value: state.bprOutlineStrength,
+      title: '輪郭線の暗さ',
+      onInput: (v) => { state.bprOutlineStrength = v; rpvRender(); },
+    });
+
+    el('div', 'subhead', rd).textContent = '書き出し';
+    toggle(rd, {
+      label: '背景を透明にする', value: state.bprTransparent,
+      title: '背景のグラデーションを描かず、何も無い所を透明にした PNG を出します',
+      onChange: (on) => { state.bprTransparent = on; rpvRender(); },
+    });
+    toggle(rd, {
+      label: '床グリッドを入れる', value: state.bprGrid,
+      title: '床のグリッドを一緒に描きます（透明背景のときは無効）',
+      onChange: (on) => { state.bprGrid = on; rpvRender(); },
+    });
+    btnRow(rd, [
+      { label: 'プレビュー', cls: 'wide primary',
+        title: '結果を画面で確認します。開いている間、上の設定を動かすと描き直します',
+        onClick: () => rpvOpen() },
+    ]);
+    btnRow(rd, [
+      { label: 'PNG 保存', title: '指定した倍率で描いて PNG として保存します',
+        onClick: () => app.renderStill() },
+    ]);
+  }
+
   // --- クリップ / トリム -------------------------------------------------
   const cl = section(right, 'クリップ / トリム', true);
   {
@@ -1258,6 +1397,12 @@ export function buildUI(app) {
     closeHelp() { help.close(); },
     toggleHelp() { help.toggle(); },
     helpIsOpen() { return help.isOpen(); },
+    /** レンダリングプレビュー */
+    openRenderPreview() { rpvOpen(); },
+    closeRenderPreview() { rpvClose(); },
+    renderPreviewIsOpen() { return rpvIsOpen(); },
+    /** プレビューの描き直しを待つ（テスト用） */
+    renderPreviewSrc() { return rpvImg.getAttribute('src') || ''; },
     /** 使い方ページが元にしているパレットの定義（ずれ検出のテスト用） */
     helpSources() { return HELP_SOURCES; },
     /** トランスポーズのトグル表示を state に合わせる（キー操作から呼ばれる） */

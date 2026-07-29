@@ -9,7 +9,7 @@ import { Sculptor, buildMirrors, mirrorPoint, mirrorVector } from './sculptor.js
 import { Renderer } from './renderer.js';
 import { BRUSH_IDS, BRUSHES, usesGrabPlane } from './brushes.js';
 import { buildUI } from './ui.js';
-import { exportOBJ, exportSTL, exportPLY, importOBJ, download } from './io.js';
+import { exportOBJ, exportSTL, exportPLY, importMesh as importMeshFile, importSTL, download } from './io.js';
 import * as store from './store.js';
 import { initWasmField, wasmFieldState, wasmFieldError, wasmFieldModule } from './wasmkernels.js';
 import { dynamesh } from './dynamesh.js';
@@ -90,6 +90,19 @@ const state = {
   wireAlpha: 0.32,
   maskDarken: 0.9,
   renderScale: 1,
+  // 仕上げレンダリング（BPR 相当）。実時間表示には影響しない
+  bprScale: 2,             // スーパーサンプリング倍率 1/2/4
+  bprShadow: 0.75,         // 影の強さ
+  bprShadowSoft: 1.5,      // 影のにじみ（シャドウマップの texel 単位）
+  bprAoSamples: 64,        // AO のサンプル数（実時間表示は 24）
+  bprOutline: 0,           // 輪郭線の太さ（出力 px。0 で無し）
+  bprOutlineStrength: 0.7,
+  bprDiffuse: 0.75,        // 拡散光の強さ
+  bprAmbient: 0.45,        // 環境光（影の中の明るさ）
+  bprLightAz: -40,         // 光の方位角（度）
+  bprLightEl: 45,          // 光の高度角（度）
+  bprTransparent: false,   // 背景を透明にして書き出す
+  bprGrid: false,          // 床グリッドを入れる
   invertOrbitY: false,
   bgPreset: 'dark',
   bgTop: BG_PRESETS.dark.top,
@@ -331,6 +344,60 @@ const app = {
       busy = false;
     }
   },
+  /**
+   * 仕上げレンダリング（BPR 相当）。影・高品質 AO・輪郭線つきで
+   * 解像度を上げて描き、PNG にして落とす。
+   */
+  async renderStill(opts = {}) {
+    if (busy || !renderer) return null;
+    // プレビューはスライダーを動かすたびに走るので、
+    // ビジー表示もトーストも出さない（点滅して読めなくなる）。
+    const quiet = !!opts.preview;
+    busy = true;
+    if (!quiet) {
+      ui.showBusy('レンダリング中…');
+      await new Promise(requestAnimationFrame);
+      await new Promise(requestAnimationFrame);
+    }
+    try {
+      const az = (state.bprLightAz || 0) * Math.PI / 180;
+      const el = (state.bprLightEl || 0) * Math.PI / 180;
+      const r = await renderer.renderStill(camera, mesh, state, Object.assign({
+        scale: state.bprScale,
+        shadow: state.bprShadow,
+        shadowSoft: state.bprShadowSoft,
+        aoSamples: state.bprAoSamples,
+        outline: state.bprOutline,
+        outlineStrength: state.bprOutlineStrength,
+        diffuse: state.bprDiffuse,
+        ambient: state.bprAmbient,
+        transparent: state.bprTransparent,
+        grid: state.bprGrid,
+        // 方位角 / 高度角から向きを作る（スライダー 2 本で回せるように）
+        lightDir: [
+          Math.cos(el) * Math.sin(az),
+          Math.sin(el),
+          Math.cos(el) * Math.cos(az),
+        ],
+      }, opts));
+      if (opts.download !== false) {
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        download(r.blob, `websculpt-render-${stamp}.png`, 'image/png');
+      }
+      if (!quiet) {
+        const ss = r.scale > 1 ? ` / ${r.scale}x（${r.renderedAt[0]}×${r.renderedAt[1]} で描画）` : '';
+        ui.toast(`レンダリング: ${r.width}×${r.height}${ss} / ${r.ms}ms`, 4000);
+      }
+      return r;
+    } catch (e) {
+      ui.toast('レンダリングでエラー: ' + e.message, 5000);
+      console.error(e);
+      return null;
+    } finally {
+      if (!quiet) ui.hideBusy();
+      busy = false;
+    }
+  },
   setTranspose(on) { applyTransposeMode(on); },
   toggleTranspose() { applyTransposeMode(!state.transposeMode); },
   resetSettings() {
@@ -361,22 +428,41 @@ const app = {
     }
     ui.toast(`${kind.toUpperCase()} を書き出しました`);
   },
-  importOBJ() {
+  /** OBJ / STL を読み込む（拡張子と中身の両方で形式を見分ける） */
+  importMesh() {
+    if (busy) return;
     const inp = document.createElement('input');
     inp.type = 'file';
-    inp.accept = '.obj,text/plain';
+    inp.accept = '.obj,.stl,text/plain,model/stl';
     inp.onchange = async () => {
       const f = inp.files && inp.files[0];
       if (!f) return;
+      busy = true;
+      ui.showBusy('読み込み中…');
+      await new Promise(requestAnimationFrame);
+      await new Promise(requestAnimationFrame);
       try {
-        const g = importOBJ(await f.text());
+        // STL はバイナリなので ArrayBuffer で読む。OBJ もそこから文字列にする。
+        const r = importMeshFile(f.name, await f.arrayBuffer());
+        const g = r.geom;
+        // いまアクティブなサブツールの形を差し替える（従来の OBJ 読み込みと同じ挙動）
         mesh.setGeometry(g.positions, g.indices);
         sculptor.setMesh(mesh);
         if (tools) tools.onMeshReplaced();
         frameCamera();
-        ui.toast(`読み込み: ${mesh.liveVerts.toLocaleString()} 頂点 / ${mesh.liveTris.toLocaleString()} 面`);
+        // STL は三角形の寄せ集めなので、溶接でどれだけ頂点が繋がったかを出す。
+        // ここが「元の面数 × 3 と同じ」なら溶接できておらず、彫刻すると剥がれる。
+        const welded = g.sourceTris
+          ? ` / ${(g.sourceTris * 3).toLocaleString()} 個の頂点を ${mesh.liveVerts.toLocaleString()} 個に溶接`
+          : '';
+        ui.toast(`${r.kind} を読み込み: ${mesh.liveVerts.toLocaleString()} 頂点`
+          + ` / ${mesh.liveTris.toLocaleString()} 面${welded}`, 4500);
       } catch (e) {
         ui.toast('読み込み失敗: ' + e.message, 4000);
+        console.error(e);
+      } finally {
+        ui.hideBusy();
+        busy = false;
       }
     };
     inp.click();
@@ -1277,6 +1363,9 @@ window.__wasmState = wasmFieldState;
 window.__parState = () => parallelState() + ':' + parallelWorkers();
 // ダイナメッシュを差し替え前の生の形で呼べるようにしておく（並列と逐次の突き合わせ用）
 window.__rawDynamesh = dynamesh;
+// 入出力の関数。ファイル選択ダイアログはテストから出せないので、
+// 読み込みの配線はここを直に叩いて確かめる。
+window.__io = { exportSTL, exportOBJ, exportPLY, importMesh: importMeshFile, importSTL };
 window.WebSculpt = {
   state, camera, app, BRUSHES,
   get mesh() { return mesh; },

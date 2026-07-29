@@ -2,7 +2,7 @@
 import { SculptMesh, PRIMITIVES, weld } from '../js/mesh.js';
 import { Sculptor, mirrorPoint } from '../js/sculptor.js';
 import { splitEdge, collapseEdge, refineRegion } from '../js/dyntopo.js';
-import { exportOBJ, exportSTL, exportPLY, importOBJ } from '../js/io.js';
+import { exportOBJ, exportSTL, exportPLY, importOBJ, importSTL, importMesh } from '../js/io.js';
 import { BRUSH_IDS } from '../js/brushes.js';
 import { dynamesh, hasBoundary, taubinSmooth } from '../js/dynamesh.js';
 import { initWasmFieldFromBytes, wasmFieldReady, setWasmKernels } from '../js/wasmkernels.js';
@@ -309,6 +309,71 @@ head('入出力');
   const quad = 'v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3 4\n';
   const qg = importOBJ(quad);
   ok(qg.indices.length === 6, `四角形が三角形化されていない: ${qg.indices.length}`);
+
+  // --- STL の読み込み -----------------------------------------------------
+  // STL は頂点の共有情報を持たない三角形の寄せ集めなので、**溶接できているか**が
+  // 命。溶接に失敗すると 1 頂点が面ごとに複製された状態になり、ring が張れず
+  // 彫刻すると面がバラバラに剥がれる。閉多様体になることで確かめる。
+  {
+    const sm = new SculptMesh();
+    sm.setGeometry(g.positions, g.indices);      // 穴なしの球
+    const bin = exportSTL(sm);
+    const r = importSTL(bin);
+    ok(r.indices.length / 3 === sm.liveTris,
+      `バイナリ STL の面数が合わない: ${r.indices.length / 3} != ${sm.liveTris}`);
+    ok(r.positions.length / 3 === sm.liveVerts,
+      `溶接後の頂点数が合わない: ${r.positions.length / 3} != ${sm.liveVerts}`
+      + `（溶接できていないと ${sm.liveTris * 3} になる）`);
+    ok(r.sourceTris === sm.liveTris, `sourceTris が合わない: ${r.sourceTris}`);
+    console.log(`  STL round-trip: ${sm.liveTris} 面 → ${(sm.liveTris * 3).toLocaleString()} 個の頂点を`
+      + ` ${(r.positions.length / 3).toLocaleString()} 個に溶接`);
+    const m3 = new SculptMesh();
+    m3.setGeometry(r.positions, r.indices);
+    validate(m3, { closed: true, label: 'binary STL round-trip' });
+
+    // 原点中心・単位サイズに正規化されているか（シンメトリが原点前提）
+    const bb = m3.bounds();
+    const ctr = Math.max(Math.abs(bb.center[0]), Math.abs(bb.center[1]), Math.abs(bb.center[2]));
+    ok(ctr < 1e-5, `原点中心になっていない: ${ctr.toExponential(2)}`);
+    const ext = Math.max(bb.max[0] - bb.min[0], bb.max[1] - bb.min[1], bb.max[2] - bb.min[2]);
+    ok(Math.abs(ext - 2) < 1e-5, `単位サイズになっていない: ${ext.toFixed(4)}`);
+
+    // アスキー STL。四面体を 1 つ書いて、頂点が 4 個に溶接されることを見る
+    const tetra = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]];
+    const faces = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
+    let asc = 'solid tetra\n';
+    for (const f of faces) {
+      asc += '  facet normal 0 0 0\n    outer loop\n';
+      for (const vi of f) asc += `      vertex ${tetra[vi].join(' ')}\n`;
+      asc += '    endloop\n  endfacet\n';
+    }
+    asc += 'endsolid tetra\n';
+    const a1 = importSTL(asc);
+    ok(a1.indices.length === 12, `アスキー STL の面数が合わない: ${a1.indices.length / 3}`);
+    ok(a1.positions.length / 3 === 4,
+      `アスキー STL の頂点が溶接されていない: ${a1.positions.length / 3} != 4`);
+    // 文字列でも ArrayBuffer でも同じ結果になること
+    const a2 = importSTL(new TextEncoder().encode(asc).buffer);
+    ok(a2.positions.length === a1.positions.length && a2.indices.length === a1.indices.length,
+      'アスキー STL をバイト列で渡したときに結果が変わる');
+
+    // ヘッダに "solid" と書くバイナリ STL（実在する書き出し器がある）を
+    // アスキーと誤判定しないこと。判定はサイズの逆算で行っている。
+    const fake = exportSTL(sm);
+    new Uint8Array(fake, 0, 5).set(new TextEncoder().encode('solid'));
+    const r2 = importSTL(fake);
+    ok(r2.indices.length / 3 === sm.liveTris,
+      `"solid" で始まるバイナリ STL を読めない: ${r2.indices.length / 3}`);
+
+    // 形式の自動判別
+    ok(importMesh('a.stl', bin).kind === 'STL', '拡張子 .stl を STL と判別できない');
+    ok(importMesh('a.obj', objBytes.slice().buffer).kind === 'OBJ', '拡張子 .obj を OBJ と判別できない');
+    ok(importMesh('noext', bin).kind === 'STL', '拡張子なしのバイナリ STL を判別できない');
+    ok(importMesh('noext', new TextEncoder().encode(asc).buffer).kind === 'STL',
+      '拡張子なしのアスキー STL を判別できない');
+    ok(importMesh('noext', objBytes.slice().buffer).kind === 'OBJ',
+      '拡張子なしの OBJ を判別できない');
+  }
 }
 
 // ---------------------------------------------------------------------------

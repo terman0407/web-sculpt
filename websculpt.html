@@ -892,6 +892,76 @@ kbd {
   .help-main { padding: 4px 12px 24px; }
   .help-title .help-hint { display: none; }
 }
+
+/* ---------- レンダリングプレビュー ---------- */
+/* 設定を動かすと描き直す。1 回 13ms 程度なのでスライダーを掴んだまま見られる。 */
+.rpv {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  background: #08090bd9;
+  backdrop-filter: blur(3px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .12s;
+  z-index: 35;
+}
+.rpv.show { opacity: 1; pointer-events: all; }
+.rpv-card {
+  display: flex;
+  flex-direction: column;
+  max-width: 100%;
+  max-height: 100%;
+  background: #14161af5;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.rpv-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  flex: 0 0 auto;
+}
+.rpv-title { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; }
+.rpv-info {
+  margin-right: auto;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.rpv-head .btn { flex: 0 0 auto; }
+.rpv-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  /* 透明背景で書き出すときに、抜けているのが分かるように市松模様を敷く */
+  background-color: #101216;
+  background-image:
+    linear-gradient(45deg, #191c22 25%, transparent 25%, transparent 75%, #191c22 75%),
+    linear-gradient(45deg, #191c22 25%, transparent 25%, transparent 75%, #191c22 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+  overflow: auto;
+}
+.rpv-body img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.rpv.busy .rpv-body { opacity: .55; }
 </style>
 </head>
 <body>
@@ -933,6 +1003,18 @@ kbd {
       <!-- 使い方ページ。中身は js/help.js が組み立てる（ツール一覧を
            各パレットの表から生成するので、ここに書き写さない） -->
       <div id="help" class="help"></div>
+      <!-- レンダリングプレビュー。設定を動かすと描き直す -->
+      <div id="rpv" class="rpv">
+        <div class="rpv-card">
+          <div class="rpv-head">
+            <span class="rpv-title">レンダリングプレビュー</span>
+            <span id="rpvInfo" class="rpv-info"></span>
+            <button id="rpvSave" class="btn primary">PNG 保存</button>
+            <button id="rpvClose" class="btn">閉じる</button>
+          </div>
+          <div class="rpv-body"><img id="rpvImg" alt="レンダリング結果"></div>
+        </div>
+      </div>
     </main>
 
     <aside id="rightbar">
@@ -1350,6 +1432,20 @@ const M4 = {
     o[10] = far / (near - far);
     o[11] = -1;
     o[14] = (far * near) / (near - far);
+    return o;
+  },
+
+  /**
+   * 平行投影。シャドウマップ用（平行光源なので遠近が付いてはいけない）。
+   * perspective と同じ WebGPU の深度範囲 [0, 1] に合わせる。
+   */
+  ortho(o, halfW, halfH, near, far) {
+    o.fill(0);
+    o[0] = 1 / halfW;
+    o[5] = 1 / halfH;
+    o[10] = 1 / (near - far);
+    o[14] = near / (near - far);
+    o[15] = 1;
     return o;
   },
 
@@ -7810,8 +7906,8 @@ __M['shaders.js'] = (function () {
 //   5. overlay: ブラシリングを canvas に直接描画
 // ---------------------------------------------------------------------------
 
-// 行列5 + vec4×10 = 120 float = 480 byte
-const UNIFORM_FLOATS = 5 * 16 + 10 * 4;
+// 行列6 + vec4×13 = 148 float = 592 byte
+const UNIFORM_FLOATS = 6 * 16 + 13 * 4;
 
 // Float32Array 内のオフセット（float 単位）
 const UO = {
@@ -7820,6 +7916,11 @@ const UO = {
   cav: 108,        // x キャビティ強度, y ピーク強度, z キャビティゲイン, w 予約
   grid: 112,       // x マス間隔, y 全体サイズ, z 線の太さ, w 表示フラグ
   gridCol: 116,    // rgb 線の色, a 濃さ
+  // --- 仕上げレンダリング（BPR 相当）。実時間表示では影 0 / AO サンプル 24 ---
+  lightVP: 120,    // 光源からの viewProj（シャドウマップの引き当てに使う）
+  bprA: 136,       // x 影の強さ, y 影のにじみ(texel), z AO サンプル数, w シャドウマップ解像度
+  bprB: 140,       // x 輪郭線の太さ(px), y 輪郭線の濃さ, z 拡散光の強さ, w 環境光
+  lightDir: 144,   // xyz 光の向き（正規化・ワールド）, w 予約
 };
 
 const COMMON = /* wgsl */`
@@ -7839,6 +7940,10 @@ struct Uniforms {
   cav         : vec4<f32>,   // x cavity, y peak, z gain, w -
   grid        : vec4<f32>,   // x spacing, y extent, z thickness, w floorY
   gridCol     : vec4<f32>,
+  lightVP     : mat4x4<f32>, // 光源からの viewProj
+  bprA        : vec4<f32>,   // x shadow, y softness(texel), z aoSamples, w shadowMapSize
+  bprB        : vec4<f32>,   // x outlineWidth(px), y outlineStrength, z diffuse, w ambient
+  lightDir    : vec4<f32>,   // xyz light direction (world, normalized)
 };
 
 fn linearDepthFromNdc(d: f32, near: f32, far: f32) -> f32 {
@@ -7889,12 +7994,30 @@ fn fs(i : VSOut) -> FSOut {
 `;
 
 // ---------------------------------------------------------------------------
-// 1b. メッシュ（MatCap シェーディング）
+// 1a'. シャドウマップ（光源から深度だけを描く）
+//
+// 仕上げレンダリングでだけ使う。実時間表示では影の強さを 0 にして
+// メッシュシェーダ側の分岐で丸ごと飛ばすので、この描画も走らせない。
+// 平行光源なので投影は ortho。範囲はモデルの外接球に合わせて JS 側で決める。
+// ---------------------------------------------------------------------------
+const SHADOW_WGSL = COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> u : Uniforms;
+
+@vertex
+fn vs(@location(0) position : vec3<f32>) -> @builtin(position) vec4<f32> {
+  return u.lightVP * vec4<f32>(position, 1.0);
+}
+`;
+
+// ---------------------------------------------------------------------------
+// 1b. メッシュ（MatCap シェーディング + 仕上げ用の影）
 // ---------------------------------------------------------------------------
 const MESH_WGSL = COMMON + /* wgsl */`
 @group(0) @binding(0) var<uniform> u : Uniforms;
 @group(0) @binding(1) var matcapTex : texture_2d_array<f32>;
 @group(0) @binding(2) var matcapSmp : sampler;
+@group(0) @binding(3) var shadowTex : texture_depth_2d;
+@group(0) @binding(4) var shadowSmp : sampler_comparison;
 
 struct VSOut {
   @builtin(position) pos : vec4<f32>,
@@ -7902,6 +8025,8 @@ struct VSOut {
   @location(1) col  : vec3<f32>,
   @location(2) mask : f32,
   @location(3) curv : f32,
+  @location(4) wnrm : vec3<f32>,
+  @location(5) lpos : vec4<f32>,
 };
 
 @vertex
@@ -7918,7 +8043,41 @@ fn vs(
   o.col = color;
   o.mask = mask;
   o.curv = curv;
+  o.wnrm = normal;
+  o.lpos = u.lightVP * vec4<f32>(position, 1.0);
   return o;
+}
+
+/**
+ * シャドウマップを PCF で引く。1.0 = 日向、0.0 = 影。
+ *
+ * バイアスは法線の傾きに応じて増やす（面が光に対して寝ているほど、同じ深度差でも
+ * テクセル内の高低差が大きくなり、自分自身を影にしてしまう = シャドウアクネ）。
+ */
+fn shadowFactor(lpos : vec4<f32>, wnrm : vec3<f32>) -> f32 {
+  if (lpos.w <= 0.0) { return 1.0; }
+  let ndc = lpos.xyz / lpos.w;
+  if (abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) { return 1.0; }
+  let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+
+  let ndl = abs(dot(normalize(wnrm), normalize(u.lightDir.xyz)));
+  let slope = clamp(1.0 - ndl, 0.0, 1.0);
+  // 深度は [0,1] の平行投影なので、バイアスも相対値で置ける
+  let bias = 0.0012 + 0.006 * slope;
+  // 変数名に ref は使えない（WGSL の予約語）
+  let zref = ndc.z - bias;
+
+  let texel = 1.0 / max(1.0, u.bprA.w);
+  let r = max(0.0, u.bprA.y) * texel;
+  var sum = 0.0;
+  // 3x3 の PCF。にじみ幅 r は「影のやわらかさ」スライダーで動かす
+  for (var dy = -1; dy <= 1; dy = dy + 1) {
+    for (var dx = -1; dx <= 1; dx = dx + 1) {
+      let o2 = vec2<f32>(f32(dx), f32(dy)) * r;
+      sum = sum + textureSampleCompareLevel(shadowTex, shadowSmp, uv + o2, zref);
+    }
+  }
+  return sum / 9.0;
 }
 
 struct FSOut {
@@ -7947,6 +8106,21 @@ fn fs(i : VSOut, @builtin(front_facing) ff : bool) -> FSOut {
     let cd = 1.0 - u.cav.x * (cavity * cavity * (3.0 - 2.0 * cavity));
     c = c * cd;
     c = c + c * (u.cav.y * peak * peak);
+  }
+
+  // 仕上げレンダリングの陰影。実時間表示では bprA.x = 0 なので丸ごと飛ぶ。
+  //
+  // MatCap は「カメラから見た向き」で色が決まる方式なので、それ単体では光源の
+  // 位置が変わっても絵が変わらない。ここで拡散光と影を掛けて、
+  // 「どこから光が当たっているか」が分かる絵にする。
+  if (u.bprA.x > 0.001) {
+    let wn = normalize(i.wnrm);
+    let ld = normalize(u.lightDir.xyz);
+    let ndl = max(0.0, dot(wn, ld));
+    let sh = shadowFactor(i.lpos, i.wnrm);
+    // 影は「拡散光を落とす」形で掛ける。環境光は残すので真っ黒にはならない。
+    let lit = u.bprB.w + u.bprB.z * ndl * mix(1.0, sh, u.bprA.x);
+    c = c * lit;
   }
 
   // マスク表示（ZBrush 風に暗い青灰色）
@@ -8103,7 +8277,9 @@ fn fs(i : VSOut) -> GridOut {
 // 2. SSAO (compute)
 // ---------------------------------------------------------------------------
 const SSAO_WGSL = COMMON + /* wgsl */`
-struct Kernel { s : array<vec4<f32>, 24> };
+// サンプル数は uniform（bprA.z）で決める。実時間表示は 24、仕上げは 64。
+// 配列は最大数ぶん確保しておき、ループ回数だけを変える。
+struct Kernel { s : array<vec4<f32>, 64> };
 
 @group(0) @binding(0) var<uniform> u : Uniforms;
 @group(0) @binding(1) var depthTex  : texture_depth_2d;
@@ -8153,7 +8329,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let radius = u.aoP.x;
   let bias = u.aoP.z;
   var occ = 0.0;
-  let N = 24;
+  let N = clamp(i32(u.bprA.z), 1, 64);
   for (var i = 0; i < N; i = i + 1) {
     let ks = k.s[i].xyz;
     let sp = vp + (t * ks.x + b * ks.y + n * ks.z) * radius;
@@ -8227,6 +8403,8 @@ const PRESENT_WGSL = COMMON + /* wgsl */`
 @group(0) @binding(1) var colTex : texture_2d<f32>;
 @group(0) @binding(2) var aoTex  : texture_2d<f32>;
 @group(0) @binding(3) var smp    : sampler;
+@group(0) @binding(4) var depthTex  : texture_depth_2d;
+@group(0) @binding(5) var normalTex : texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) pos : vec4<f32>,
@@ -8282,6 +8460,40 @@ fn fxaa(uv : vec2<f32>) -> vec3<f32> {
   return rB;
 }
 
+/**
+ * 輪郭線。仕上げレンダリングでだけ使う（bprB.x = 0 なら丸ごと飛ぶ）。
+ *
+ * 深度の段差と法線の折れの両方を見る。深度だけだと同じ奥行きで重なった面の境目が
+ * 出ず、法線だけだと平行な面が重なった所に線が出ない。
+ * 深度差は線形深度に対する相対値で見る（絶対値だと遠景で線が出なくなる）。
+ */
+fn outlineEdge(uv : vec2<f32>, px : f32) -> f32 {
+  let dim = vec2<i32>(textureDimensions(depthTex));
+  let c = vec2<i32>(i32(uv.x * f32(dim.x)), i32(uv.y * f32(dim.y)));
+  let step = max(1, i32(px));
+  let dc = textureLoad(depthTex, clamp(c, vec2<i32>(0), dim - vec2<i32>(1)), 0);
+  if (dc >= 0.99999) { return 0.0; }
+  let lc = linearDepthFromNdc(dc, u.params.x, u.params.y);
+  let nc = normalize(textureLoad(normalTex, clamp(c, vec2<i32>(0), dim - vec2<i32>(1)), 0).xyz);
+
+  var dMax = 0.0;
+  var nMin = 1.0;
+  var offs = array<vec2<i32>, 4>(
+    vec2<i32>(step, 0), vec2<i32>(-step, 0), vec2<i32>(0, step), vec2<i32>(0, -step));
+  for (var k = 0; k < 4; k = k + 1) {
+    let sc = clamp(c + offs[k], vec2<i32>(0), dim - vec2<i32>(1));
+    let sd = textureLoad(depthTex, sc, 0);
+    if (sd >= 0.99999) { dMax = max(dMax, 1.0); continue; }   // 背景との境目
+    let ls = linearDepthFromNdc(sd, u.params.x, u.params.y);
+    dMax = max(dMax, abs(ls - lc) / max(1e-5, lc) * 12.0);
+    let sn = normalize(textureLoad(normalTex, sc, 0).xyz);
+    nMin = min(nMin, dot(nc, sn));
+  }
+  let dEdge = smoothstep(0.25, 0.8, dMax);
+  let nEdge = smoothstep(0.85, 0.35, nMin);
+  return clamp(max(dEdge, nEdge), 0.0, 1.0);
+}
+
 @fragment
 fn fs(i : VSOut) -> @location(0) vec4<f32> {
   // デバッグ表示: 1 = AO のみ
@@ -8294,10 +8506,24 @@ fn fs(i : VSOut) -> @location(0) vec4<f32> {
     let ao = textureSampleLevel(aoTex, smp, i.uv, 0.0).r;
     c = c * mix(1.0, ao, clamp(u.aoP.y, 0.0, 1.0));
   }
-  // 軽いビネット
-  let d = length(i.uv - vec2<f32>(0.5, 0.5));
-  c = c * (1.0 - 0.20 * smoothstep(0.55, 1.15, d));
-  return vec4<f32>(srgbEncode(c), 1.0);
+  if (u.bprB.x > 0.001 && u.bprB.y > 0.001) {
+    let e = outlineEdge(i.uv, u.bprB.x);
+    c = c * (1.0 - clamp(u.bprB.y, 0.0, 1.0) * e);
+  }
+  var a = 1.0;
+  if (u.lightDir.w > 0.5) {
+    // 背景を透明にして書き出すモード。深度が遠クリップのまま = 何も無い所。
+    // ビネットは背景を暗くする効果なので、透明のときは掛けない。
+    let dim = vec2<i32>(textureDimensions(depthTex));
+    let cc = clamp(vec2<i32>(i32(i.uv.x * f32(dim.x)), i32(i.uv.y * f32(dim.y))),
+      vec2<i32>(0), dim - vec2<i32>(1));
+    if (textureLoad(depthTex, cc, 0) >= 0.99999) { a = 0.0; }
+  } else {
+    // 軽いビネット
+    let d = length(i.uv - vec2<f32>(0.5, 0.5));
+    c = c * (1.0 - 0.20 * smoothstep(0.55, 1.15, d));
+  }
+  return vec4<f32>(srgbEncode(c), a);
 }
 `;
 
@@ -8399,7 +8625,7 @@ fn fs(i : VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(r.color.rgb, r.color.a * i.fade);
 }
 `;
-  return { UNIFORM_FLOATS, UO, BG_WGSL, MESH_WGSL, WIRE_WGSL, OVERLAY_WGSL, GRID_WGSL, SSAO_WGSL, BLUR_WGSL, PRESENT_WGSL, PICK_WGSL, RING_WGSL };
+  return { UNIFORM_FLOATS, UO, BG_WGSL, SHADOW_WGSL, MESH_WGSL, WIRE_WGSL, OVERLAY_WGSL, GRID_WGSL, SSAO_WGSL, BLUR_WGSL, PRESENT_WGSL, PICK_WGSL, RING_WGSL };
 })();
 
 /* ===== renderer.js ===== */
@@ -8413,10 +8639,10 @@ __M['renderer.js'] = (function () {
 //    持たずに O(1) でオクルージョン込みの正確な表面座標が得られる。
 // ---------------------------------------------------------------------------
 
-const { clamp } = __M['math.js'];
+const { clamp, M4, V3 } = __M['math.js'];
 const { DIRTY_SHIFT, DIRTY_BLOCK } = __M['mesh.js'];
 const { generateMatcapLayer, MATERIALS } = __M['matcap.js'];
-const { UNIFORM_FLOATS, UO, BG_WGSL, MESH_WGSL, WIRE_WGSL, OVERLAY_WGSL, GRID_WGSL, SSAO_WGSL, BLUR_WGSL, PRESENT_WGSL, RING_WGSL, PICK_WGSL } = __M['shaders.js'];
+const { UNIFORM_FLOATS, UO, BG_WGSL, MESH_WGSL, SHADOW_WGSL, WIRE_WGSL, OVERLAY_WGSL, GRID_WGSL, SSAO_WGSL, BLUR_WGSL, PRESENT_WGSL, RING_WGSL, PICK_WGSL } = __M['shaders.js'];
 
 const COLOR_FORMAT = 'rgba16float';
 const NORMAL_FORMAT = 'rgba16float';
@@ -8425,6 +8651,9 @@ const AO_FORMAT = 'rgba8unorm';
 const RING_SEGMENTS = 96;
 const PICK_SEARCH = 4;               // カーソル周辺の深度探索半径（px）
 const PICK_BYTES = 16;               // vec4<f32>
+// シャドウマップの一辺。2048² の depth32float で 16MB。仕上げレンダリング専用で、
+// 実時間表示では描画すらしないので常時確保でも実害はない。
+const SHADOW_SIZE = 2048;
 
 /** 1 / 2 / 5 × 10^n に丸める（グリッド間隔用） */
 function niceStep(x) {
@@ -8470,11 +8699,13 @@ class Renderer {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
+    // AO のサンプル方向。実時間表示は先頭 24 個、仕上げレンダリングは 64 個を使う
+    // （シェーダ側はループ回数を uniform で変えるだけ）。
     this.kernelBuf = device.createBuffer({
-      size: 24 * 16,
+      size: 64 * 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(this.kernelBuf, 0, ssaoKernel(24));
+    device.queue.writeBuffer(this.kernelBuf, 0, ssaoKernel(64));
 
     // リングオーバーレイ用ユニフォーム: mat4x4 * 8 + color + info
     this.ringData = new Float32Array(8 * 16 + 4 + 4);
@@ -8563,17 +8794,38 @@ class Renderer {
   // -----------------------------------------------------------------------
   _buildStatic() {
     const d = this.device;
+    // パイプラインの生成が失敗しても例外にならず、使ったときに
+    // 「is invalid due to a previous error」という形で初めて表に出る。
+    // それだと原因のシェーダが分からないので、ここで捕まえて記録する。
+    // スコープは **この関数の最後で** 閉じること（すぐ pop すると何も入らない）。
+    this.buildError = null;
+    d.pushErrorScope('validation');
 
+    // binding 3/4 はシャドウマップ。使うのは MESH シェーダだけだが、
+    // bglMain は BG / WIRE / GRID / OVERLAY でも共有している。WebGPU では
+    // シェーダがレイアウトの一部だけを使うのは許されるので、まとめて持たせる。
     this.bglMain = d.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+        { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
+        { binding: 4, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
       ],
     });
     this.bglRing = d.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      ],
+    });
+    // シャドウマップを描くパス専用。**bgMain は使えない**。
+    // bgMain にはシャドウマップ自体がテクスチャとして入っているので、
+    // 同じパスで「書き込み対象」と「読み取り対象」を兼ねることになり、
+    // WebGPU に弾かれる（usage includes writable usage and another usage
+    // in the same synchronization scope）。ユニフォームだけを渡す。
+    this.bglShadow = d.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
       ],
     });
     this.bglSSAO = d.createBindGroupLayout({
@@ -8607,6 +8859,9 @@ class Renderer {
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
         { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+        // 輪郭線と透明背景の判定に深度と法線を読む
+        { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
+        { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
       ],
     });
 
@@ -8659,6 +8914,22 @@ class Renderer {
       },
       primitive: { topology: 'triangle-list', cullMode: 'none' },
       depthStencil: depthState(true, 'less'),
+    });
+
+    // シャドウマップ（深度だけ。色の添付なし）
+    const shadowMod = mod(SHADOW_WGSL);
+    this.pipeShadow = d.createRenderPipeline({
+      layout: d.createPipelineLayout({ bindGroupLayouts: [this.bglShadow] }),
+      vertex: {
+        module: shadowMod, entryPoint: 'vs',
+        buffers: [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }],
+      },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      depthStencil: depthState(true, 'less'),
+    });
+    this.bgShadow = d.createBindGroup({
+      layout: this.bglShadow,
+      entries: [{ binding: 0, resource: { buffer: this.uniformBuf } }],
     });
 
     this.pipeWire = d.createRenderPipeline({
@@ -8783,18 +9054,26 @@ class Renderer {
       magFilter: 'linear', minFilter: 'linear',
       addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
     });
-
-    this.bgMain = d.createBindGroup({
-      layout: this.bglMain,
-      entries: [
-        { binding: 0, resource: { buffer: this.uniformBuf } },
-        { binding: 1, resource: this.matcapTex.createView({ dimension: '2d-array' }) },
-        { binding: 2, resource: this.linearSampler },
-      ],
+    // 比較サンプラ。ハードウェアの深度比較 + 線形補間が使えるので、
+    // 3x3 の PCF が実質 3x3 の「なめらかな」比較になる。
+    this.shadowSampler = d.createSampler({
+      compare: 'less-equal',
+      magFilter: 'linear', minFilter: 'linear',
+      addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
     });
+    this.matcapView = this.matcapTex.createView({ dimension: '2d-array' });
+    this._ensureShadowMap(SHADOW_SIZE);
+    this._rebuildMainBG();
+
     this.bgRing = d.createBindGroup({
       layout: this.bglRing,
       entries: [{ binding: 0, resource: { buffer: this.ringBuf } }],
+    });
+
+    d.popErrorScope().then((e) => {
+      if (!e) return;
+      this.buildError = e.message;
+      console.error('パイプラインの生成に失敗しました:\n' + e.message);
     });
   }
 
@@ -8845,8 +9124,16 @@ class Renderer {
     const w = Math.max(8, Math.round(cw * this.renderScale));
     const h = Math.max(8, Math.round(ch * this.renderScale));
     if (!force && w === this.rtW && h === this.rtH) return;
-
     this.rtW = w; this.rtH = h;
+    this._resizeTo(w, h);
+  }
+
+  /**
+   * 描画ターゲットとバインドグループを w×h で作り直す。
+   * 仕上げレンダリングが一時的に解像度を上げるためにも使うので、
+   * canvas のサイズ計算とは切り離してある。
+   */
+  _resizeTo(w, h) {
     const d = this.device;
     if (this.targets) {
       for (const t of Object.values(this.targets)) { if (t.destroy) t.destroy(); }
@@ -8912,8 +9199,42 @@ class Renderer {
         { binding: 1, resource: this.views.color },
         { binding: 2, resource: this.views.aoBlur },
         { binding: 3, resource: this.linearSampler },
+        { binding: 4, resource: this.views.depth },
+        { binding: 5, resource: this.views.normal },
       ],
     });
+    this._rebuildMainBG();
+  }
+
+  /**
+   * bgMain を作り直す。シャドウマップの view を含むので、
+   * シャドウマップを張り替えたときと解像度を変えたときの両方で呼ぶ。
+   */
+  _rebuildMainBG() {
+    const d = this.device;
+    if (!this.shadowTex) this._ensureShadowMap(SHADOW_SIZE);
+    this.bgMain = d.createBindGroup({
+      layout: this.bglMain,
+      entries: [
+        { binding: 0, resource: { buffer: this.uniformBuf } },
+        { binding: 1, resource: this.matcapView },
+        { binding: 2, resource: this.linearSampler },
+        { binding: 3, resource: this.shadowView },
+        { binding: 4, resource: this.shadowSampler },
+      ],
+    });
+  }
+
+  /** シャドウマップ（深度のみ）を用意する */
+  _ensureShadowMap(size) {
+    if (this.shadowTex && this.shadowSize === size) return;
+    if (this.shadowTex) this.shadowTex.destroy();
+    this.shadowSize = size;
+    this.shadowTex = this.device.createTexture({
+      size: [size, size], format: DEPTH_FORMAT,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.shadowView = this.shadowTex.createView();
   }
 
   // -----------------------------------------------------------------------
@@ -9245,6 +9566,7 @@ class Renderer {
     U[UO.grid + 2] = 1.0;
     U[UO.grid + 3] = state.gridY || 0;             // 床の高さ（モデルの底に合わせる）
     U.set(state.gridColor, UO.gridCol);
+    this._writeBpr(null);
     d.queue.writeBuffer(this.uniformBuf, 0, U);
 
     // --- リング ---
@@ -9393,7 +9715,352 @@ class Renderer {
     if (pickSlot) this._resolvePick(pickSlot);
   }
 
+  // -----------------------------------------------------------------------
+  // 仕上げレンダリング（ZBrush の BPR 相当）
+  //
+  // ここが GPU の使い所。彫刻の計算を GPU に出すと結果を CPU に戻す転送が
+  // 支配的になって遅くなるが（実測 3.2ms 対 27ms）、レンダリングは結果を
+  // 戻す必要がない。PNG にするときだけ 1 回読み戻す。
+  //
+  // やっていること:
+  //   1. 光源から深度だけを描く（シャドウマップ）
+  //   2. 解像度を 2〜4 倍に上げて本描画（影 + 拡散光つき）
+  //   3. AO のサンプル数を 24 → 64 に上げる
+  //   4. 輪郭線を合成
+  //   5. 読み戻して JS 側で N×N を平均（スーパーサンプリングの解決）
+  // 4 の輪郭線と 5 の平均以外は実時間表示と同じパイプラインを使い回す。
+  // -----------------------------------------------------------------------
+
+  /** BPR 用ユニフォームを書く。opts が null なら実時間表示の値（影なし） */
+  _writeBpr(opts) {
+    const U = this.uniformData;
+    if (!opts) {
+      U.fill(0, UO.lightVP, UO.lightVP + 16);
+      U[UO.bprA] = 0;                    // 影なし → メッシュシェーダの分岐が丸ごと飛ぶ
+      U[UO.bprA + 1] = 1;
+      U[UO.bprA + 2] = 24;               // 実時間表示の AO サンプル数
+      U[UO.bprA + 3] = this.shadowSize || SHADOW_SIZE;
+      U[UO.bprB] = 0;                    // 輪郭線なし
+      U[UO.bprB + 1] = 0;
+      U[UO.bprB + 2] = 0;
+      U[UO.bprB + 3] = 1;
+      U[UO.lightDir] = 0; U[UO.lightDir + 1] = 0; U[UO.lightDir + 2] = 0;
+      U[UO.lightDir + 3] = 0;            // 透明背景オフ
+      return;
+    }
+    U.set(opts.lightVP, UO.lightVP);
+    U[UO.bprA] = opts.shadow;
+    U[UO.bprA + 1] = opts.shadowSoft;
+    U[UO.bprA + 2] = opts.aoSamples;
+    U[UO.bprA + 3] = this.shadowSize || SHADOW_SIZE;
+    U[UO.bprB] = opts.outline;
+    U[UO.bprB + 1] = opts.outlineStrength;
+    U[UO.bprB + 2] = opts.diffuse;
+    U[UO.bprB + 3] = opts.ambient;
+    U[UO.lightDir] = opts.lightDir[0];
+    U[UO.lightDir + 1] = opts.lightDir[1];
+    U[UO.lightDir + 2] = opts.lightDir[2];
+    U[UO.lightDir + 3] = opts.transparent ? 1 : 0;
+  }
+
+  /**
+   * 光源からの viewProj を作る。
+   * 平行光源なので ortho。範囲はモデルの外接球にぴったり合わせる
+   * （広く取りすぎるとテクセルが粗くなって影がガタガタになる）。
+   */
+  _lightMatrix(center, radius, dir, out) {
+    const r = Math.max(radius, 1e-4);
+    const eye = V3.create(
+      center[0] + dir[0] * r * 3,
+      center[1] + dir[1] * r * 3,
+      center[2] + dir[2] * r * 3);
+    const up = Math.abs(dir[1]) > 0.95 ? V3.create(0, 0, 1) : V3.create(0, 1, 0);
+    const view = M4.create();
+    M4.lookAt(view, eye, center, up);
+    const proj = M4.create();
+    // 視点はモデルから 3r 離れているので、near/far は r で挟めば全体が入る
+    M4.ortho(proj, r * 1.05, r * 1.05, r * 2, r * 4);
+    M4.multiply(out, proj, view);
+    return out;
+  }
+
+  /**
+   * 仕上げレンダリングして PNG の Blob を返す。
+   *
+   * @param {object} camera
+   * @param {object} mesh
+   * @param {object} state 通常の描画 state（マテリアル・AO・背景色などを流用）
+   * @param {object} o {
+   *   scale, shadow, shadowSoft, aoSamples, outline, outlineStrength,
+   *   diffuse, ambient, lightDir, transparent, grid
+   * }
+   * @returns {Promise<{blob: Blob, width: number, height: number, ms: number}>}
+   */
+  async renderStill(camera, mesh, state, o = {}) {
+    const d = this.device;
+    const t0 = performance.now();
+    const scale = clamp(Math.round(o.scale || 2), 1, 4);
+    const outW = this.canvas.width, outH = this.canvas.height;
+
+
+    // 上限を超えたら倍率を落とす（4x で 4K だと 1 辺が 16384 を超える）
+    const lim = d.limits ? d.limits.maxTextureDimension2D : 8192;
+    let sc = scale;
+    while (sc > 1 && (outW * sc > lim || outH * sc > lim)) sc--;
+    const rw = outW * sc, rh = outH * sc;
+
+    const bb = mesh.bounds();
+    const dir = o.lightDir || [-0.45, 0.75, 0.5];
+    const dl = Math.hypot(dir[0], dir[1], dir[2]) || 1;
+    const lightDir = [dir[0] / dl, dir[1] / dl, dir[2] / dl];
+    const lightVP = this._lightMatrix(bb.center, bb.radius, lightDir, M4.create());
+    const bpr = {
+      lightVP, lightDir,
+      shadow: o.shadow === undefined ? 0.75 : clamp(o.shadow, 0, 1),
+      shadowSoft: o.shadowSoft === undefined ? 1.5 : Math.max(0, o.shadowSoft),
+      aoSamples: clamp(Math.round(o.aoSamples || 64), 1, 64),
+      // 輪郭線の太さは「出力の px」で指定させる。スーパーサンプリング中の
+      // 高解像度バッファ上で数えるので、倍率を掛けないと縮小で薄まって
+      // 点々になる（2 倍だと 1/4 の濃さになった）。
+      outline: Math.max(0, o.outline === undefined ? 0 : o.outline) * sc,
+      outlineStrength: clamp(o.outlineStrength === undefined ? 0.7 : o.outlineStrength, 0, 1),
+      diffuse: o.diffuse === undefined ? 0.75 : Math.max(0, o.diffuse),
+      ambient: o.ambient === undefined ? 0.45 : Math.max(0, o.ambient),
+      transparent: !!o.transparent,
+    };
+
+    // 実時間表示の解像度を退避して、レンダ用に上げる。
+    // resize() が全ターゲットとバインドグループを作り直してくれるので、
+    // 専用のパスを別に持たずに済む。
+    const savedScale = this.renderScale;
+    const savedRtW = this.rtW, savedRtH = this.rtH;
+    this.rtW = rw; this.rtH = rh;
+    let out = null, readBuf = null;
+    try {
+      this._resizeTo(rw, rh);
+
+      // --- ユニフォーム ---
+      this.syncMesh(mesh);
+      const U = this.uniformData;
+      U.set(camera.view, UO.view);
+      U.set(camera.proj, UO.proj);
+      U.set(camera.viewProj, UO.viewProj);
+      U.set(camera.invProj, UO.invProj);
+      U.set(camera.invViewProj, UO.invViewProj);
+      U[UO.camPos] = camera.eye[0]; U[UO.camPos + 1] = camera.eye[1];
+      U[UO.camPos + 2] = camera.eye[2]; U[UO.camPos + 3] = 1;
+      U[UO.params] = camera.near;
+      U[UO.params + 1] = camera.far;
+      const matIdx = clamp(state.material | 0, 0, this.matcapCount - 1);
+      this.ensureMatcap(matIdx);
+      U[UO.params + 2] = matIdx;
+      U[UO.params + 3] = 0;                          // デバッグ表示は使わない
+      U[UO.rt] = rw; U[UO.rt + 1] = rh;
+      U[UO.rt + 2] = 1 / rw; U[UO.rt + 3] = 1 / rh;
+      U[UO.aoP] = Math.max(1e-4, camera.modelRadius * 0.20 * state.aoRadius);
+      U[UO.aoP + 1] = state.aoIntensity;
+      U[UO.aoP + 2] = Math.max(1e-5, camera.modelRadius * 0.0015);
+      U[UO.aoP + 3] = state.aoPower;
+      U.set(state.bgTop, UO.bgTop);
+      U.set(state.bgBot, UO.bgBot);
+      U[UO.misc] = state.exposure;
+      U[UO.misc + 1] = 0;                            // ワイヤは出さない
+      U[UO.misc + 2] = 0;                            // マスクの色も出さない
+      U[UO.misc + 3] = 1;                            // AO は常に入れる
+      U[UO.cav] = state.cavity;
+      U[UO.cav + 1] = state.peak;
+      U[UO.cav + 2] = state.cavityGain;
+      U[UO.cav + 3] = 0;
+      U[UO.grid] = niceStep(camera.modelRadius * 0.5);
+      U[UO.grid + 1] = camera.modelRadius * 16;
+      U[UO.grid + 2] = 1.0;
+      U[UO.grid + 3] = state.gridY || 0;
+      U.set(state.gridColor, UO.gridCol);
+      this._writeBpr(bpr);
+      d.queue.writeBuffer(this.uniformBuf, 0, U);
+
+      out = d.createTexture({
+        size: [rw, rh], format: this.format,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+      });
+
+      // WebGPU の検証エラーはコマンドバッファを黙って捨てる（例外にならない）。
+      // それだと「全部ゼロの画像が返る」という形で表に出てきて原因が分からないので、
+      // ここでエラースコープを張って例外に変える。実際にこれで
+      // 「バインドグループのレイアウトが合っていない」を掴んだ。
+      d.pushErrorScope('validation');
+      const encoder = d.createCommandEncoder();
+
+      // --- 1. シャドウマップ ---
+      if (bpr.shadow > 0.001) {
+        const pass = encoder.beginRenderPass({
+          colorAttachments: [],
+          depthStencilAttachment: {
+            view: this.shadowView, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store',
+          },
+        });
+        pass.setBindGroup(0, this.bgShadow);
+        pass.setPipeline(this.pipeShadow);
+        if (mesh.nt > 0 && this.ib) {
+          pass.setVertexBuffer(0, this.vbPos);
+          pass.setIndexBuffer(this.ib, 'uint32');
+          pass.drawIndexed(mesh.nt * 3);
+        }
+        // 非アクティブなサブツールも影を落とす
+        if (this.drawSlots) {
+          for (const sl of this.drawSlots) {
+            if (!sl || sl.count === 0) continue;
+            pass.setVertexBuffer(0, sl.pos);
+            pass.setIndexBuffer(sl.ib, 'uint32');
+            pass.drawIndexed(sl.count);
+          }
+        }
+        pass.end();
+      }
+
+      // --- 2. 本描画 ---
+      {
+        const pass = encoder.beginRenderPass({
+          colorAttachments: [
+            { view: this.views.color, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store' },
+            { view: this.views.normal, clearValue: { r: 0, g: 0, b: 1, a: 0 }, loadOp: 'clear', storeOp: 'store' },
+          ],
+          depthStencilAttachment: {
+            view: this.views.depth, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store',
+          },
+        });
+        pass.setBindGroup(0, this.bgMain);
+        // 透明背景のときは背景のグラデーションを描かない
+        if (!bpr.transparent) { pass.setPipeline(this.pipeBg); pass.draw(3); }
+        if (mesh.nt > 0 && this.ib) {
+          pass.setPipeline(this.pipeMesh);
+          pass.setVertexBuffer(0, this.vbPos);
+          pass.setVertexBuffer(1, this.vbNrm);
+          pass.setVertexBuffer(2, this.vbCol);
+          pass.setVertexBuffer(3, this.vbMask);
+          pass.setVertexBuffer(4, this.vbCurv);
+          if (this.visCount > 0 && this.visIb) {
+            pass.setIndexBuffer(this.visIb, 'uint32');
+            pass.drawIndexed(this.visCount);
+          } else {
+            pass.setIndexBuffer(this.ib, 'uint32');
+            pass.drawIndexed(mesh.nt * 3);
+          }
+        }
+        if (this.drawSlots && this.drawSlots.length) {
+          pass.setPipeline(this.pipeMesh);
+          for (const sl of this.drawSlots) {
+            if (!sl || sl.count === 0) continue;
+            pass.setVertexBuffer(0, sl.pos);
+            pass.setVertexBuffer(1, sl.nrm);
+            pass.setVertexBuffer(2, sl.col);
+            pass.setVertexBuffer(3, sl.msk);
+            pass.setVertexBuffer(4, sl.crv);
+            pass.setIndexBuffer(sl.ib, 'uint32');
+            pass.drawIndexed(sl.count);
+          }
+        }
+        if (o.grid && !bpr.transparent) { pass.setPipeline(this.pipeGrid); pass.draw(6); }
+        pass.end();
+      }
+
+      // --- 3. AO（サンプル数を上げてある）---
+      {
+        const gx = Math.ceil(rw / 8), gy = Math.ceil(rh / 8);
+        const p1 = encoder.beginComputePass();
+        p1.setPipeline(this.pipeSSAO);
+        p1.setBindGroup(0, this.bgSSAO);
+        p1.dispatchWorkgroups(gx, gy);
+        p1.end();
+        const p2 = encoder.beginComputePass();
+        p2.setPipeline(this.pipeBlur);
+        p2.setBindGroup(0, this.bgBlur);
+        p2.dispatchWorkgroups(gx, gy);
+        p2.end();
+      }
+
+      // --- 4. 合成（FXAA + AO + 輪郭線 + sRGB）---
+      {
+        const pass = encoder.beginRenderPass({
+          colorAttachments: [
+            { view: out.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store' },
+          ],
+        });
+        pass.setPipeline(this.pipePresent);
+        pass.setBindGroup(0, this.bgPresent);
+        pass.draw(3);
+        pass.end();
+      }
+
+      // --- 5. 読み戻し ---
+      // copyTextureToBuffer は行のバイト数が 256 の倍数でなければならない
+      const bpr4 = Math.ceil(rw * 4 / 256) * 256;
+      readBuf = d.createBuffer({
+        size: bpr4 * rh,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+      encoder.copyTextureToBuffer(
+        { texture: out },
+        { buffer: readBuf, bytesPerRow: bpr4, rowsPerImage: rh },
+        { width: rw, height: rh, depthOrArrayLayers: 1 });
+      d.queue.submit([encoder.finish()]);
+      const gpuErr = await d.popErrorScope();
+      if (gpuErr) throw new Error('GPU: ' + gpuErr.message);
+
+      await readBuf.mapAsync(GPUMapMode.READ);
+      const src = new Uint8Array(readBuf.getMappedRange()).slice();
+      readBuf.unmap();
+
+      // スーパーサンプリングの解決（N×N の平均）と BGRA→RGBA の並べ替えを
+      // まとめて 1 回のループでやる。GPU でもできるが、パス 1 本ぶんの
+      // パイプラインを増やすより読み戻しのついでに済ませたほうが簡単。
+      const bgra = /bgra/i.test(this.format);
+      const px = new Uint8ClampedArray(outW * outH * 4);
+      const inv = 1 / (sc * sc);
+      for (let y = 0; y < outH; y++) {
+        for (let x = 0; x < outW; x++) {
+          let r = 0, g = 0, b = 0, a = 0;
+          for (let sy = 0; sy < sc; sy++) {
+            const row = (y * sc + sy) * bpr4;
+            for (let sx = 0; sx < sc; sx++) {
+              const i = row + (x * sc + sx) * 4;
+              if (bgra) { b += src[i]; g += src[i + 1]; r += src[i + 2]; }
+              else { r += src[i]; g += src[i + 1]; b += src[i + 2]; }
+              a += src[i + 3];
+            }
+          }
+          const j = (y * outW + x) * 4;
+          px[j] = r * inv; px[j + 1] = g * inv; px[j + 2] = b * inv; px[j + 3] = a * inv;
+        }
+      }
+
+      const cv = typeof OffscreenCanvas === 'function'
+        ? new OffscreenCanvas(outW, outH)
+        : Object.assign(document.createElement('canvas'), { width: outW, height: outH });
+      const ctx = cv.getContext('2d');
+      ctx.putImageData(new ImageData(px, outW, outH), 0, 0);
+      const blob = cv.convertToBlob
+        ? await cv.convertToBlob({ type: 'image/png' })
+        : await new Promise((res) => cv.toBlob(res, 'image/png'));
+
+      return {
+        blob, width: outW, height: outH, scale: sc,
+        ms: Math.round(performance.now() - t0),
+        renderedAt: [rw, rh],
+      };
+    } finally {
+      if (readBuf) readBuf.destroy();
+      if (out) out.destroy();
+      // 実時間表示に戻す
+      this.renderScale = savedScale;
+      this.rtW = savedRtW; this.rtH = savedRtH;
+      this._resizeTo(savedRtW, savedRtH);
+
+    }
+  }
+
   destroy() {
+    if (this.shadowTex) { this.shadowTex.destroy(); this.shadowTex = null; }
     for (const id of [...this.staticSlots.keys()]) this.destroyStatic(id);
     for (const b of [this.vbPos, this.vbNrm, this.vbCol, this.vbMask, this.vbCurv, this.ib, this.wireIb,
       this.visIb, this.overlayBuf]) {
@@ -12160,7 +12827,7 @@ function buildUI(app) {
     { label: '↻ やり直し', title: 'Ctrl+Shift+Z', onClick: () => app.redo() },
   ]);
   btnRow(meshBar, [
-    { label: '読み込み OBJ', title: 'OBJ ファイルを読み込む', onClick: () => app.importOBJ() },
+    { label: '読み込み', title: 'OBJ / STL を読み込む', onClick: () => app.importMesh() },
     { label: 'OBJ', title: 'OBJ で書き出し（頂点カラー付き）', onClick: () => app.exportFile('obj') },
     { label: 'PLY', title: 'PLY で書き出し（ポリペイント保持）', onClick: () => app.exportFile('ply') },
     { label: 'STL', title: 'STL で書き出し（3D プリント向け）', onClick: () => app.exportFile('stl') },
@@ -12758,6 +13425,145 @@ function buildUI(app) {
       + 'レイヤー・モーフは破棄されます。';
   }
 
+  // --- 仕上げレンダリング（BPR 相当）------------------------------------
+  //
+  // プレビューは 1x で描く（実測 13ms 程度）。設定を動かすたびに描き直せる
+  // 速さなので、スライダーを掴んだまま光の向きを回して見られる。
+  // 保存だけは指定倍率で描き直す。
+  const rpv = document.getElementById('rpv');
+  const rpvImg = document.getElementById('rpvImg');
+  const rpvInfo = document.getElementById('rpvInfo');
+  let rpvUrl = null;
+  let rpvPending = false, rpvQueued = false;
+
+  const rpvIsOpen = () => rpv.classList.contains('show');
+  /**
+   * プレビューを描き直す。描画中に呼ばれたら 1 回だけ予約する
+   * （スライダーのドラッグで呼び出しが溜まらないように）。
+   */
+  const rpvRender = async () => {
+    if (!rpvIsOpen()) return;
+    if (rpvPending) { rpvQueued = true; return; }
+    rpvPending = true;
+    rpv.classList.add('busy');
+    try {
+      for (;;) {
+        rpvQueued = false;
+        // プレビューは倍率 1（速さ優先）。保存時に本来の倍率で描き直す。
+        const r = await app.renderStill({ download: false, scale: 1, preview: true });
+        if (r) {
+          if (rpvUrl) URL.revokeObjectURL(rpvUrl);
+          rpvUrl = URL.createObjectURL(r.blob);
+          rpvImg.src = rpvUrl;
+          rpvInfo.textContent = `${r.width}×${r.height} / ${r.ms}ms`
+            + `（保存は ${state.bprScale}x = ${r.width * state.bprScale}×${r.height * state.bprScale}）`;
+        }
+        if (!rpvQueued || !rpvIsOpen()) break;
+      }
+    } finally {
+      rpvPending = false;
+      rpv.classList.remove('busy');
+    }
+  };
+  const rpvOpen = () => { rpv.classList.add('show'); rpvRender(); };
+  const rpvClose = () => {
+    rpv.classList.remove('show');
+    if (rpvUrl) { URL.revokeObjectURL(rpvUrl); rpvUrl = null; }
+    rpvImg.removeAttribute('src');
+  };
+  document.getElementById('rpvClose').onclick = rpvClose;
+  document.getElementById('rpvSave').onclick = () => app.renderStill();
+  rpv.addEventListener('pointerdown', (e) => { if (e.target === rpv) rpvClose(); });
+
+  {
+    const rd = section(right, 'レンダリング', true);
+    el('p', 'note', rd).textContent =
+      '影・高品質 AO・輪郭線を入れて解像度を上げ、静止画として PNG に書き出します。'
+      + 'ビューポートの表示は変わりません（押したときだけ別に描きます）。';
+
+    el('div', 'subhead', rd).textContent = '解像度';
+    segmented(rd, [
+      { label: '1x', value: 1, title: '画面と同じ解像度' },
+      { label: '2x', value: 2, title: '2 倍で描いて縮小（輪郭がなめらかになる）' },
+      { label: '4x', value: 4, title: '4 倍で描いて縮小（いちばんきれい。時間はかかる）' },
+    ], state.bprScale, (v) => { state.bprScale = v; rpvRender(); });
+
+    el('div', 'subhead', rd).textContent = '光と影';
+    slider(rd, {
+      label: '影の強さ', min: 0, max: 1, step: 0.05, value: state.bprShadow,
+      title: '0 で影なし。上げるほど影が濃くなります',
+      onInput: (v) => { state.bprShadow = v; rpvRender(); },
+    });
+    slider(rd, {
+      label: '影のやわらかさ', min: 0, max: 6, step: 0.25, value: state.bprShadowSoft,
+      fmt: v => v.toFixed(2),
+      title: '影の輪郭のにじみ幅。上げるとふんわりしますが、細部の影が消えます',
+      onInput: (v) => { state.bprShadowSoft = v; rpvRender(); },
+    });
+    slider(rd, {
+      label: '光の向き（水平）', min: -180, max: 180, step: 5, value: state.bprLightAz,
+      fmt: v => v.toFixed(0) + '°',
+      title: 'モデルのまわりを光が回ります',
+      onInput: (v) => { state.bprLightAz = v; rpvRender(); },
+    });
+    slider(rd, {
+      label: '光の高さ', min: -80, max: 89, step: 1, value: state.bprLightEl,
+      fmt: v => v.toFixed(0) + '°',
+      title: '上げると真上から、下げると下から照らします',
+      onInput: (v) => { state.bprLightEl = v; rpvRender(); },
+    });
+    slider(rd, {
+      label: '拡散光', min: 0, max: 1.5, step: 0.05, value: state.bprDiffuse,
+      title: '光が当たっている面をどれだけ明るくするか',
+      onInput: (v) => { state.bprDiffuse = v; rpvRender(); },
+    });
+    slider(rd, {
+      label: '環境光', min: 0, max: 1.5, step: 0.05, value: state.bprAmbient,
+      title: '影の中の明るさ。下げるほど影が黒くなります',
+      onInput: (v) => { state.bprAmbient = v; rpvRender(); },
+    });
+
+    el('div', 'subhead', rd).textContent = '陰影と線';
+    slider(rd, {
+      label: 'AO サンプル数', min: 8, max: 64, step: 8, value: state.bprAoSamples,
+      fmt: v => v.toFixed(0),
+      title: '窪みの陰影の精度。実時間表示は 24 で、上げるとざらつきが減ります',
+      onInput: (v) => { state.bprAoSamples = v; rpvRender(); },
+    });
+    slider(rd, {
+      label: '輪郭線の太さ', min: 0, max: 4, step: 1, value: state.bprOutline,
+      fmt: v => (v === 0 ? 'なし' : v.toFixed(0) + 'px'),
+      title: '深度の段差と法線の折れから線を出します（0 で無し）',
+      onInput: (v) => { state.bprOutline = v; rpvRender(); },
+    });
+    slider(rd, {
+      label: '輪郭線の濃さ', min: 0, max: 1, step: 0.05, value: state.bprOutlineStrength,
+      title: '輪郭線の暗さ',
+      onInput: (v) => { state.bprOutlineStrength = v; rpvRender(); },
+    });
+
+    el('div', 'subhead', rd).textContent = '書き出し';
+    toggle(rd, {
+      label: '背景を透明にする', value: state.bprTransparent,
+      title: '背景のグラデーションを描かず、何も無い所を透明にした PNG を出します',
+      onChange: (on) => { state.bprTransparent = on; rpvRender(); },
+    });
+    toggle(rd, {
+      label: '床グリッドを入れる', value: state.bprGrid,
+      title: '床のグリッドを一緒に描きます（透明背景のときは無効）',
+      onChange: (on) => { state.bprGrid = on; rpvRender(); },
+    });
+    btnRow(rd, [
+      { label: 'プレビュー', cls: 'wide primary',
+        title: '結果を画面で確認します。開いている間、上の設定を動かすと描き直します',
+        onClick: () => rpvOpen() },
+    ]);
+    btnRow(rd, [
+      { label: 'PNG 保存', title: '指定した倍率で描いて PNG として保存します',
+        onClick: () => app.renderStill() },
+    ]);
+  }
+
   // --- クリップ / トリム -------------------------------------------------
   const cl = section(right, 'クリップ / トリム', true);
   {
@@ -13062,6 +13868,12 @@ function buildUI(app) {
     closeHelp() { help.close(); },
     toggleHelp() { help.toggle(); },
     helpIsOpen() { return help.isOpen(); },
+    /** レンダリングプレビュー */
+    openRenderPreview() { rpvOpen(); },
+    closeRenderPreview() { rpvClose(); },
+    renderPreviewIsOpen() { return rpvIsOpen(); },
+    /** プレビューの描き直しを待つ（テスト用） */
+    renderPreviewSrc() { return rpvImg.getAttribute('src') || ''; },
     /** 使い方ページが元にしているパレットの定義（ずれ検出のテスト用） */
     helpSources() { return HELP_SOURCES; },
     /** トランスポーズのトグル表示を state に合わせる（キー操作から呼ばれる） */
@@ -13357,6 +14169,133 @@ function exportPLY(mesh) {
   return buf;
 }
 
+/**
+ * 読み込んだ形を原点中心・単位サイズにそろえる（シンメトリ平面が原点前提のため）。
+ * 破壊的に書き換えて同じ g を返す。
+ */
+function normalizeImported(g) {
+  const P = g.positions;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < P.length; i += 3) {
+    if (P[i] < minX) minX = P[i]; if (P[i] > maxX) maxX = P[i];
+    if (P[i + 1] < minY) minY = P[i + 1]; if (P[i + 1] > maxY) maxY = P[i + 1];
+    if (P[i + 2] < minZ) minZ = P[i + 2]; if (P[i + 2] > maxZ) maxZ = P[i + 2];
+  }
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, cz = (minZ + maxZ) / 2;
+  const ext = Math.max(maxX - minX, maxY - minY, maxZ - minZ) || 1;
+  const s = 2 / ext;
+  for (let i = 0; i < P.length; i += 3) {
+    P[i] = (P[i] - cx) * s;
+    P[i + 1] = (P[i + 1] - cy) * s;
+    P[i + 2] = (P[i + 2] - cz) * s;
+  }
+  return g;
+}
+
+/**
+ * **サイズの逆算でバイナリ STL と確定できるか。**
+ * バイナリ STL は 80 バイトのヘッダ + 三角形数(u32) + 50 バイト × n なので、
+ * ちょうど 84 + 50·n バイトになる。他の形式がこれに偶然一致することはまずない。
+ *
+ * 「先頭が solid ならアスキー」では判定できない。バイナリ STL の 80 バイト
+ * ヘッダに "solid" と書く書き出し器が実在する。
+ */
+function isExactBinarySTL(buf) {
+  if (!buf || buf.byteLength < 84) return false;
+  const n = new DataView(buf).getUint32(80, true);
+  return n > 0 && 84 + n * 50 === buf.byteLength;
+}
+
+/**
+ * **STL であることが分かっている**バイト列が、バイナリかアスキーかを決める。
+ * 形式の自動判別には使えない（STL 以外を渡すと「バイナリ」と答える）。
+ * 判別には isExactBinarySTL を使うこと。
+ */
+function isBinarySTL(buf) {
+  if (isExactBinarySTL(buf)) return true;
+  // サイズがぴったりでない（末尾にゴミがある等）ときは中身の文字で決める。
+  // 先頭 512 バイトに facet と vertex が両方あればアスキー。
+  const head = new TextDecoder('utf-8', { fatal: false })
+    .decode(new Uint8Array(buf, 0, Math.min(512, buf.byteLength)));
+  return !(/\bfacet\b/i.test(head) && /\bvertex\b/i.test(head));
+}
+
+function parseBinarySTL(buf) {
+  const dv = new DataView(buf);
+  const n = dv.getUint32(80, true);
+  const avail = Math.floor((buf.byteLength - 84) / 50);
+  const nt = Math.min(n, avail);
+  if (nt === 0) throw new Error('STL に三角形が入っていません。');
+  const pos = new Float32Array(nt * 9);
+  const idx = new Uint32Array(nt * 3);
+  let o = 84, w = 0;
+  for (let t = 0; t < nt; t++) {
+    o += 12;                       // 面法線は使わない（頂点法線は後で作り直す）
+    for (let k = 0; k < 9; k++) { pos[w++] = dv.getFloat32(o, true); o += 4; }
+    o += 2;                        // 属性バイト数
+    idx[t * 3] = t * 3; idx[t * 3 + 1] = t * 3 + 1; idx[t * 3 + 2] = t * 3 + 2;
+  }
+  return { positions: pos, indices: idx, tris: nt };
+}
+
+function parseAsciiSTL(text) {
+  // "vertex x y z" を順に拾って 3 個ずつ 1 三角形にする。
+  // facet / outer loop の入れ子は読み飛ばしてよい（頂点の順序だけが意味を持つ）。
+  const re = /^\s*vertex\s+(\S+)\s+(\S+)\s+(\S+)/gim;
+  const vals = [];
+  let m;
+  while ((m = re.exec(text))) {
+    vals.push(parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3]));
+  }
+  const nt = Math.floor(vals.length / 9);
+  if (nt === 0) throw new Error('STL に三角形が入っていません。');
+  const pos = new Float32Array(vals.slice(0, nt * 9));
+  const idx = new Uint32Array(nt * 3);
+  for (let i = 0; i < nt * 3; i++) idx[i] = i;
+  return { positions: pos, indices: idx, tris: nt };
+}
+
+/**
+ * STL を読み込む（バイナリ / アスキー両対応）。
+ *
+ * STL は「三角形の寄せ集め」で頂点の共有情報を持たないので、**溶接が必須**。
+ * 溶接しないと 1 頂点が三角形ごとに複製された状態になり、彫刻すると面がバラバラに
+ * 剥がれる（隣接が繋がっていないので ring も張れない）。
+ *
+ * @param {ArrayBuffer|Uint8Array|string} data
+ */
+function importSTL(data) {
+  let buf = null, text = null;
+  if (typeof data === 'string') {
+    text = data;
+  } else {
+    buf = data instanceof Uint8Array
+      ? (data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
+        ? data.buffer : data.slice().buffer)
+      : data;
+  }
+  const raw = text !== null
+    ? parseAsciiSTL(text)
+    : (isBinarySTL(buf) ? parseBinarySTL(buf)
+      : parseAsciiSTL(new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(buf))));
+
+  // 溶接のしきい値はモデルの大きさに対する相対値にする。STL は mm 単位で
+  // 座標が数百になることが多く、固定の 1e-6 では同じ点が別頂点のまま残る。
+  const P = raw.positions;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < P.length; i += 3) {
+    if (P[i] < minX) minX = P[i]; if (P[i] > maxX) maxX = P[i];
+    if (P[i + 1] < minY) minY = P[i + 1]; if (P[i + 1] > maxY) maxY = P[i + 1];
+    if (P[i + 2] < minZ) minZ = P[i + 2]; if (P[i + 2] > maxZ) maxZ = P[i + 2];
+  }
+  const ext = Math.max(maxX - minX, maxY - minY, maxZ - minZ) || 1;
+  const g = weld(P, raw.indices, ext * 1e-6);
+  g.sourceTris = raw.tris;
+  return normalizeImported(g);
+}
+
 /** OBJ を読み込む（法線 / UV は無視、N 角形は扇状に三角形化、頂点は溶接） */
 function importOBJ(text) {
   const pos = [];
@@ -13383,24 +14322,31 @@ function importOBJ(text) {
   }
   if (pos.length === 0 || idx.length === 0) throw new Error('OBJ に有効な頂点 / 面が見つかりません。');
   const g = weld(new Float32Array(pos), new Uint32Array(idx), 1e-6);
+  return normalizeImported(g);
+}
 
-  // 原点中心・単位サイズに正規化（シンメトリ平面が原点前提のため）
-  const P = g.positions;
-  let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-  for (let i = 0; i < P.length; i += 3) {
-    if (P[i] < minX) minX = P[i]; if (P[i] > maxX) maxX = P[i];
-    if (P[i + 1] < minY) minY = P[i + 1]; if (P[i + 1] > maxY) maxY = P[i + 1];
-    if (P[i + 2] < minZ) minZ = P[i + 2]; if (P[i + 2] > maxZ) maxZ = P[i + 2];
+/**
+ * 拡張子とファイルの中身から形式を見分けて読み込む。
+ * @param {string} name ファイル名（拡張子を見る）
+ * @param {ArrayBuffer} buf 中身
+ */
+function importMesh(name, buf) {
+  const ext = /\.([a-z0-9]+)$/i.exec(name || '');
+  const kind = ext ? ext[1].toLowerCase() : '';
+  if (kind === 'stl') return { kind: 'STL', geom: importSTL(buf) };
+  if (kind === 'obj') {
+    return { kind: 'OBJ', geom: importOBJ(new TextDecoder().decode(new Uint8Array(buf))) };
   }
-  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, cz = (minZ + maxZ) / 2;
-  const ext = Math.max(maxX - minX, maxY - minY, maxZ - minZ) || 1;
-  const s = 2 / ext;
-  for (let i = 0; i < P.length; i += 3) {
-    P[i] = (P[i] - cx) * s;
-    P[i + 1] = (P[i + 1] - cy) * s;
-    P[i + 2] = (P[i + 2] - cz) * s;
+  // 拡張子が無い / 知らない場合は中身で判断する。
+  // バイナリ STL はサイズの逆算でほぼ確実に分かる。
+  if (isExactBinarySTL(buf)) return { kind: 'STL', geom: importSTL(buf) };
+  const text = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(buf));
+  // アスキー STL は facet と vertex の両方を持つ。OBJ には facet が無いので
+  // これで分かれる（solid だけを見ると OBJ のコメント行に引っかかりうる）。
+  if (/\bfacet\b/i.test(text) && /\bvertex\b/i.test(text)) {
+    return { kind: 'STL', geom: importSTL(text) };
   }
-  return g;
+  return { kind: 'OBJ', geom: importOBJ(text) };
 }
 
 function download(data, filename, mime) {
@@ -13414,7 +14360,7 @@ function download(data, filename, mime) {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
-  return { exportOBJ, exportSTL, exportPLY, importOBJ, download };
+  return { exportOBJ, exportSTL, exportPLY, importSTL, importOBJ, importMesh, download };
 })();
 
 /* ===== layers.js ===== */
@@ -18163,7 +19109,7 @@ const { Sculptor, buildMirrors, mirrorPoint, mirrorVector } = __M['sculptor.js']
 const { Renderer } = __M['renderer.js'];
 const { BRUSH_IDS, BRUSHES, usesGrabPlane } = __M['brushes.js'];
 const { buildUI } = __M['ui.js'];
-const { exportOBJ, exportSTL, exportPLY, importOBJ, download } = __M['io.js'];
+const { exportOBJ, exportSTL, exportPLY, importMesh: importMeshFile, importSTL, download } = __M['io.js'];
 const store = __M['store.js'];
 const { initWasmField, wasmFieldState, wasmFieldError, wasmFieldModule } = __M['wasmkernels.js'];
 const { dynamesh } = __M['dynamesh.js'];
@@ -18244,6 +19190,19 @@ const state = {
   wireAlpha: 0.32,
   maskDarken: 0.9,
   renderScale: 1,
+  // 仕上げレンダリング（BPR 相当）。実時間表示には影響しない
+  bprScale: 2,             // スーパーサンプリング倍率 1/2/4
+  bprShadow: 0.75,         // 影の強さ
+  bprShadowSoft: 1.5,      // 影のにじみ（シャドウマップの texel 単位）
+  bprAoSamples: 64,        // AO のサンプル数（実時間表示は 24）
+  bprOutline: 0,           // 輪郭線の太さ（出力 px。0 で無し）
+  bprOutlineStrength: 0.7,
+  bprDiffuse: 0.75,        // 拡散光の強さ
+  bprAmbient: 0.45,        // 環境光（影の中の明るさ）
+  bprLightAz: -40,         // 光の方位角（度）
+  bprLightEl: 45,          // 光の高度角（度）
+  bprTransparent: false,   // 背景を透明にして書き出す
+  bprGrid: false,          // 床グリッドを入れる
   invertOrbitY: false,
   bgPreset: 'dark',
   bgTop: BG_PRESETS.dark.top,
@@ -18485,6 +19444,60 @@ const app = {
       busy = false;
     }
   },
+  /**
+   * 仕上げレンダリング（BPR 相当）。影・高品質 AO・輪郭線つきで
+   * 解像度を上げて描き、PNG にして落とす。
+   */
+  async renderStill(opts = {}) {
+    if (busy || !renderer) return null;
+    // プレビューはスライダーを動かすたびに走るので、
+    // ビジー表示もトーストも出さない（点滅して読めなくなる）。
+    const quiet = !!opts.preview;
+    busy = true;
+    if (!quiet) {
+      ui.showBusy('レンダリング中…');
+      await new Promise(requestAnimationFrame);
+      await new Promise(requestAnimationFrame);
+    }
+    try {
+      const az = (state.bprLightAz || 0) * Math.PI / 180;
+      const el = (state.bprLightEl || 0) * Math.PI / 180;
+      const r = await renderer.renderStill(camera, mesh, state, Object.assign({
+        scale: state.bprScale,
+        shadow: state.bprShadow,
+        shadowSoft: state.bprShadowSoft,
+        aoSamples: state.bprAoSamples,
+        outline: state.bprOutline,
+        outlineStrength: state.bprOutlineStrength,
+        diffuse: state.bprDiffuse,
+        ambient: state.bprAmbient,
+        transparent: state.bprTransparent,
+        grid: state.bprGrid,
+        // 方位角 / 高度角から向きを作る（スライダー 2 本で回せるように）
+        lightDir: [
+          Math.cos(el) * Math.sin(az),
+          Math.sin(el),
+          Math.cos(el) * Math.cos(az),
+        ],
+      }, opts));
+      if (opts.download !== false) {
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        download(r.blob, `websculpt-render-${stamp}.png`, 'image/png');
+      }
+      if (!quiet) {
+        const ss = r.scale > 1 ? ` / ${r.scale}x（${r.renderedAt[0]}×${r.renderedAt[1]} で描画）` : '';
+        ui.toast(`レンダリング: ${r.width}×${r.height}${ss} / ${r.ms}ms`, 4000);
+      }
+      return r;
+    } catch (e) {
+      ui.toast('レンダリングでエラー: ' + e.message, 5000);
+      console.error(e);
+      return null;
+    } finally {
+      if (!quiet) ui.hideBusy();
+      busy = false;
+    }
+  },
   setTranspose(on) { applyTransposeMode(on); },
   toggleTranspose() { applyTransposeMode(!state.transposeMode); },
   resetSettings() {
@@ -18515,22 +19528,41 @@ const app = {
     }
     ui.toast(`${kind.toUpperCase()} を書き出しました`);
   },
-  importOBJ() {
+  /** OBJ / STL を読み込む（拡張子と中身の両方で形式を見分ける） */
+  importMesh() {
+    if (busy) return;
     const inp = document.createElement('input');
     inp.type = 'file';
-    inp.accept = '.obj,text/plain';
+    inp.accept = '.obj,.stl,text/plain,model/stl';
     inp.onchange = async () => {
       const f = inp.files && inp.files[0];
       if (!f) return;
+      busy = true;
+      ui.showBusy('読み込み中…');
+      await new Promise(requestAnimationFrame);
+      await new Promise(requestAnimationFrame);
       try {
-        const g = importOBJ(await f.text());
+        // STL はバイナリなので ArrayBuffer で読む。OBJ もそこから文字列にする。
+        const r = importMeshFile(f.name, await f.arrayBuffer());
+        const g = r.geom;
+        // いまアクティブなサブツールの形を差し替える（従来の OBJ 読み込みと同じ挙動）
         mesh.setGeometry(g.positions, g.indices);
         sculptor.setMesh(mesh);
         if (tools) tools.onMeshReplaced();
         frameCamera();
-        ui.toast(`読み込み: ${mesh.liveVerts.toLocaleString()} 頂点 / ${mesh.liveTris.toLocaleString()} 面`);
+        // STL は三角形の寄せ集めなので、溶接でどれだけ頂点が繋がったかを出す。
+        // ここが「元の面数 × 3 と同じ」なら溶接できておらず、彫刻すると剥がれる。
+        const welded = g.sourceTris
+          ? ` / ${(g.sourceTris * 3).toLocaleString()} 個の頂点を ${mesh.liveVerts.toLocaleString()} 個に溶接`
+          : '';
+        ui.toast(`${r.kind} を読み込み: ${mesh.liveVerts.toLocaleString()} 頂点`
+          + ` / ${mesh.liveTris.toLocaleString()} 面${welded}`, 4500);
       } catch (e) {
         ui.toast('読み込み失敗: ' + e.message, 4000);
+        console.error(e);
+      } finally {
+        ui.hideBusy();
+        busy = false;
       }
     };
     inp.click();
@@ -19426,6 +20458,9 @@ window.__wasmState = wasmFieldState;
 window.__parState = () => parallelState() + ':' + parallelWorkers();
 // ダイナメッシュを差し替え前の生の形で呼べるようにしておく（並列と逐次の突き合わせ用）
 window.__rawDynamesh = dynamesh;
+// 入出力の関数。ファイル選択ダイアログはテストから出せないので、
+// 読み込みの配線はここを直に叩いて確かめる。
+window.__io = { exportSTL, exportOBJ, exportPLY, importMesh: importMeshFile, importSTL };
 window.WebSculpt = {
   state, camera, app, BRUSHES,
   get mesh() { return mesh; },

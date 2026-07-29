@@ -252,6 +252,133 @@ export function exportPLY(mesh) {
   return buf;
 }
 
+/**
+ * 読み込んだ形を原点中心・単位サイズにそろえる（シンメトリ平面が原点前提のため）。
+ * 破壊的に書き換えて同じ g を返す。
+ */
+function normalizeImported(g) {
+  const P = g.positions;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < P.length; i += 3) {
+    if (P[i] < minX) minX = P[i]; if (P[i] > maxX) maxX = P[i];
+    if (P[i + 1] < minY) minY = P[i + 1]; if (P[i + 1] > maxY) maxY = P[i + 1];
+    if (P[i + 2] < minZ) minZ = P[i + 2]; if (P[i + 2] > maxZ) maxZ = P[i + 2];
+  }
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, cz = (minZ + maxZ) / 2;
+  const ext = Math.max(maxX - minX, maxY - minY, maxZ - minZ) || 1;
+  const s = 2 / ext;
+  for (let i = 0; i < P.length; i += 3) {
+    P[i] = (P[i] - cx) * s;
+    P[i + 1] = (P[i + 1] - cy) * s;
+    P[i + 2] = (P[i + 2] - cz) * s;
+  }
+  return g;
+}
+
+/**
+ * **サイズの逆算でバイナリ STL と確定できるか。**
+ * バイナリ STL は 80 バイトのヘッダ + 三角形数(u32) + 50 バイト × n なので、
+ * ちょうど 84 + 50·n バイトになる。他の形式がこれに偶然一致することはまずない。
+ *
+ * 「先頭が solid ならアスキー」では判定できない。バイナリ STL の 80 バイト
+ * ヘッダに "solid" と書く書き出し器が実在する。
+ */
+function isExactBinarySTL(buf) {
+  if (!buf || buf.byteLength < 84) return false;
+  const n = new DataView(buf).getUint32(80, true);
+  return n > 0 && 84 + n * 50 === buf.byteLength;
+}
+
+/**
+ * **STL であることが分かっている**バイト列が、バイナリかアスキーかを決める。
+ * 形式の自動判別には使えない（STL 以外を渡すと「バイナリ」と答える）。
+ * 判別には isExactBinarySTL を使うこと。
+ */
+function isBinarySTL(buf) {
+  if (isExactBinarySTL(buf)) return true;
+  // サイズがぴったりでない（末尾にゴミがある等）ときは中身の文字で決める。
+  // 先頭 512 バイトに facet と vertex が両方あればアスキー。
+  const head = new TextDecoder('utf-8', { fatal: false })
+    .decode(new Uint8Array(buf, 0, Math.min(512, buf.byteLength)));
+  return !(/\bfacet\b/i.test(head) && /\bvertex\b/i.test(head));
+}
+
+function parseBinarySTL(buf) {
+  const dv = new DataView(buf);
+  const n = dv.getUint32(80, true);
+  const avail = Math.floor((buf.byteLength - 84) / 50);
+  const nt = Math.min(n, avail);
+  if (nt === 0) throw new Error('STL に三角形が入っていません。');
+  const pos = new Float32Array(nt * 9);
+  const idx = new Uint32Array(nt * 3);
+  let o = 84, w = 0;
+  for (let t = 0; t < nt; t++) {
+    o += 12;                       // 面法線は使わない（頂点法線は後で作り直す）
+    for (let k = 0; k < 9; k++) { pos[w++] = dv.getFloat32(o, true); o += 4; }
+    o += 2;                        // 属性バイト数
+    idx[t * 3] = t * 3; idx[t * 3 + 1] = t * 3 + 1; idx[t * 3 + 2] = t * 3 + 2;
+  }
+  return { positions: pos, indices: idx, tris: nt };
+}
+
+function parseAsciiSTL(text) {
+  // "vertex x y z" を順に拾って 3 個ずつ 1 三角形にする。
+  // facet / outer loop の入れ子は読み飛ばしてよい（頂点の順序だけが意味を持つ）。
+  const re = /^\s*vertex\s+(\S+)\s+(\S+)\s+(\S+)/gim;
+  const vals = [];
+  let m;
+  while ((m = re.exec(text))) {
+    vals.push(parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3]));
+  }
+  const nt = Math.floor(vals.length / 9);
+  if (nt === 0) throw new Error('STL に三角形が入っていません。');
+  const pos = new Float32Array(vals.slice(0, nt * 9));
+  const idx = new Uint32Array(nt * 3);
+  for (let i = 0; i < nt * 3; i++) idx[i] = i;
+  return { positions: pos, indices: idx, tris: nt };
+}
+
+/**
+ * STL を読み込む（バイナリ / アスキー両対応）。
+ *
+ * STL は「三角形の寄せ集め」で頂点の共有情報を持たないので、**溶接が必須**。
+ * 溶接しないと 1 頂点が三角形ごとに複製された状態になり、彫刻すると面がバラバラに
+ * 剥がれる（隣接が繋がっていないので ring も張れない）。
+ *
+ * @param {ArrayBuffer|Uint8Array|string} data
+ */
+export function importSTL(data) {
+  let buf = null, text = null;
+  if (typeof data === 'string') {
+    text = data;
+  } else {
+    buf = data instanceof Uint8Array
+      ? (data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
+        ? data.buffer : data.slice().buffer)
+      : data;
+  }
+  const raw = text !== null
+    ? parseAsciiSTL(text)
+    : (isBinarySTL(buf) ? parseBinarySTL(buf)
+      : parseAsciiSTL(new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(buf))));
+
+  // 溶接のしきい値はモデルの大きさに対する相対値にする。STL は mm 単位で
+  // 座標が数百になることが多く、固定の 1e-6 では同じ点が別頂点のまま残る。
+  const P = raw.positions;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < P.length; i += 3) {
+    if (P[i] < minX) minX = P[i]; if (P[i] > maxX) maxX = P[i];
+    if (P[i + 1] < minY) minY = P[i + 1]; if (P[i + 1] > maxY) maxY = P[i + 1];
+    if (P[i + 2] < minZ) minZ = P[i + 2]; if (P[i + 2] > maxZ) maxZ = P[i + 2];
+  }
+  const ext = Math.max(maxX - minX, maxY - minY, maxZ - minZ) || 1;
+  const g = weld(P, raw.indices, ext * 1e-6);
+  g.sourceTris = raw.tris;
+  return normalizeImported(g);
+}
+
 /** OBJ を読み込む（法線 / UV は無視、N 角形は扇状に三角形化、頂点は溶接） */
 export function importOBJ(text) {
   const pos = [];
@@ -278,24 +405,31 @@ export function importOBJ(text) {
   }
   if (pos.length === 0 || idx.length === 0) throw new Error('OBJ に有効な頂点 / 面が見つかりません。');
   const g = weld(new Float32Array(pos), new Uint32Array(idx), 1e-6);
+  return normalizeImported(g);
+}
 
-  // 原点中心・単位サイズに正規化（シンメトリ平面が原点前提のため）
-  const P = g.positions;
-  let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-  for (let i = 0; i < P.length; i += 3) {
-    if (P[i] < minX) minX = P[i]; if (P[i] > maxX) maxX = P[i];
-    if (P[i + 1] < minY) minY = P[i + 1]; if (P[i + 1] > maxY) maxY = P[i + 1];
-    if (P[i + 2] < minZ) minZ = P[i + 2]; if (P[i + 2] > maxZ) maxZ = P[i + 2];
+/**
+ * 拡張子とファイルの中身から形式を見分けて読み込む。
+ * @param {string} name ファイル名（拡張子を見る）
+ * @param {ArrayBuffer} buf 中身
+ */
+export function importMesh(name, buf) {
+  const ext = /\.([a-z0-9]+)$/i.exec(name || '');
+  const kind = ext ? ext[1].toLowerCase() : '';
+  if (kind === 'stl') return { kind: 'STL', geom: importSTL(buf) };
+  if (kind === 'obj') {
+    return { kind: 'OBJ', geom: importOBJ(new TextDecoder().decode(new Uint8Array(buf))) };
   }
-  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, cz = (minZ + maxZ) / 2;
-  const ext = Math.max(maxX - minX, maxY - minY, maxZ - minZ) || 1;
-  const s = 2 / ext;
-  for (let i = 0; i < P.length; i += 3) {
-    P[i] = (P[i] - cx) * s;
-    P[i + 1] = (P[i + 1] - cy) * s;
-    P[i + 2] = (P[i + 2] - cz) * s;
+  // 拡張子が無い / 知らない場合は中身で判断する。
+  // バイナリ STL はサイズの逆算でほぼ確実に分かる。
+  if (isExactBinarySTL(buf)) return { kind: 'STL', geom: importSTL(buf) };
+  const text = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(buf));
+  // アスキー STL は facet と vertex の両方を持つ。OBJ には facet が無いので
+  // これで分かれる（solid だけを見ると OBJ のコメント行に引っかかりうる）。
+  if (/\bfacet\b/i.test(text) && /\bvertex\b/i.test(text)) {
+    return { kind: 'STL', geom: importSTL(text) };
   }
-  return g;
+  return { kind: 'OBJ', geom: importOBJ(text) };
 }
 
 export function download(data, filename, mime) {

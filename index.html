@@ -46,6 +46,18 @@
       <!-- 使い方ページ。中身は js/help.js が組み立てる（ツール一覧を
            各パレットの表から生成するので、ここに書き写さない） -->
       <div id="help" class="help"></div>
+      <!-- レンダリングプレビュー。設定を動かすと描き直す -->
+      <div id="rpv" class="rpv">
+        <div class="rpv-card">
+          <div class="rpv-head">
+            <span class="rpv-title">レンダリングプレビュー</span>
+            <span id="rpvInfo" class="rpv-info"></span>
+            <button id="rpvSave" class="btn primary">PNG 保存</button>
+            <button id="rpvClose" class="btn">閉じる</button>
+          </div>
+          <div class="rpv-body"><img id="rpvImg" alt="レンダリング結果"></div>
+        </div>
+      </div>
     </main>
 
     <aside id="rightbar">

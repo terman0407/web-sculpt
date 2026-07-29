@@ -9,8 +9,8 @@
 //   5. overlay: ブラシリングを canvas に直接描画
 // ---------------------------------------------------------------------------
 
-// 行列5 + vec4×10 = 120 float = 480 byte
-export const UNIFORM_FLOATS = 5 * 16 + 10 * 4;
+// 行列6 + vec4×13 = 148 float = 592 byte
+export const UNIFORM_FLOATS = 6 * 16 + 13 * 4;
 
 // Float32Array 内のオフセット（float 単位）
 export const UO = {
@@ -19,6 +19,11 @@ export const UO = {
   cav: 108,        // x キャビティ強度, y ピーク強度, z キャビティゲイン, w 予約
   grid: 112,       // x マス間隔, y 全体サイズ, z 線の太さ, w 表示フラグ
   gridCol: 116,    // rgb 線の色, a 濃さ
+  // --- 仕上げレンダリング（BPR 相当）。実時間表示では影 0 / AO サンプル 24 ---
+  lightVP: 120,    // 光源からの viewProj（シャドウマップの引き当てに使う）
+  bprA: 136,       // x 影の強さ, y 影のにじみ(texel), z AO サンプル数, w シャドウマップ解像度
+  bprB: 140,       // x 輪郭線の太さ(px), y 輪郭線の濃さ, z 拡散光の強さ, w 環境光
+  lightDir: 144,   // xyz 光の向き（正規化・ワールド）, w 予約
 };
 
 const COMMON = /* wgsl */`
@@ -38,6 +43,10 @@ struct Uniforms {
   cav         : vec4<f32>,   // x cavity, y peak, z gain, w -
   grid        : vec4<f32>,   // x spacing, y extent, z thickness, w floorY
   gridCol     : vec4<f32>,
+  lightVP     : mat4x4<f32>, // 光源からの viewProj
+  bprA        : vec4<f32>,   // x shadow, y softness(texel), z aoSamples, w shadowMapSize
+  bprB        : vec4<f32>,   // x outlineWidth(px), y outlineStrength, z diffuse, w ambient
+  lightDir    : vec4<f32>,   // xyz light direction (world, normalized)
 };
 
 fn linearDepthFromNdc(d: f32, near: f32, far: f32) -> f32 {
@@ -88,12 +97,30 @@ fn fs(i : VSOut) -> FSOut {
 `;
 
 // ---------------------------------------------------------------------------
-// 1b. メッシュ（MatCap シェーディング）
+// 1a'. シャドウマップ（光源から深度だけを描く）
+//
+// 仕上げレンダリングでだけ使う。実時間表示では影の強さを 0 にして
+// メッシュシェーダ側の分岐で丸ごと飛ばすので、この描画も走らせない。
+// 平行光源なので投影は ortho。範囲はモデルの外接球に合わせて JS 側で決める。
+// ---------------------------------------------------------------------------
+export const SHADOW_WGSL = COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> u : Uniforms;
+
+@vertex
+fn vs(@location(0) position : vec3<f32>) -> @builtin(position) vec4<f32> {
+  return u.lightVP * vec4<f32>(position, 1.0);
+}
+`;
+
+// ---------------------------------------------------------------------------
+// 1b. メッシュ（MatCap シェーディング + 仕上げ用の影）
 // ---------------------------------------------------------------------------
 export const MESH_WGSL = COMMON + /* wgsl */`
 @group(0) @binding(0) var<uniform> u : Uniforms;
 @group(0) @binding(1) var matcapTex : texture_2d_array<f32>;
 @group(0) @binding(2) var matcapSmp : sampler;
+@group(0) @binding(3) var shadowTex : texture_depth_2d;
+@group(0) @binding(4) var shadowSmp : sampler_comparison;
 
 struct VSOut {
   @builtin(position) pos : vec4<f32>,
@@ -101,6 +128,8 @@ struct VSOut {
   @location(1) col  : vec3<f32>,
   @location(2) mask : f32,
   @location(3) curv : f32,
+  @location(4) wnrm : vec3<f32>,
+  @location(5) lpos : vec4<f32>,
 };
 
 @vertex
@@ -117,7 +146,41 @@ fn vs(
   o.col = color;
   o.mask = mask;
   o.curv = curv;
+  o.wnrm = normal;
+  o.lpos = u.lightVP * vec4<f32>(position, 1.0);
   return o;
+}
+
+/**
+ * シャドウマップを PCF で引く。1.0 = 日向、0.0 = 影。
+ *
+ * バイアスは法線の傾きに応じて増やす（面が光に対して寝ているほど、同じ深度差でも
+ * テクセル内の高低差が大きくなり、自分自身を影にしてしまう = シャドウアクネ）。
+ */
+fn shadowFactor(lpos : vec4<f32>, wnrm : vec3<f32>) -> f32 {
+  if (lpos.w <= 0.0) { return 1.0; }
+  let ndc = lpos.xyz / lpos.w;
+  if (abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) { return 1.0; }
+  let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+
+  let ndl = abs(dot(normalize(wnrm), normalize(u.lightDir.xyz)));
+  let slope = clamp(1.0 - ndl, 0.0, 1.0);
+  // 深度は [0,1] の平行投影なので、バイアスも相対値で置ける
+  let bias = 0.0012 + 0.006 * slope;
+  // 変数名に ref は使えない（WGSL の予約語）
+  let zref = ndc.z - bias;
+
+  let texel = 1.0 / max(1.0, u.bprA.w);
+  let r = max(0.0, u.bprA.y) * texel;
+  var sum = 0.0;
+  // 3x3 の PCF。にじみ幅 r は「影のやわらかさ」スライダーで動かす
+  for (var dy = -1; dy <= 1; dy = dy + 1) {
+    for (var dx = -1; dx <= 1; dx = dx + 1) {
+      let o2 = vec2<f32>(f32(dx), f32(dy)) * r;
+      sum = sum + textureSampleCompareLevel(shadowTex, shadowSmp, uv + o2, zref);
+    }
+  }
+  return sum / 9.0;
 }
 
 struct FSOut {
@@ -146,6 +209,21 @@ fn fs(i : VSOut, @builtin(front_facing) ff : bool) -> FSOut {
     let cd = 1.0 - u.cav.x * (cavity * cavity * (3.0 - 2.0 * cavity));
     c = c * cd;
     c = c + c * (u.cav.y * peak * peak);
+  }
+
+  // 仕上げレンダリングの陰影。実時間表示では bprA.x = 0 なので丸ごと飛ぶ。
+  //
+  // MatCap は「カメラから見た向き」で色が決まる方式なので、それ単体では光源の
+  // 位置が変わっても絵が変わらない。ここで拡散光と影を掛けて、
+  // 「どこから光が当たっているか」が分かる絵にする。
+  if (u.bprA.x > 0.001) {
+    let wn = normalize(i.wnrm);
+    let ld = normalize(u.lightDir.xyz);
+    let ndl = max(0.0, dot(wn, ld));
+    let sh = shadowFactor(i.lpos, i.wnrm);
+    // 影は「拡散光を落とす」形で掛ける。環境光は残すので真っ黒にはならない。
+    let lit = u.bprB.w + u.bprB.z * ndl * mix(1.0, sh, u.bprA.x);
+    c = c * lit;
   }
 
   // マスク表示（ZBrush 風に暗い青灰色）
@@ -302,7 +380,9 @@ fn fs(i : VSOut) -> GridOut {
 // 2. SSAO (compute)
 // ---------------------------------------------------------------------------
 export const SSAO_WGSL = COMMON + /* wgsl */`
-struct Kernel { s : array<vec4<f32>, 24> };
+// サンプル数は uniform（bprA.z）で決める。実時間表示は 24、仕上げは 64。
+// 配列は最大数ぶん確保しておき、ループ回数だけを変える。
+struct Kernel { s : array<vec4<f32>, 64> };
 
 @group(0) @binding(0) var<uniform> u : Uniforms;
 @group(0) @binding(1) var depthTex  : texture_depth_2d;
@@ -352,7 +432,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let radius = u.aoP.x;
   let bias = u.aoP.z;
   var occ = 0.0;
-  let N = 24;
+  let N = clamp(i32(u.bprA.z), 1, 64);
   for (var i = 0; i < N; i = i + 1) {
     let ks = k.s[i].xyz;
     let sp = vp + (t * ks.x + b * ks.y + n * ks.z) * radius;
@@ -426,6 +506,8 @@ export const PRESENT_WGSL = COMMON + /* wgsl */`
 @group(0) @binding(1) var colTex : texture_2d<f32>;
 @group(0) @binding(2) var aoTex  : texture_2d<f32>;
 @group(0) @binding(3) var smp    : sampler;
+@group(0) @binding(4) var depthTex  : texture_depth_2d;
+@group(0) @binding(5) var normalTex : texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) pos : vec4<f32>,
@@ -481,6 +563,40 @@ fn fxaa(uv : vec2<f32>) -> vec3<f32> {
   return rB;
 }
 
+/**
+ * 輪郭線。仕上げレンダリングでだけ使う（bprB.x = 0 なら丸ごと飛ぶ）。
+ *
+ * 深度の段差と法線の折れの両方を見る。深度だけだと同じ奥行きで重なった面の境目が
+ * 出ず、法線だけだと平行な面が重なった所に線が出ない。
+ * 深度差は線形深度に対する相対値で見る（絶対値だと遠景で線が出なくなる）。
+ */
+fn outlineEdge(uv : vec2<f32>, px : f32) -> f32 {
+  let dim = vec2<i32>(textureDimensions(depthTex));
+  let c = vec2<i32>(i32(uv.x * f32(dim.x)), i32(uv.y * f32(dim.y)));
+  let step = max(1, i32(px));
+  let dc = textureLoad(depthTex, clamp(c, vec2<i32>(0), dim - vec2<i32>(1)), 0);
+  if (dc >= 0.99999) { return 0.0; }
+  let lc = linearDepthFromNdc(dc, u.params.x, u.params.y);
+  let nc = normalize(textureLoad(normalTex, clamp(c, vec2<i32>(0), dim - vec2<i32>(1)), 0).xyz);
+
+  var dMax = 0.0;
+  var nMin = 1.0;
+  var offs = array<vec2<i32>, 4>(
+    vec2<i32>(step, 0), vec2<i32>(-step, 0), vec2<i32>(0, step), vec2<i32>(0, -step));
+  for (var k = 0; k < 4; k = k + 1) {
+    let sc = clamp(c + offs[k], vec2<i32>(0), dim - vec2<i32>(1));
+    let sd = textureLoad(depthTex, sc, 0);
+    if (sd >= 0.99999) { dMax = max(dMax, 1.0); continue; }   // 背景との境目
+    let ls = linearDepthFromNdc(sd, u.params.x, u.params.y);
+    dMax = max(dMax, abs(ls - lc) / max(1e-5, lc) * 12.0);
+    let sn = normalize(textureLoad(normalTex, sc, 0).xyz);
+    nMin = min(nMin, dot(nc, sn));
+  }
+  let dEdge = smoothstep(0.25, 0.8, dMax);
+  let nEdge = smoothstep(0.85, 0.35, nMin);
+  return clamp(max(dEdge, nEdge), 0.0, 1.0);
+}
+
 @fragment
 fn fs(i : VSOut) -> @location(0) vec4<f32> {
   // デバッグ表示: 1 = AO のみ
@@ -493,10 +609,24 @@ fn fs(i : VSOut) -> @location(0) vec4<f32> {
     let ao = textureSampleLevel(aoTex, smp, i.uv, 0.0).r;
     c = c * mix(1.0, ao, clamp(u.aoP.y, 0.0, 1.0));
   }
-  // 軽いビネット
-  let d = length(i.uv - vec2<f32>(0.5, 0.5));
-  c = c * (1.0 - 0.20 * smoothstep(0.55, 1.15, d));
-  return vec4<f32>(srgbEncode(c), 1.0);
+  if (u.bprB.x > 0.001 && u.bprB.y > 0.001) {
+    let e = outlineEdge(i.uv, u.bprB.x);
+    c = c * (1.0 - clamp(u.bprB.y, 0.0, 1.0) * e);
+  }
+  var a = 1.0;
+  if (u.lightDir.w > 0.5) {
+    // 背景を透明にして書き出すモード。深度が遠クリップのまま = 何も無い所。
+    // ビネットは背景を暗くする効果なので、透明のときは掛けない。
+    let dim = vec2<i32>(textureDimensions(depthTex));
+    let cc = clamp(vec2<i32>(i32(i.uv.x * f32(dim.x)), i32(i.uv.y * f32(dim.y))),
+      vec2<i32>(0), dim - vec2<i32>(1));
+    if (textureLoad(depthTex, cc, 0) >= 0.99999) { a = 0.0; }
+  } else {
+    // 軽いビネット
+    let d = length(i.uv - vec2<f32>(0.5, 0.5));
+    c = c * (1.0 - 0.20 * smoothstep(0.55, 1.15, d));
+  }
+  return vec4<f32>(srgbEncode(c), a);
 }
 `;
 

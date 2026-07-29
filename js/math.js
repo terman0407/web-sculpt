@@ -122,6 +122,20 @@ export const M4 = {
     return o;
   },
 
+  /**
+   * 平行投影。シャドウマップ用（平行光源なので遠近が付いてはいけない）。
+   * perspective と同じ WebGPU の深度範囲 [0, 1] に合わせる。
+   */
+  ortho(o, halfW, halfH, near, far) {
+    o.fill(0);
+    o[0] = 1 / halfW;
+    o[5] = 1 / halfH;
+    o[10] = 1 / (near - far);
+    o[14] = near / (near - far);
+    o[15] = 1;
+    return o;
+  },
+
   lookAt(o, eye, center, up) {
     let zx = eye[0] - center[0], zy = eye[1] - center[1], zz = eye[2] - center[2];
     let l = Math.hypot(zx, zy, zz);
