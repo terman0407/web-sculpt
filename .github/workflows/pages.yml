@@ -18,15 +18,20 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # アクションは node24 ランタイムのものを使う。node20 のままだと
+      # 「Node.js 20 is deprecated … being forced to run on Node.js 24」と警告が出る。
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: '22'
+          node-version: '26'
 
-      # コアロジックのテスト（ブラウザ不要の部分）。壊れていたら公開しない
+      # ブラウザ不要のテスト全部。壊れていたら公開しない。
+      # 以前は core.test.mjs だけを門番にしていたが、それだと 12 個あるテストの
+      # 1 個しか見ていない。ここが落ちるとデプロイが静かに止まり、公開ページが
+      # 古いまま残る（実際に 2 コミットぶん気付かなかった）ので、門番は広く取る。
       - name: Test
-        run: node test/core.test.mjs
+        run: npm test && npm run test:modules
 
       # 単一ファイル版 websculpt.html を最新のソースから作り直す
       - name: Build single-file bundle
@@ -41,7 +46,7 @@ jobs:
           # Jekyll の処理を無効化（_ 始まりのファイルを消されないように）
           touch _site/.nojekyll
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
@@ -53,4 +58,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

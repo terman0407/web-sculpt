@@ -954,7 +954,12 @@ head('WASM 距離場（JS 版との一致）');
     // 「WASM のときだけ形が変わる」類のバグになる。ビット単位で突き合わせる。
     head('WASM カーネル（JS 版との一致）');
     {
-      const build = () => {
+      // 入力は **1 回だけ** 作る。
+      // ストロークを 2 回流して 2 つのメッシュを作る書き方をしていたら、CI で
+      // 「突き合わせの入力が同一」が落ちた（差 20757）。Sculptor は
+      // strokeBudgetMs（既定 12ms）を超えるとその場で dab を間引くので、
+      // 同じ手順でも機械の速さで結果が変わる。比較テストで形を作り直しては駄目。
+      const src = (() => {
         const gg = PRIMITIVES.sphere();
         const mm = new SculptMesh();
         mm.setGeometry(gg.positions, gg.indices);
@@ -974,39 +979,47 @@ head('WASM 距離場（JS 版との一致）');
           for (let k = 1; k <= 12; k++) ss.addSample(at(k / 12));
           ss.endStroke();
         }
-        return mm;
+        mm.compact(true);
+        return {
+          positions: mm.positions.slice(0, mm.nv * 3),
+          indices: new Uint32Array(mm.tris.subarray(0, mm.nt * 3)),
+          verts: mm.liveVerts, tris: mm.liveTris,
+        };
+      })();
+      const clone = () => {
+        const m2 = new SculptMesh();
+        m2.setGeometry(src.positions, src.indices);
+        return m2;
       };
-      const mw = build();
-      const mj = build();
-      // 同じ形から出発していることを確かめてから比べる
-      let seed0 = 0;
-      for (let i = 0; i < mw.nv * 3; i++) if (mw.positions[i] !== mj.positions[i]) seed0++;
-      ok(seed0 === 0, `突き合わせの入力が同一 (差 ${seed0})`);
-      console.log(`  入力 ${mw.liveVerts.toLocaleString()} 頂点 / ${mw.liveTris.toLocaleString()} 面`);
+      console.log(`  入力 ${src.verts.toLocaleString()} 頂点 / ${src.tris.toLocaleString()} 面`);
 
-      setWasmKernels(true);
-      mw.computeAllNormals();
-      mw.computeAllCurvature();
+      // 法線と曲率は「読むだけ + 別の配列に書く」ので、同じメッシュで両方走らせて
+      // 突き合わせられる。曲率は法線を読むが、その法線自体もここで一致を確認する。
+      const m = clone();
       setWasmKernels(false);
-      mj.computeAllNormals();
-      mj.computeAllCurvature();
+      m.computeAllNormals();
+      const nJ = m.normals.slice(0, m.nv * 3);
+      m.computeAllCurvature();
+      const cJ = m.curv.slice(0, m.nv);
       setWasmKernels(true);
+      m.computeAllNormals();
+      m.computeAllCurvature();
 
       let dn = 0, maxN = 0, dc = 0, maxC = 0;
-      for (let i = 0; i < mw.nv * 3; i++) {
-        const d = Math.abs(mw.normals[i] - mj.normals[i]);
+      for (let i = 0; i < m.nv * 3; i++) {
+        const d = Math.abs(m.normals[i] - nJ[i]);
         if (d !== 0) { dn++; if (d > maxN) maxN = d; }
       }
-      for (let v = 0; v < mw.nv; v++) {
-        const d = Math.abs(mw.curv[v] - mj.curv[v]);
+      for (let v = 0; v < m.nv; v++) {
+        const d = Math.abs(m.curv[v] - cJ[v]);
         if (d !== 0) { dc++; if (d > maxC) maxC = d; }
       }
       ok(dn === 0, `法線がビット単位で一致 (差のある成分 ${dn} / 最大 ${maxN.toExponential(2)})`);
       ok(dc === 0, `曲率がビット単位で一致 (差のある頂点 ${dc} / 最大 ${maxC.toExponential(2)})`);
 
-      // リメッシュ（投影カーネル）も突き合わせる。
-      // 分割 / 統合の順序は決定的なので、投影が一致すれば結果も一致する。
-      const rw = build(), rj = build();
+      // リメッシュ（投影カーネル）も突き合わせる。こちらはメッシュを書き換えるので
+      // 同じ入力から 2 個作る（作り直しではなく同じ配列からの複製なので一致する）。
+      const rw = clone(), rj = clone();
       const opt = { targetTris: 4000, iterations: 4, adaptive: 0.5, relax: 0.5 };
       setWasmKernels(true);
       const resW = remesh(rw, opt);
