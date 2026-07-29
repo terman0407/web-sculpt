@@ -954,6 +954,62 @@ export function buildUI(app) {
       + 'レイヤー・モーフは破棄されます。';
   }
 
+  // --- ポリゴンモデリング（編集モード）------------------------------------
+  let editToggle = null, editModeSeg = null, editInfoEl = null;
+  {
+    const ed = section(right, 'ポリゴンモデリング', true);
+    el('p', 'note', ed).textContent =
+      '彫刻メッシュを四角化して、頂点 / 辺 / 面を選んで編集します。'
+      + '入るときに四角化し、出るときに三角形化して戻します。'
+      + '四角は彫刻すると消えるので「編集モードで組む → 彫刻へ移る」の順で使います。';
+    editToggle = toggle(ed, {
+      label: '編集モード', value: state.editMode,
+      title: '四角化して編集モードに入ります（トランスポーズ / 平面カットとは同時に使えません）',
+      onChange: (on) => app.setEditMode(on),
+    });
+    editInfoEl = el('p', 'note', ed);
+
+    el('div', 'subhead', ed).textContent = '選択の単位';
+    editModeSeg = segmented(ed, [
+      { label: '頂点', value: 'vert', title: '頂点を選ぶ' },
+      { label: '辺', value: 'edge', title: '辺を選ぶ' },
+      { label: '面', value: 'face', title: '面を選ぶ' },
+    ], state.editSelect, (v) => app.editSetSelectMode(v));
+    el('p', 'note', ed).textContent =
+      'ビューポートをクリックで選択、ドラッグで矩形選択。Shift で追加選択します。';
+
+    el('div', 'subhead', ed).textContent = '選択';
+    btnRow(ed, [
+      { label: 'すべて', title: '全部選ぶ', onClick: () => app.tools.editSelect('all') },
+      { label: '解除', title: '選択を外す', onClick: () => app.tools.editSelect('none') },
+      { label: '反転', title: '選択を反転する', onClick: () => app.tools.editSelect('invert') },
+    ]);
+    btnRow(ed, [
+      { label: '広げる', title: '隣を 1 段ぶん足す', onClick: () => app.tools.editSelect('grow') },
+      { label: '縮める', title: '縁を 1 段ぶん外す', onClick: () => app.tools.editSelect('shrink') },
+      { label: '繋がり', title: '繋がっている塊を全部選ぶ', onClick: () => app.tools.editSelect('linked') },
+    ]);
+
+    el('div', 'subhead', ed).textContent = '編集';
+    btnRow(ed, [
+      { label: '面を削除', title: '選択した面を消します（使われなくなった頂点も消えます）',
+        onClick: () => app.tools.editApply('delete') },
+      { label: '辺を溶解', title: '選択した辺を消して両側の 2 面を 1 面にまとめます',
+        onClick: () => app.tools.editApply('dissolve') },
+    ]);
+    btnRow(ed, [
+      { label: '面の向きを反転', cls: 'wide', title: '選択した面の裏表を入れ替えます',
+        onClick: () => app.tools.editApply('flip') },
+    ]);
+    el('p', 'note', ed).textContent =
+      '選択した頂点を動かすには、〔トランスポーズ〕ではなくこの下の〔選択を動かす〕を使います。';
+    btnRow(ed, [
+      { label: '選択を動かす（ギズモ）', cls: 'wide primary',
+        title: '選択した頂点にギズモを立てて、移動・回転・拡大縮小します',
+        onClick: () => app.editGizmo() },
+    ]);
+  }
+
   // --- 仕上げレンダリング（BPR 相当）------------------------------------
   //
   // プレビューは 1x で描く（実測 13ms 程度）。設定を動かすたびに描き直せる
@@ -1397,6 +1453,21 @@ export function buildUI(app) {
     closeHelp() { help.close(); },
     toggleHelp() { help.toggle(); },
     helpIsOpen() { return help.isOpen(); },
+    /** 編集モードの表示を state / 編集メッシュに合わせる */
+    refreshEdit() {
+      if (editToggle) editToggle.set(state.editMode);
+      if (editModeSeg) editModeSeg.set(state.editSelect);
+      if (!editInfoEl) return;
+      const i = app.tools ? app.tools.editInfo() : null;
+      if (!i) { editInfoEl.textContent = '編集モードに入っていません。'; return; }
+      const n = (x) => x.toLocaleString();
+      editInfoEl.textContent =
+        `頂点 ${n(i.verts)} / 辺 ${n(i.edges)} / 面 ${n(i.faces)}`
+        + `（四角 ${n(i.quad)} / 三角 ${n(i.tri)}${i.ngon ? ` / n-gon ${n(i.ngon)}` : ''}`
+        + ` — 四角化率 ${(i.quadRatio * 100).toFixed(0)}%）\n`
+        + `選択中: 頂点 ${n(i.sel.verts)} / 辺 ${n(i.sel.edges)} / 面 ${n(i.sel.faces)}`
+        + `${i.nonManifold ? `　⚠ 非多様体辺 ${n(i.nonManifold)}` : ''}`;
+    },
     /** レンダリングプレビュー */
     openRenderPreview() { rpvOpen(); },
     closeRenderPreview() { rpvClose(); },

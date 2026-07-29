@@ -952,3 +952,13 @@ kbd {
   object-fit: contain;
 }
 .rpv.busy .rpv-body { opacity: .55; }
+
+/* ---------- 編集モードの矩形選択 ---------- */
+.editbox {
+  position: absolute;
+  display: none;
+  border: 1px dashed var(--accent-2);
+  background: #f0925f18;
+  pointer-events: none;
+  z-index: 12;
+}

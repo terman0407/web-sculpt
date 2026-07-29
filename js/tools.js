@@ -22,6 +22,9 @@ import { STROKES, strokeDefaults } from './alpha.js';
 import { remesh, quadDominant, edgeLengthForTris } from './remesh.js';
 import { initRemeshWorker, remeshInWorker, remeshWorkerState, remeshWorkerError, remeshWorkerWasm } from './remeshworker.js';
 import { clamp } from './math.js';
+import {
+  editMeshFromSculpt, editMeshToSculpt, pickVert, pickEdge, pickFace, boxSelect,
+} from './editmesh.js';
 
 /** 変形とマスク操作の既定パラメータ一式（state に置く） */
 export function defaultToolState() {
@@ -616,6 +619,271 @@ export class Tools {
       if (u.refreshGroups) u.refreshGroups();
       if (u.refreshMorph) u.refreshMorph();
     }
+  }
+
+  // --- ポリゴンモデリング（編集モード）------------------------------------
+  //
+  // 彫刻メッシュは三角形専用なので、編集は別の n-gon メッシュ（EditMesh）で行う。
+  // 入るときに四角化して取り込み、出るときに三角形化して書き戻す。
+  // 編集中は彫刻メッシュを「表示用の三角形化したもの」として使う。
+
+  /** 編集モードに入る。四角化して EditMesh を作る */
+  editEnter() {
+    if (this.edit) return true;
+    const before = this.mesh.liveTris;
+    const em = editMeshFromSculpt(this.mesh, quadDominant);
+    if (em.nv === 0 || em.liveFaces === 0) {
+      this.toast('編集モードに入れませんでした（形が空です）', 3500);
+      return false;
+    }
+    this.edit = em;
+    this.editMode = 'face';
+    // 表示用に三角形化して彫刻メッシュへ入れる。編集中の見た目はこれ。
+    editMeshToSculpt(em, this.mesh);
+    this.afterTopologyChange();
+    this.editSyncOverlay();
+    const st = em.faceStats();
+    this.toast(`編集モード: ${before.toLocaleString()} 三角形 → `
+      + `四角 ${st.quad.toLocaleString()} + 三角 ${st.tri.toLocaleString()}`
+      + `（四角化率 ${(st.quadRatio * 100).toFixed(0)}%）`, 5000);
+    return true;
+  }
+
+  /** 編集モードを出る。三角形化して彫刻メッシュへ書き戻す */
+  editExit(apply = true) {
+    if (!this.edit) return;
+    const em = this.edit;
+    this.edit = null;
+    if (this.renderer) this.renderer.setOverlayLines(null, 0);
+    if (apply) {
+      const r = editMeshToSculpt(em, this.mesh);
+      this.afterTopologyChange();
+      this.toast(`編集モードを終了: ${r.verts.toLocaleString()} 頂点 / ${r.tris.toLocaleString()} 三角形`);
+    }
+    if (this.ui && this.ui.refreshEdit) this.ui.refreshEdit();
+  }
+
+  editIsOn() { return !!this.edit; }
+
+  /**
+   * 編集メッシュの情報（UI 表示用）。
+   * 選択数は sel に入れる。faceStats() も selectionCount() も verts / faces という
+   * 名前を持つので、平らに混ぜると片方が消える。
+   */
+  editInfo() {
+    if (!this.edit) return null;
+    const st = this.edit.faceStats();
+    return {
+      mode: this.editMode,
+      verts: this.edit.nv, edges: this.edit.ne,
+      faces: st.faces, quad: st.quad, tri: st.tri, ngon: st.ngon,
+      quadRatio: st.quadRatio,
+      nonManifold: this.edit.nonManifold,
+      sel: this.edit.selectionCount(),
+    };
+  }
+
+  editSetMode(mode) {
+    if (!this.edit) return;
+    this.editMode = mode;
+    // 選択を新しいモードの主体へ持ち替える（Blender と同じ引き継ぎ）
+    this.edit.syncSelection(mode);
+    this.editSyncOverlay();
+    if (this.ui && this.ui.refreshEdit) this.ui.refreshEdit();
+  }
+
+  /**
+   * 編集メッシュの辺と選択をオーバーレイ線として作る。
+   *
+   * 大きいメッシュだと全部の辺を線にすると頂点数が爆発する（1 辺 = 2 頂点 ×
+   * 7 float）。編集する形は普通そこまで大きくないが、彫刻してから入ることも
+   * あるので上限を設けて「選択と境界だけ」に落とす。
+   */
+  editSyncOverlay() {
+    const em = this.edit;
+    if (!em || !this.renderer) return;
+    const MAX_EDGES = 300000;
+    const full = em.ne <= MAX_EDGES;
+    // 何本描くか数える
+    let n = 0;
+    for (let e = 0; e < em.ne; e++) {
+      if (full || em.selEdge[e] || em.edgeFace[e * 2 + 1] < 0) n++;
+    }
+    const buf = new Float32Array(n * 2 * 7);
+    const P = em.positions;
+    let w = 0;
+    const put = (v, r, g, b, a) => {
+      const i = v * 3;
+      buf[w++] = P[i]; buf[w++] = P[i + 1]; buf[w++] = P[i + 2];
+      buf[w++] = r; buf[w++] = g; buf[w++] = b; buf[w++] = a;
+    };
+    for (let e = 0; e < em.ne; e++) {
+      const sel = em.selEdge[e];
+      const bnd = em.edgeFace[e * 2 + 1] < 0;
+      if (!full && !sel && !bnd) continue;
+      // 選択 = 橙、境界 = 赤寄り、その他 = 薄い灰
+      let r = 0.55, g = 0.60, b = 0.68, a = 0.30;
+      if (bnd) { r = 0.95; g = 0.35; b = 0.25; a = 0.85; }
+      if (sel) { r = 1.0; g = 0.60; b = 0.20; a = 0.95; }
+      put(em.edgeA[e], r, g, b, a);
+      put(em.edgeB[e], r, g, b, a);
+    }
+    // 選択した頂点は小さな十字で示す（頂点モードで見えるように）
+    let extra = null;
+    if (this.editMode === 'vert') {
+      const sel = [];
+      for (let v = 0; v < em.nv; v++) if (em.selVert[v]) sel.push(v);
+      const cap = Math.min(sel.length, 20000);
+      const s = em.bounds().radius * 0.012;
+      extra = new Float32Array(cap * 6 * 7);
+      let x = 0;
+      const putp = (px, py, pz) => {
+        extra[x++] = px; extra[x++] = py; extra[x++] = pz;
+        extra[x++] = 1.0; extra[x++] = 0.75; extra[x++] = 0.25; extra[x++] = 1.0;
+      };
+      for (let k = 0; k < cap; k++) {
+        const i = sel[k] * 3;
+        const px = P[i], py = P[i + 1], pz = P[i + 2];
+        putp(px - s, py, pz); putp(px + s, py, pz);
+        putp(px, py - s, pz); putp(px, py + s, pz);
+        putp(px, py, pz - s); putp(px, py, pz + s);
+      }
+    }
+    if (extra && extra.length) {
+      const all = new Float32Array(w + extra.length);
+      all.set(buf.subarray(0, w));
+      all.set(extra, w);
+      this.renderer.setOverlayLines(all, (w + extra.length) / 7, true);
+    } else {
+      this.renderer.setOverlayLines(buf, w / 7, false);
+    }
+  }
+
+  /** 表示用の三角形メッシュを作り直す（形を変えたあとに呼ぶ） */
+  editRefreshDisplay() {
+    if (!this.edit) return;
+    editMeshToSculpt(this.edit, this.mesh);
+    this.mesh.markAllDirty();
+    this.edit.version++;
+    this.editSyncOverlay();
+    this.redraw();
+  }
+
+  /** 選択操作。op は 'all' | 'none' | 'invert' | 'grow' | 'shrink' | 'linked' */
+  editSelect(op) {
+    if (!this.edit) return;
+    const em = this.edit, mode = this.editMode;
+    if (op === 'all') em.selectAll(mode);
+    else if (op === 'none') em.clearSelection();
+    else if (op === 'invert') em.invertSelection(mode);
+    else if (op === 'grow') em.growSelection(mode);
+    else if (op === 'shrink') em.shrinkSelection(mode);
+    else if (op === 'linked') em.selectLinked();
+    this.editSyncOverlay();
+    this.redraw();
+    if (this.ui && this.ui.refreshEdit) this.ui.refreshEdit();
+  }
+
+  /**
+   * クリックで拾う。renderer のピッキングが返したワールド座標を渡す。
+   * @param {Array} p ワールド座標
+   * @param {boolean} add true なら選択に足す
+   */
+  editPick(p, add = false) {
+    if (!this.edit) return null;
+    const em = this.edit, mode = this.editMode;
+    // 拾う範囲はモデルの大きさに対する相対値。画面の px では測れない
+    // （ピッキングは表面のワールド座標を返すので、そこからの距離で決める）
+    const tol = em.bounds().radius * 0.12;
+    if (!add) em.clearSelection();
+    let hit = -1;
+    if (mode === 'vert') {
+      hit = pickVert(em, p, tol);
+      if (hit >= 0) em.selVert[hit] = 1;
+    } else if (mode === 'edge') {
+      hit = pickEdge(em, p, tol);
+      if (hit >= 0) em.selEdge[hit] = 1;
+    } else {
+      hit = pickFace(em, p, tol);
+      if (hit >= 0) em.selFace[hit] = 1;
+    }
+    em.syncSelection(mode);
+    this.editSyncOverlay();
+    this.redraw();
+    if (this.ui && this.ui.refreshEdit) this.ui.refreshEdit();
+    return hit;
+  }
+
+  /** 矩形選択。project はワールド → 画面 */
+  editBoxSelect(project, rect, add = false) {
+    if (!this.edit) return null;
+    const r = boxSelect(this.edit, project, rect, this.editMode, add);
+    this.editSyncOverlay();
+    this.redraw();
+    if (this.ui && this.ui.refreshEdit) this.ui.refreshEdit();
+    return r;
+  }
+
+  /** 編集操作。op は 'delete' | 'dissolve' | 'flip' */
+  editApply(op) {
+    if (!this.edit) return;
+    const em = this.edit;
+    if (op === 'delete') {
+      const r = em.deleteSelectedFaces();
+      if (r.faces === 0) { this.toast('面が選択されていません'); return; }
+      this.toast(`${r.faces} 面を削除（頂点 ${r.verts} 個も一緒に消えました）`);
+    } else if (op === 'dissolve') {
+      const r = em.dissolveSelectedEdges();
+      if (r.edges === 0) {
+        this.toast(r.refused > 0
+          ? '溶解できませんでした（境界の辺、または向きが揃っていない面）'
+          : '辺が選択されていません', 4000);
+        return;
+      }
+      this.toast(`${r.edges} 本の辺を溶解${r.refused ? `（${r.refused} 本は断りました）` : ''}`);
+    } else if (op === 'flip') {
+      const n = em.flipSelectedFaces();
+      if (n === 0) { this.toast('面が選択されていません'); return; }
+      this.toast(`${n} 面の向きを反転`);
+    }
+    this.editRefreshDisplay();
+    if (this.ui && this.ui.refreshEdit) this.ui.refreshEdit();
+  }
+
+  /**
+   * 選択した頂点を動かす（ギズモから呼ばれる）。
+   * @param {Float32Array} m 4x4 行列（列優先）
+   */
+  editTransform(m) {
+    if (!this.edit) return 0;
+    const em = this.edit, P = em.positions;
+    let n = 0;
+    for (let v = 0; v < em.nv; v++) {
+      if (!em.selVert[v]) continue;
+      const i = v * 3;
+      const x = P[i], y = P[i + 1], z = P[i + 2];
+      P[i] = m[0] * x + m[4] * y + m[8] * z + m[12];
+      P[i + 1] = m[1] * x + m[5] * y + m[9] * z + m[13];
+      P[i + 2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+      n++;
+    }
+    if (n) this.editRefreshDisplay();
+    return n;
+  }
+
+  /** 選択の重心（ギズモの置き場所） */
+  editSelectionCenter(out) {
+    if (!this.edit) return false;
+    const em = this.edit, P = em.positions;
+    let x = 0, y = 0, z = 0, n = 0;
+    for (let v = 0; v < em.nv; v++) {
+      if (!em.selVert[v]) continue;
+      const i = v * 3;
+      x += P[i]; y += P[i + 1]; z += P[i + 2]; n++;
+    }
+    if (n === 0) return false;
+    out[0] = x / n; out[1] = y / n; out[2] = z / n;
+    return true;
   }
 
   bytes() {

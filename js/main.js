@@ -103,6 +103,9 @@ const state = {
   bprLightEl: 45,          // 光の高度角（度）
   bprTransparent: false,   // 背景を透明にして書き出す
   bprGrid: false,          // 床グリッドを入れる
+  // ポリゴンモデリング（編集モード）
+  editMode: false,        // 編集モードに入っているか
+  editSelect: 'face',     // 'vert' | 'edge' | 'face'
   invertOrbitY: false,
   bgPreset: 'dark',
   bgTop: BG_PRESETS.dark.top,
@@ -397,6 +400,55 @@ const app = {
       if (!quiet) ui.hideBusy();
       busy = false;
     }
+  },
+  // --- ポリゴンモデリング（編集モード）------------------------------------
+  setEditMode(on) {
+    if (busy) return;
+    if (on === state.editMode) return;
+    if (on) {
+      // 編集モードとトランスポーズ / 平面カットは同時に使えない（どれも
+      // 左ドラッグを取り合う）
+      applyTransposeMode(false);
+      state.clipMode = 'off';
+      if (!tools.editEnter()) return;
+      state.editMode = true;
+      tools.editSetMode(state.editSelect);
+    } else {
+      tools.editExit(true);
+      state.editMode = false;
+    }
+    ui.syncFromState();
+    if (ui.refreshEdit) ui.refreshEdit();
+  },
+  toggleEditMode() { app.setEditMode(!state.editMode); },
+  /**
+   * 選択した頂点にギズモを立てる。
+   *
+   * トランスポーズのギズモをそのまま使う。**編集メッシュと表示用の彫刻メッシュは
+   * 頂点番号が 1:1** なので（triangulate は positions をそのまま渡し、setGeometry は
+   * 並べ替えない）、選択をマスクへ写せば既存のギズモがそのまま効く。
+   * ギズモは「マスクされていない頂点」を動かす規約なので、選択を 0、非選択を 1 にする。
+   */
+  editGizmo() {
+    if (!state.editMode || !tools.edit) { ui.toast('先に編集モードに入ります'); return; }
+    const em = tools.edit;
+    const sel = em.selectionCount();
+    if (sel.verts === 0) { ui.toast('頂点が選択されていません'); return; }
+    if (mesh.nv !== em.nv) {
+      // 1:1 の前提が崩れている（表示の作り直しを忘れている）。黙って変な所を
+      // 動かすより、作り直してから立てる。
+      tools.editRefreshDisplay();
+    }
+    for (let v = 0; v < mesh.nv; v++) mesh.mask[v] = em.selVert[v] ? 0 : 1;
+    mesh.markAllDirty();
+    if (!tools.gizmoActivate()) return;
+    applyTransposeMode(true);
+    ui.toast(`${sel.verts.toLocaleString()} 頂点にギズモを立てました（ハンドルを掴んで動かします）`, 4000);
+  },
+  editSetSelectMode(mode) {
+    state.editSelect = mode;
+    if (state.editMode) tools.editSetMode(mode);
+    ui.syncFromState();
   },
   setTranspose(on) { applyTransposeMode(on); },
   toggleTranspose() { applyTransposeMode(!state.transposeMode); },
@@ -1005,6 +1057,74 @@ const SHORTCUTS = [
     run: () => { spaceDown = true; } },
 ];
 
+// ---------------------------------------------------------------------------
+// 編集モードの選択（クリックで拾う / ドラッグで矩形選択）
+//
+// 矩形は DOM の div で描く。オーバーレイ線のバッファは編集メッシュのワイヤ表示に
+// 使っていて 1 本しかないので、そこへ混ぜると毎フレーム作り直しになる。
+// ---------------------------------------------------------------------------
+const editBox = { on: false, x0: 0, y0: 0, x1: 0, y1: 0, add: false, el: null };
+
+function editBoxEl() {
+  if (!editBox.el) editBox.el = document.getElementById('editbox');
+  return editBox.el;
+}
+
+function editDragBegin(x, y, add) {
+  editBox.on = true;
+  editBox.x0 = x; editBox.y0 = y; editBox.x1 = x; editBox.y1 = y;
+  editBox.add = !!add;
+  const el = editBoxEl();
+  if (el) { el.style.display = 'none'; }
+}
+
+function editDragMove(x, y) {
+  if (!editBox.on) return;
+  editBox.x1 = x; editBox.y1 = y;
+  const el = editBoxEl();
+  if (!el) return;
+  const w = Math.abs(x - editBox.x0), h = Math.abs(y - editBox.y0);
+  if (w < 4 && h < 4) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.style.left = Math.min(x, editBox.x0) + 'px';
+  el.style.top = Math.min(y, editBox.y0) + 'px';
+  el.style.width = w + 'px';
+  el.style.height = h + 'px';
+}
+
+/** ワールド座標 → キャンバス座標。矩形選択の判定に使う */
+function makeProjector() {
+  const vp = camera.viewProj;
+  const w = canvas.clientWidth || 1, h = canvas.clientHeight || 1;
+  return (x, y, z) => {
+    const cx = vp[0] * x + vp[4] * y + vp[8] * z + vp[12];
+    const cy = vp[1] * x + vp[5] * y + vp[9] * z + vp[13];
+    const cw = vp[3] * x + vp[7] * y + vp[11] * z + vp[15];
+    if (cw <= 1e-6) return [0, 0, false];
+    return [(cx / cw * 0.5 + 0.5) * w, (0.5 - cy / cw * 0.5) * h, true];
+  };
+}
+
+function editDragEnd() {
+  if (!editBox.on) return;
+  editBox.on = false;
+  const el = editBoxEl();
+  if (el) el.style.display = 'none';
+  const w = Math.abs(editBox.x1 - editBox.x0), h = Math.abs(editBox.y1 - editBox.y0);
+  if (w < 4 && h < 4) {
+    // クリック扱い。カーソル下の表面のワールド座標から一番近いものを拾う
+    if (renderer.pick.ok) tools.editPick(renderer.pick.point, editBox.add);
+    else if (!editBox.add) tools.editSelect('none');
+    return;
+  }
+  const r = tools.editBoxSelect(makeProjector(),
+    { x0: editBox.x0, y0: editBox.y0, x1: editBox.x1, y1: editBox.y1 }, editBox.add);
+  if (r) {
+    ui.toast(`選択: 頂点 ${r.verts.toLocaleString()} / 辺 ${r.edges.toLocaleString()}`
+      + ` / 面 ${r.faces.toLocaleString()}`);
+  }
+}
+
 function bindInput() {
   canvas.addEventListener('contextmenu', e => e.preventDefault());
 
@@ -1042,6 +1162,10 @@ function bindInput() {
       } else {
         ptr.mode = 'orbit';
       }
+    } else if (e.button === 0 && state.editMode) {
+      // 編集モードでは彫らない。クリックで拾い、ドラッグで矩形選択する
+      editDragBegin(ptr.x, ptr.y, e.shiftKey);
+      ptr.mode = 'editbox';
     } else if (e.button === 0 && state.clipMode !== 'off') {
       ptr.mode = clipDragBegin(ptr.x, ptr.y) ? 'clip' : 'orbit';
     } else if (e.button === 0) {
@@ -1077,6 +1201,8 @@ function bindInput() {
       screenRay(ptr.x, ptr.y);
       tools.gizmo.updateDrag(mesh, rayO, rayD, { snap: e.shiftKey });
       tools.gizmoDrawHandles(gizmoScale, gizmoHover);
+    } else if (ptr.mode === 'editbox') {
+      editDragMove(ptr.x, ptr.y);
     } else if (ptr.mode === 'clip') {
       clipDragMove(ptr.x, ptr.y);
     } else if (!ptr.down && state.transposeMode && tools && tools.gizmo.active) {
@@ -1096,12 +1222,22 @@ function bindInput() {
         sculptor.history.commit(mesh);
         scheduleAutosave();
       }
+      // 編集モード中は、動かした結果を編集メッシュへ書き戻す。
+      // 頂点番号は 1:1 なのでそのまま写せる。
+      if (state.editMode && tools.edit && tools.edit.nv === mesh.nv) {
+        tools.edit.positions.set(mesh.positions.subarray(0, mesh.nv * 3));
+        tools.edit.version++;
+        tools.editSyncOverlay();
+        if (ui.refreshEdit) ui.refreshEdit();
+      }
       // 動かしたぶんピボットがずれるので立て直す
       tools.gizmoActivate();
       updateGizmoScale();
       tools.gizmoDrawHandles(gizmoScale, gizmoHover);
     } else if (ptr.mode === 'clip') {
       clipDragEnd();
+    } else if (ptr.mode === 'editbox') {
+      editDragEnd();
     }
     if (ptr.mode === 'sculpt') {
       sculptor.endStroke();
