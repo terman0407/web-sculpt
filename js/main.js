@@ -901,6 +901,20 @@ function clipDragEnd() {
 // 同じキーで別の動作を割り当てているものがあるため。
 // 上から順に見て最初に当たったものを実行するので、修飾キー付きを先に置く。
 // ---------------------------------------------------------------------------
+// 文字を打つ場所にフォーカスがあるか。ショートカットを譲るかどうかの判定。
+// range / checkbox / radio / button / color / file は「入力欄」だが文字は打たない。
+const NON_TEXT_INPUT = new Set(['range', 'checkbox', 'radio', 'button', 'submit',
+  'reset', 'color', 'file', 'image']);
+function isTypingTarget(t, ctrl) {
+  if (!t) return false;
+  const tag = t.tagName;
+  if (tag === 'TEXTAREA' || t.isContentEditable) return true;
+  if (tag === 'INPUT') return !NON_TEXT_INPUT.has(String(t.type || 'text').toLowerCase());
+  // select は文字キーで項目を選べるので、修飾キー無しのショートカットだけ譲る
+  if (tag === 'SELECT') return !ctrl;
+  return false;
+}
+
 const SHORTCUTS = [
   // --- 編集 ---
   { group: '編集', keys: 'Ctrl+Z', jp: '元に戻す', code: 'KeyZ', ctrl: true, prevent: true,
@@ -1112,7 +1126,12 @@ function bindInput() {
   }, { passive: false });
 
   window.addEventListener('keydown', (e) => {
-    if (e.target && /INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+    // 文字を打っている場所ではショートカットを奪わない（Ctrl+Z は文字の
+    // 取り消しに要る）。ただし **スライダーやチェックボックスは「入力欄」では
+    // あっても文字を打つ場所ではない** ので通す。
+    // 以前は tagName が INPUT なら一律で弾いていて、スライダーを 1 回触ると
+    // フォーカスが残り、そのあと Ctrl+Z が効かなくなっていた。
+    if (isTypingTarget(e.target, e.ctrlKey || e.metaKey)) return;
     // 使い方ページを開いている間は、閉じるキーだけ通す。オーバーレイの裏で
     // D（ダイナメッシュ）などが走ると、読んでいるうちに形が変わってしまう。
     const helpOpen = ui && ui.helpIsOpen && ui.helpIsOpen();

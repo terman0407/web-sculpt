@@ -799,17 +799,57 @@ export class SculptMesh {
 
   // --- スナップショット（アンドゥ） --------------------------------------
 
-  snapshot() {
+  /**
+   * アンドゥ用のスナップショット。
+   *
+   * @param {object} [prev] 直前のスナップショット。**中身が同じ配列は
+   *   コピーせず、前の履歴のものをそのまま指す**（restore は読むだけなので安全）。
+   *
+   *   1 ストロークで全部が変わることはまずない。粘土で彫れば positions だけ、
+   *   ポリペイントなら colors だけ、マスクを塗れば mask だけが変わり、接続
+   *   （tris / vAlive / フリーリスト）は動的トポロジを使わない限り変わらない。
+   *   260 万頂点だと 1 件 132MB のうち tris が 63MB、colors が 31MB を占めるので、
+   *   共有しないと 320MB の上限に 2 件しか収まらず「2 回しか戻れない」ことになる。
+   *
+   *   判定は **中身の比較**。topoVersion では駄目で、addVertex はこれを上げないし、
+   *   上げ忘れが 1 か所あるだけで履歴が黙って壊れる（違う接続を共有してしまう）。
+   *   比較は違いが出た時点で打ち切るので、変わった配列に対しては実質無料。
+   */
+  snapshot(prev = null) {
+    const nv = this.nv, nt = this.nt;
+    const shared = [];
+    /** 中身が同じなら前のを指す。違えば切り出してコピーする */
+    const keep = (key, src, n) => {
+      const p = prev ? prev[key] : null;
+      if (p && p.length === n) {
+        let same = true;
+        for (let i = 0; i < n; i++) { if (p[i] !== src[i]) { same = false; break; } }
+        if (same) { shared.push(key); return p; }
+      }
+      return src.slice(0, n);
+    };
+    /** フリーリストは JS 配列なので別扱い */
+    const keepList = (key, src) => {
+      const p = prev ? prev[key] : null;
+      if (p && p.length === src.length) {
+        let same = true;
+        for (let i = 0; i < src.length; i++) { if (p[i] !== src[i]) { same = false; break; } }
+        if (same) { shared.push(key); return p; }
+      }
+      return src.slice();
+    };
     return {
-      nv: this.nv, nt: this.nt,
+      nv, nt,
       liveVerts: this.liveVerts, liveTris: this.liveTris,
-      positions: this.positions.slice(0, this.nv * 3),
-      colors: this.colors.slice(0, this.nv * 3),
-      mask: this.mask.slice(0, this.nv),
-      vAlive: this.vAlive.slice(0, this.nv),
-      tris: this.tris.slice(0, this.nt * 3),
-      freeVerts: this.freeVerts.slice(),
-      freeTris: this.freeTris.slice(),
+      positions: keep('positions', this.positions, nv * 3),
+      colors: keep('colors', this.colors, nv * 3),
+      mask: keep('mask', this.mask, nv),
+      vAlive: keep('vAlive', this.vAlive, nv),
+      tris: keep('tris', this.tris, nt * 3),
+      freeVerts: keepList('freeVerts', this.freeVerts),
+      freeTris: keepList('freeTris', this.freeTris),
+      // 前の履歴と共有している配列の名前（メモリ量を二重に数えないため）
+      shared,
     };
   }
 

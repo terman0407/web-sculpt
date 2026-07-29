@@ -1,6 +1,6 @@
 // WebSculpt コアロジックの検証（DOM / WebGPU に触らない部分）
 import { SculptMesh, PRIMITIVES, weld } from '../js/mesh.js';
-import { Sculptor, mirrorPoint } from '../js/sculptor.js';
+import { Sculptor, mirrorPoint, History } from '../js/sculptor.js';
 import { splitEdge, collapseEdge, refineRegion } from '../js/dyntopo.js';
 import { exportOBJ, exportSTL, exportPLY, importOBJ, importSTL, importMesh } from '../js/io.js';
 import { BRUSH_IDS } from '../js/brushes.js';
@@ -256,6 +256,117 @@ head('アンドゥ / リドゥ');
   ok(s.history.redo(m), 'redo が失敗');
   ok(m.liveVerts === v1, `redo 後の頂点数が違う: ${m.liveVerts} != ${v1}`);
   validate(m, { label: 'after redo' });
+}
+
+// ---------------------------------------------------------------------------
+// アンドゥの履歴は「接続が変わっていなければ tris / vAlive を前の履歴と共有する」。
+// tris はスナップショット中で一番大きい配列なので、これで同じメモリ上限で
+// 戻れる回数がほぼ倍になる。共有しても復元が壊れないことを確かめる。
+head('アンドゥ履歴のメモリ共有');
+{
+  const g = PRIMITIVES.sphere();
+  const m = new SculptMesh();
+  m.setGeometry(g.positions, g.indices);
+  const state = makeState({ dynTopo: false, decimate: false });
+  const s = new Sculptor(m, state);
+  s.divide(); s.divide();
+  state.worldRadius = 0.3;
+  const snaps = [];
+
+  // 接続を変えないストロークを 6 回（dynTopo オフなので分割は起きない）
+  for (let k = 0; k < 6; k++) {
+    const pt = new Float32Array(3);
+    const at = (u) => {
+      const th = k * 0.9 + u * 1.1;
+      pt[0] = Math.cos(th); pt[1] = Math.sin(th) * 0.5; pt[2] = Math.cos(th * 0.7);
+      return pt;
+    };
+    s.beginStroke('clay', at(0), 1);
+    for (let j = 1; j <= 8; j++) s.addSample(at(j / 8));
+    s.endStroke();
+    snaps.push(m.positions.slice(0, m.nv * 3));
+  }
+  const H = s.history;
+  const i1 = H.info();
+  // 彫るだけのストロークなので、positions 以外（colors / mask / vAlive / tris）は
+  // 全部共有されているはず = 1 件あたり 4 本
+  ok(i1.sharedArrays >= (i1.states - 1) * 4,
+    `変わっていない配列が共有されている (${i1.sharedArrays} 本 / 期待 ${(i1.states - 1) * 4} 本以上)`);
+  for (const st2 of H.states.slice(1)) {
+    ok(!st2.shared.includes('positions'), '彫ったのに positions が共有されている');
+  }
+  // 共有していないときのバイト数と比べる
+  let naive = 0;
+  for (const st2 of H.states) {
+    naive += st2.positions.byteLength + st2.colors.byteLength + st2.mask.byteLength
+      + st2.vAlive.byteLength + st2.tris.byteLength;
+  }
+  ok(i1.bytes < naive * 0.45,
+    `メモリが減っている (${(naive / 1048576).toFixed(1)}MB → ${(i1.bytes / 1048576).toFixed(1)}MB)`);
+  console.log(`  ${m.liveVerts.toLocaleString()} 頂点 / ${i1.states} 件`
+    + ` / 共有なし ${(naive / 1048576).toFixed(1)}MB → 共有あり ${(i1.bytes / 1048576).toFixed(1)}MB`
+    + ` (${(naive / i1.bytes).toFixed(2)} 倍節約)`);
+
+  // 共有していても 1 段ずつ正しく戻れること
+  for (let k = snaps.length - 1; k >= 1; k--) {
+    ok(H.undo(m), `${k} 段目の undo が失敗`);
+    let d = 0;
+    for (let i = 0; i < m.nv * 3; i++) d = Math.max(d, Math.abs(m.positions[i] - snaps[k - 1][i]));
+    ok(d < 1e-6, `${k} 段目の undo で座標が戻らない (最大差 ${d.toExponential(2)})`);
+    validate(m, { label: `undo ${k}` });
+  }
+
+  // ポリペイントなら colors だけが変わり、positions は共有されること
+  {
+    state.dynTopo = false;
+    const pt = new Float32Array([1, 0, 0]);
+    s.beginStroke('paint', pt, 1);
+    for (let j = 1; j <= 8; j++) { pt.set([Math.cos(j * 0.05), Math.sin(j * 0.05) * 0.4, 0.3]); s.addSample(pt); }
+    s.endStroke();
+    const last = H.states[H.states.length - 1];
+    ok(last.shared.includes('positions'),
+      'ペイントなのに positions がコピーされている（形は変わっていない）');
+    ok(!last.shared.includes('colors'), 'ペイントしたのに colors が共有されている');
+  }
+
+  // トポロジが変わったら接続を共有しないこと（共有したら復元が壊れる）
+  {
+    state.dynTopo = true;
+    state.detail = 0.9;
+    const pt = new Float32Array([1, 0, 0]);
+    s.beginStroke('clay', pt, 1);
+    for (let j = 1; j <= 8; j++) { pt.set([Math.cos(j * 0.05), Math.sin(j * 0.05) * 0.4, 0.3]); s.addSample(pt); }
+    s.endStroke();
+    const last = H.states[H.states.length - 1];
+    ok(!last.shared.includes('tris'), 'トポロジが変わったのに tris を共有している');
+    const nvAfter = m.liveVerts;
+    ok(H.undo(m), 'トポロジ変更後の undo が失敗');
+    ok(m.liveVerts !== nvAfter, `undo で頂点数が戻っていない (${nvAfter} → ${m.liveVerts})`);
+    validate(m, { label: 'undo after topology change' });
+  }
+
+  // 古い履歴を捨てても数え落とさないこと（持ち主の付け替え）
+  {
+    const h2 = new History(4, 1024 * 1024 * 1024);
+    const m2 = new SculptMesh();
+    m2.setGeometry(g.positions, g.indices);
+    h2.reset(m2);
+    for (let k = 0; k < 10; k++) { m2.positions[0] = 0.5 + k * 0.001; h2.commit(m2); }
+    ok(h2.states.length === 4, `件数上限が効いている (${h2.states.length})`);
+    ok(h2.states[0].shared.length === 0,
+      '先頭を捨てたあと、残った先頭が持ち主になっていない（bytes が数え落とす）');
+    // 実際に別々のバッファを何本抱えているかを数え上げて突き合わせる
+    let real = 0;
+    const seen = new Set();
+    for (const st2 of h2.states) {
+      for (const k of ['positions', 'colors', 'mask', 'vAlive', 'tris']) {
+        if (seen.has(st2[k])) continue;
+        seen.add(st2[k]);
+        real += st2[k].byteLength;
+      }
+    }
+    ok(h2.bytes() === real, `bytes() が実際の保持量と合わない (${h2.bytes()} != ${real})`);
+  }
 }
 
 // ---------------------------------------------------------------------------

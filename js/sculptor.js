@@ -156,12 +156,17 @@ export class History {
   }
   commit(mesh) {
     if (this.cur < this.states.length - 1) this.states.length = this.cur + 1;
-    this.states.push(mesh.snapshot());
+    // 直前の履歴を渡すと、接続が変わっていなければ tris などを共有してくれる
+    this.states.push(mesh.snapshot(this.states[this.states.length - 1]));
     this.cur = this.states.length - 1;
     // 件数とメモリ量の両方で古い履歴を捨てる（最新 2 件は必ず残す）
     while (this.states.length > this.limit
       || (this.states.length > 2 && this.bytes() > this.byteLimit)) {
       this.states.shift();
+      // 捨てた履歴が持っていた配列を後続が共有していることがある。共有されて
+      // いる限り解放されないので、残った先頭を「持ち主」に付け替えないと
+      // bytes() がそのぶんを数え落とす（実際には減っていないのに減ったと見える）。
+      if (this.states.length) this.states[0].shared = [];
       this.cur--;
     }
   }
@@ -179,13 +184,30 @@ export class History {
     mesh.restore(this.states[this.cur]);
     return true;
   }
+  /**
+   * 履歴が実際に抱えているバイト数。
+   * 前の履歴と共有している配列は数えない（1 本を複数の履歴が指しているだけなので、
+   * 数えると実際の何倍にも見えて履歴が早く捨てられる）。
+   */
   bytes() {
     let b = 0;
     for (const s of this.states) {
-      b += s.positions.byteLength + s.colors.byteLength + s.mask.byteLength
-        + s.vAlive.byteLength + s.tris.byteLength;
+      const sh = s.shared || [];
+      for (const k of ['positions', 'colors', 'mask', 'vAlive', 'tris']) {
+        if (!sh.includes(k)) b += s[k].byteLength;
+      }
     }
     return b;
+  }
+
+  /** 履歴の内訳（診断とテスト用） */
+  info() {
+    let sharedArrays = 0;
+    for (const s of this.states) sharedArrays += (s.shared || []).length;
+    return {
+      states: this.states.length, cur: this.cur, sharedArrays,
+      bytes: this.bytes(), limit: this.limit, byteLimit: this.byteLimit,
+    };
   }
 }
 

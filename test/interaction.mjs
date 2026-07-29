@@ -111,6 +111,52 @@ async function main() {
     await frames(3);
     ok((await st('WebSculpt.mesh.liveVerts')) === v1, 'Redo で戻った');
 
+    // ---- 3b) 実キーの Ctrl+Z がフォーカスに邪魔されないこと -------------
+    // スライダーを 1 回触るとフォーカスが input に残る。以前はキーハンドラが
+    // 「入力欄にいるなら何もしない」で一律に弾いていて、そのあと Ctrl+Z が
+    // 効かなくなっていた（「ctrl z で戻らない時がある」の正体）。
+    {
+      // 戻る先を確保しておく（履歴を使い切っていると 0 → 0 で判定できない）。
+      // ここで見たいのはキーが届くかどうかなので、履歴は水増しでよい。
+      await cdp.eval(`(() => { const W = window.WebSculpt;
+        for (let i = 0; i < 4; i++) W.sculptor.history.commit(W.mesh); })()`);
+      const cur0 = await st('WebSculpt.sculptor.history.cur');
+      await key('keyDown', 'KeyZ', 'z', 2);   // 2 = Ctrl
+      await key('keyUp', 'KeyZ', 'z', 2);
+      await frames(3);
+      const cur1 = await st('WebSculpt.sculptor.history.cur');
+      ok(cur1 === cur0 - 1, `素の状態で Ctrl+Z が効く (${cur0} → ${cur1})`);
+
+      // スライダーにフォーカスを移してから同じことをする
+      await cdp.eval(`document.querySelector('#rightPanel input[type=range]').focus()`);
+      const tag = await cdp.eval('document.activeElement.tagName');
+      await key('keyDown', 'KeyZ', 'z', 2);
+      await key('keyUp', 'KeyZ', 'z', 2);
+      await frames(3);
+      const cur2 = await st('WebSculpt.sculptor.history.cur');
+      ok(cur2 === cur1 - 1,
+        `スライダー(${tag})を触った後も Ctrl+Z が効く (${cur1} → ${cur2})`);
+
+      // 文字を打つ入力欄では逆に譲ること（Ctrl+Z は文字の取り消しに要る）
+      await cdp.eval(`(() => {
+        const i = document.createElement('input');
+        i.type = 'text'; i.id = '__t'; document.body.appendChild(i); i.focus();
+      })()`);
+      const cur3 = await st('WebSculpt.sculptor.history.cur');
+      await key('keyDown', 'KeyZ', 'z', 2);
+      await key('keyUp', 'KeyZ', 'z', 2);
+      await frames(3);
+      ok((await st('WebSculpt.sculptor.history.cur')) === cur3,
+        'テキスト入力欄では Ctrl+Z を奪わない');
+      await cdp.eval(`(() => { const t = document.getElementById('__t'); t.blur(); t.remove(); })()`);
+      // 水増しした履歴を巻き戻して、以降のテストが前提にしている形へ戻す
+      await cdp.eval(`(() => { const W = window.WebSculpt;
+        while (W.sculptor.history.canRedo()) W.app.redo(); })()`);
+      await frames(3);
+      ok((await st('WebSculpt.mesh.liveVerts')) === v1,
+        `Ctrl+Z の検証後に元の状態へ戻せた (${v1} 頂点)`);
+    }
+
     // ---- 4) 背景ドラッグで回転 -----------------------------------------
     const yaw0 = await st('WebSculpt.camera.yaw');
     const bgx = Math.round(R.x + 60), bgy = Math.round(R.y + 60);

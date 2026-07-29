@@ -2807,17 +2807,57 @@ class SculptMesh {
 
   // --- スナップショット（アンドゥ） --------------------------------------
 
-  snapshot() {
+  /**
+   * アンドゥ用のスナップショット。
+   *
+   * @param {object} [prev] 直前のスナップショット。**中身が同じ配列は
+   *   コピーせず、前の履歴のものをそのまま指す**（restore は読むだけなので安全）。
+   *
+   *   1 ストロークで全部が変わることはまずない。粘土で彫れば positions だけ、
+   *   ポリペイントなら colors だけ、マスクを塗れば mask だけが変わり、接続
+   *   （tris / vAlive / フリーリスト）は動的トポロジを使わない限り変わらない。
+   *   260 万頂点だと 1 件 132MB のうち tris が 63MB、colors が 31MB を占めるので、
+   *   共有しないと 320MB の上限に 2 件しか収まらず「2 回しか戻れない」ことになる。
+   *
+   *   判定は **中身の比較**。topoVersion では駄目で、addVertex はこれを上げないし、
+   *   上げ忘れが 1 か所あるだけで履歴が黙って壊れる（違う接続を共有してしまう）。
+   *   比較は違いが出た時点で打ち切るので、変わった配列に対しては実質無料。
+   */
+  snapshot(prev = null) {
+    const nv = this.nv, nt = this.nt;
+    const shared = [];
+    /** 中身が同じなら前のを指す。違えば切り出してコピーする */
+    const keep = (key, src, n) => {
+      const p = prev ? prev[key] : null;
+      if (p && p.length === n) {
+        let same = true;
+        for (let i = 0; i < n; i++) { if (p[i] !== src[i]) { same = false; break; } }
+        if (same) { shared.push(key); return p; }
+      }
+      return src.slice(0, n);
+    };
+    /** フリーリストは JS 配列なので別扱い */
+    const keepList = (key, src) => {
+      const p = prev ? prev[key] : null;
+      if (p && p.length === src.length) {
+        let same = true;
+        for (let i = 0; i < src.length; i++) { if (p[i] !== src[i]) { same = false; break; } }
+        if (same) { shared.push(key); return p; }
+      }
+      return src.slice();
+    };
     return {
-      nv: this.nv, nt: this.nt,
+      nv, nt,
       liveVerts: this.liveVerts, liveTris: this.liveTris,
-      positions: this.positions.slice(0, this.nv * 3),
-      colors: this.colors.slice(0, this.nv * 3),
-      mask: this.mask.slice(0, this.nv),
-      vAlive: this.vAlive.slice(0, this.nv),
-      tris: this.tris.slice(0, this.nt * 3),
-      freeVerts: this.freeVerts.slice(),
-      freeTris: this.freeTris.slice(),
+      positions: keep('positions', this.positions, nv * 3),
+      colors: keep('colors', this.colors, nv * 3),
+      mask: keep('mask', this.mask, nv),
+      vAlive: keep('vAlive', this.vAlive, nv),
+      tris: keep('tris', this.tris, nt * 3),
+      freeVerts: keepList('freeVerts', this.freeVerts),
+      freeTris: keepList('freeTris', this.freeTris),
+      // 前の履歴と共有している配列の名前（メモリ量を二重に数えないため）
+      shared,
     };
   }
 
@@ -6378,12 +6418,17 @@ class History {
   }
   commit(mesh) {
     if (this.cur < this.states.length - 1) this.states.length = this.cur + 1;
-    this.states.push(mesh.snapshot());
+    // 直前の履歴を渡すと、接続が変わっていなければ tris などを共有してくれる
+    this.states.push(mesh.snapshot(this.states[this.states.length - 1]));
     this.cur = this.states.length - 1;
     // 件数とメモリ量の両方で古い履歴を捨てる（最新 2 件は必ず残す）
     while (this.states.length > this.limit
       || (this.states.length > 2 && this.bytes() > this.byteLimit)) {
       this.states.shift();
+      // 捨てた履歴が持っていた配列を後続が共有していることがある。共有されて
+      // いる限り解放されないので、残った先頭を「持ち主」に付け替えないと
+      // bytes() がそのぶんを数え落とす（実際には減っていないのに減ったと見える）。
+      if (this.states.length) this.states[0].shared = [];
       this.cur--;
     }
   }
@@ -6401,13 +6446,30 @@ class History {
     mesh.restore(this.states[this.cur]);
     return true;
   }
+  /**
+   * 履歴が実際に抱えているバイト数。
+   * 前の履歴と共有している配列は数えない（1 本を複数の履歴が指しているだけなので、
+   * 数えると実際の何倍にも見えて履歴が早く捨てられる）。
+   */
   bytes() {
     let b = 0;
     for (const s of this.states) {
-      b += s.positions.byteLength + s.colors.byteLength + s.mask.byteLength
-        + s.vAlive.byteLength + s.tris.byteLength;
+      const sh = s.shared || [];
+      for (const k of ['positions', 'colors', 'mask', 'vAlive', 'tris']) {
+        if (!sh.includes(k)) b += s[k].byteLength;
+      }
     }
     return b;
+  }
+
+  /** 履歴の内訳（診断とテスト用） */
+  info() {
+    let sharedArrays = 0;
+    for (const s of this.states) sharedArrays += (s.shared || []).length;
+    return {
+      states: this.states.length, cur: this.cur, sharedArrays,
+      bytes: this.bytes(), limit: this.limit, byteLimit: this.byteLimit,
+    };
   }
 }
 
@@ -20001,6 +20063,20 @@ function clipDragEnd() {
 // 同じキーで別の動作を割り当てているものがあるため。
 // 上から順に見て最初に当たったものを実行するので、修飾キー付きを先に置く。
 // ---------------------------------------------------------------------------
+// 文字を打つ場所にフォーカスがあるか。ショートカットを譲るかどうかの判定。
+// range / checkbox / radio / button / color / file は「入力欄」だが文字は打たない。
+const NON_TEXT_INPUT = new Set(['range', 'checkbox', 'radio', 'button', 'submit',
+  'reset', 'color', 'file', 'image']);
+function isTypingTarget(t, ctrl) {
+  if (!t) return false;
+  const tag = t.tagName;
+  if (tag === 'TEXTAREA' || t.isContentEditable) return true;
+  if (tag === 'INPUT') return !NON_TEXT_INPUT.has(String(t.type || 'text').toLowerCase());
+  // select は文字キーで項目を選べるので、修飾キー無しのショートカットだけ譲る
+  if (tag === 'SELECT') return !ctrl;
+  return false;
+}
+
 const SHORTCUTS = [
   // --- 編集 ---
   { group: '編集', keys: 'Ctrl+Z', jp: '元に戻す', code: 'KeyZ', ctrl: true, prevent: true,
@@ -20212,7 +20288,12 @@ function bindInput() {
   }, { passive: false });
 
   window.addEventListener('keydown', (e) => {
-    if (e.target && /INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+    // 文字を打っている場所ではショートカットを奪わない（Ctrl+Z は文字の
+    // 取り消しに要る）。ただし **スライダーやチェックボックスは「入力欄」では
+    // あっても文字を打つ場所ではない** ので通す。
+    // 以前は tagName が INPUT なら一律で弾いていて、スライダーを 1 回触ると
+    // フォーカスが残り、そのあと Ctrl+Z が効かなくなっていた。
+    if (isTypingTarget(e.target, e.ctrlKey || e.metaKey)) return;
     // 使い方ページを開いている間は、閉じるキーだけ通す。オーバーレイの裏で
     // D（ダイナメッシュ）などが走ると、読んでいるうちに形が変わってしまう。
     const helpOpen = ui && ui.helpIsOpen && ui.helpIsOpen();
