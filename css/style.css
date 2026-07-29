@@ -675,3 +675,210 @@ input.text:focus { border-color: var(--accent); }
   border-radius: var(--radius);
   background: #14161a;
 }
+
+/* ---------- 使い方ページ ---------- */
+/* 全画面オーバーレイ。中身は js/help.js が組み立てる。
+   ビューポートの中に敷くので、単一ファイル版でもそのまま動く。 */
+.help {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  padding: 14px;
+  background: #08090bd9;
+  backdrop-filter: blur(3px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .12s;
+  z-index: 40;
+}
+.help.show { opacity: 1; pointer-events: all; }
+.help-card {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 1020px;
+  background: #14161af5;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.help-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  flex: 0 0 auto;
+}
+.help-title { font-size: 14px; font-weight: 600; color: var(--text); }
+.help-hint {
+  margin-left: 10px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+.help-search {
+  flex: 1 1 auto;
+  min-width: 80px;
+  max-width: 280px;
+  margin-left: auto;
+  padding: 5px 8px;
+  background: #0e1013;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+.help-search:focus { outline: none; border-color: var(--accent-dim); }
+.help-close {
+  width: 28px; height: 26px;
+  flex: 0 0 auto;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+}
+.help-close:hover { color: var(--text); border-color: var(--line-2); }
+
+.help-body { display: flex; flex: 1 1 auto; min-height: 0; }
+.help-nav {
+  flex: 0 0 158px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 6px;
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+  background: #101216;
+}
+.help-navlink {
+  padding: 5px 8px;
+  background: none;
+  border: 0;
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.help-navlink:hover { background: var(--panel-2); color: var(--text); }
+.help-main { flex: 1 1 auto; padding: 4px 18px 28px; overflow-y: auto; }
+
+.help-sec { padding-top: 18px; scroll-margin-top: 4px; }
+.help-sec h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  color: var(--accent-2);
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 5px;
+}
+.help-sec h3 {
+  margin: 16px 0 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+.help-p { margin: 0 0 9px; font-size: 12.5px; line-height: 1.8; color: var(--text); }
+.help-steps { margin: 4px 0 10px; padding-left: 22px; }
+.help-steps li { font-size: 12.5px; line-height: 1.85; color: var(--text); }
+.help-notes { margin: 10px 0 0; padding-left: 18px; }
+.help-notes li {
+  font-size: 12px;
+  line-height: 1.75;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+.help-sec b { color: var(--accent-2); font-weight: 600; }
+.help-sec code {
+  padding: 1px 4px;
+  background: #0e1013;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 11.5px;
+}
+
+/* ツール 1 項目 */
+.help-items {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
+  gap: 7px;
+  margin: 6px 0 4px;
+}
+.help-item {
+  padding: 7px 9px;
+  background: #101216;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.help-item-head { display: flex; align-items: baseline; gap: 6px; }
+.help-ico { color: var(--accent); font-size: 13px; }
+.help-name { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.help-sub { font-size: 10.5px; color: var(--text-dim); }
+.help-key {
+  margin-left: auto;
+  padding: 0 5px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.help-desc { margin: 4px 0 0; font-size: 12px; line-height: 1.65; color: var(--text-dim); }
+.help-params { margin: 3px 0 0; font-size: 10.5px; color: #6d7484; }
+
+/* 表。横に溢れるときはこの中だけがスクロールする */
+.help-tablewrap { overflow-x: auto; margin: 6px 0 4px; }
+.help-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.help-table th, .help-table td {
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  line-height: 1.65;
+}
+.help-table th { background: var(--panel-2); color: var(--text-dim); font-weight: 600; white-space: nowrap; }
+.help-table td { color: var(--text-dim); }
+.help-table.keys td.kcell { width: 1%; white-space: nowrap; }
+.help-table.keys td:last-child { color: var(--text); }
+kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-2);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.help .hide { display: none; }
+/* 絞り込み中は節の間隔を詰める（見出しだけが並ぶのを避ける） */
+.help-card.filtering .help-sec { padding-top: 12px; }
+
+@media (max-width: 820px) {
+  .help { padding: 0; }
+  .help-card { border-radius: 0; border: 0; }
+  .help-body { flex-direction: column; }
+  .help-nav {
+    flex: 0 0 auto;
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .help-navlink { white-space: nowrap; }
+  .help-main { padding: 4px 12px 24px; }
+  .help-title .help-hint { display: none; }
+}

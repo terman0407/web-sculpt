@@ -143,6 +143,8 @@ const ringOut = [];
 const app = {
   state,
   get subtools() { return subtools; },
+  /** キー操作の一覧（使い方ページが読む。定義は下の SHORTCUTS が唯一） */
+  shortcuts: () => SHORTCUTS,
   newMesh(kind) {
     const gen = PRIMITIVES[kind] || PRIMITIVES.sphere;
     const g = gen();
@@ -801,6 +803,108 @@ function clipDragEnd() {
   tools.applyPlane(state.clipMode, plane);
 }
 
+// ---------------------------------------------------------------------------
+// キー操作。
+//
+// **ここが唯一の定義**で、使い方ページ（js/help.js）も同じ表を読む。
+// 以前は keydown の switch 文だったが、それだとヘルプに書き写すことになり、
+// キーを増やしたときにヘルプだけ古くなる。
+//
+// 照合は「指定した修飾キーと完全に一致」で見る（shift を書いていない項目は
+// shift を押していないときだけ効く）。Shift+W とただの W のように、
+// 同じキーで別の動作を割り当てているものがあるため。
+// 上から順に見て最初に当たったものを実行するので、修飾キー付きを先に置く。
+// ---------------------------------------------------------------------------
+const SHORTCUTS = [
+  // --- 編集 ---
+  { group: '編集', keys: 'Ctrl+Z', jp: '元に戻す', code: 'KeyZ', ctrl: true, prevent: true,
+    run: () => app.undo() },
+  { group: '編集', keys: 'Ctrl+Shift+Z', jp: 'やり直す', code: 'KeyZ', ctrl: true, shift: true, prevent: true,
+    run: () => app.redo() },
+  { group: '編集', keys: 'Ctrl+Y', jp: 'やり直す（別のキー）', code: 'KeyY', ctrl: true, prevent: true,
+    run: () => app.redo() },
+
+  // --- ブラシ ---
+  { group: 'ブラシ', keys: '1 〜 9, 0', jp: 'ブラシを選ぶ（左の並び順）',
+    match: (e) => !e.ctrlKey && !e.metaKey && /^Digit\d$/.test(e.code),
+    run: (e) => {
+      const idx = (parseInt(e.code.slice(5), 10) + 9) % 10;   // 1→0, 0→9
+      if (idx < BRUSH_IDS.length) ui.setBrush(BRUSH_IDS[idx]);
+    } },
+  { group: 'ブラシ', keys: '[ / ]', jp: 'ブラシの大きさ', code: 'BracketLeft',
+    run: () => { state.radiusPx = clamp(state.radiusPx * 0.88, 6, 400); ui.syncFromState(); } },
+  { keys: ']', hidden: true, code: 'BracketRight',
+    run: () => { state.radiusPx = clamp(state.radiusPx * 1.14, 6, 400); ui.syncFromState(); } },
+  { group: 'ブラシ', keys: ', / .', jp: 'ブラシの強さ', code: 'Comma',
+    run: () => { state.strength = clamp(state.strength - 0.05, 0.01, 1); ui.syncFromState(); } },
+  { keys: '.', hidden: true, code: 'Period',
+    run: () => { state.strength = clamp(state.strength + 0.05, 0.01, 1); ui.syncFromState(); } },
+  { group: 'ブラシ', keys: 'B', jp: 'バックフェイスマスク（裏側を彫らない）', code: 'KeyB',
+    run: () => {
+      state.backfaceMask = !state.backfaceMask; ui.syncFromState();
+      ui.toast('バックフェイスマスク: ' + (state.backfaceMask ? 'ON' : 'OFF'));
+    } },
+  { group: 'ブラシ', keys: 'L', jp: 'レイジーマウス（線を滑らかにする）', code: 'KeyL',
+    run: () => {
+      state.lazyRadius = state.lazyRadius > 0.5 ? 0 : 24; ui.syncFromState();
+      ui.toast('レイジーマウス: ' + (state.lazyRadius > 0.5 ? `ON (${state.lazyRadius}px)` : 'OFF'));
+    } },
+
+  // --- 形を変える ---
+  { group: '形を変える', keys: 'X', jp: 'X ミラー（左右対称）', code: 'KeyX',
+    run: () => {
+      state.symmetry.x = !state.symmetry.x; ui.syncFromState();
+      ui.toast('X ミラー: ' + (state.symmetry.x ? 'ON' : 'OFF'));
+    } },
+  { group: '形を変える', keys: 'G', jp: '動的トポロジ（彫りながら細かくする）', code: 'KeyG',
+    run: () => {
+      state.dynTopo = !state.dynTopo; ui.syncFromState();
+      ui.toast('動的トポロジ: ' + (state.dynTopo ? 'ON' : 'OFF'));
+    } },
+  { group: '形を変える', keys: 'D', jp: 'ダイナメッシュ（形を作り直す）', code: 'KeyD',
+    run: () => app.dynamesh() },
+  { group: '形を変える', keys: 'W', jp: 'トランスポーズ（掴んで動かす）', code: 'KeyW',
+    run: () => app.toggleTranspose() },
+  { group: '形を変える', keys: 'C', jp: '平面カットの切り替え（オフ→クリップ→トリム→スライス）', code: 'KeyC',
+    run: () => {
+      const order = ['off', 'clip', 'trim', 'slice'];
+      state.clipMode = order[(order.indexOf(state.clipMode) + 1) % order.length];
+      ui.syncFromState();
+      const jp = { off: 'オフ', clip: 'クリップ', trim: 'トリム', slice: 'スライス' };
+      ui.toast('平面カット: ' + jp[state.clipMode]);
+    } },
+  { group: '形を変える', keys: 'PageUp / PageDown', jp: '分割レベルを上げる / 下げる', code: 'PageUp', prevent: true,
+    run: () => app.levelUp() },
+  { keys: 'PageDown', hidden: true, code: 'PageDown', prevent: true,
+    run: () => app.levelDown() },
+
+  // --- 表示 ---
+  { group: '表示', keys: 'F', jp: '全体が入るように視点を戻す', code: 'KeyF',
+    run: () => { frameCamera(); ui.toast('全体表示'); } },
+  { group: '表示', keys: 'M', jp: 'マテリアル（MatCap）を次へ', code: 'KeyM',
+    run: () => ui.setMaterial((state.material + 1) % renderer.matcapCount) },
+  { group: '表示', keys: 'A', jp: '陰影（AO）', code: 'KeyA',
+    run: () => { state.ao = !state.ao; ui.syncFromState(); ui.toast('AO: ' + (state.ao ? 'ON' : 'OFF')); } },
+  { group: '表示', keys: 'Shift+W', jp: 'ワイヤフレーム', code: 'KeyW', shift: true,
+    run: () => { state.wireframe = !state.wireframe; ui.syncFromState(); } },
+  { group: '表示', keys: 'H', jp: '床のグリッド', code: 'KeyH',
+    run: () => { state.grid = !state.grid; ui.syncFromState(); ui.toast('フロアグリッド: ' + (state.grid ? 'ON' : 'OFF')); } },
+
+  // --- ヘルプ ---
+  { group: 'ヘルプ', keys: 'F1 または ?', jp: '使い方を開く / 閉じる', code: 'F1', prevent: true,
+    run: () => ui.toggleHelp() },
+  // help: true は「使い方ページを開いている間も通すキー」の印
+  { keys: '?', hidden: true, help: true, prevent: true,
+    match: (e) => e.key === '?' && !e.ctrlKey && !e.metaKey,
+    run: () => ui.toggleHelp() },
+  { group: 'ヘルプ', keys: 'Esc', jp: '使い方を閉じる', code: 'Escape',
+    run: () => ui.closeHelp() },
+
+  // 視点操作は下の「押している間」の扱いなので、表示用の項目だけ持たせる
+  { group: '視点', keys: 'Space+ドラッグ', jp: '平行移動（パン）', code: 'Space', prevent: true,
+    run: () => { spaceDown = true; } },
+];
+
 function bindInput() {
   canvas.addEventListener('contextmenu', e => e.preventDefault());
 
@@ -923,76 +1027,19 @@ function bindInput() {
 
   window.addEventListener('keydown', (e) => {
     if (e.target && /INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+    // 使い方ページを開いている間は、閉じるキーだけ通す。オーバーレイの裏で
+    // D（ダイナメッシュ）などが走ると、読んでいるうちに形が変わってしまう。
+    const helpOpen = ui && ui.helpIsOpen && ui.helpIsOpen();
     const ctrl = e.ctrlKey || e.metaKey;
-
-    if (ctrl && e.code === 'KeyZ') {
-      e.preventDefault();
-      if (e.shiftKey) app.redo(); else app.undo();
+    for (const s of SHORTCUTS) {
+      if (helpOpen && s.group !== 'ヘルプ' && !s.help) continue;
+      const hit = s.match
+        ? s.match(e)
+        : s.code === e.code && !!s.ctrl === ctrl && !!s.shift === e.shiftKey;
+      if (!hit) continue;
+      if (s.prevent) e.preventDefault();
+      s.run(e);
       return;
-    }
-    if (ctrl && e.code === 'KeyY') { e.preventDefault(); app.redo(); return; }
-    if (ctrl) return;
-
-    switch (e.code) {
-      case 'Space': spaceDown = true; e.preventDefault(); break;
-      case 'BracketLeft':
-        state.radiusPx = clamp(state.radiusPx * 0.88, 6, 400); ui.syncFromState(); break;
-      case 'BracketRight':
-        state.radiusPx = clamp(state.radiusPx * 1.14, 6, 400); ui.syncFromState(); break;
-      case 'Comma':
-        state.strength = clamp(state.strength - 0.05, 0.01, 1); ui.syncFromState(); break;
-      case 'Period':
-        state.strength = clamp(state.strength + 0.05, 0.01, 1); ui.syncFromState(); break;
-      case 'KeyX':
-        state.symmetry.x = !state.symmetry.x; ui.syncFromState();
-        ui.toast('X ミラー: ' + (state.symmetry.x ? 'ON' : 'OFF')); break;
-      case 'KeyW':
-        // ZBrush と同じで W はトランスポーズ。ワイヤフレームは Shift+W に移した
-        if (e.shiftKey) { state.wireframe = !state.wireframe; ui.syncFromState(); }
-        else app.toggleTranspose();
-        break;
-      case 'KeyC':
-        // クリップのモードを順に切り替える（オフ → クリップ → トリム → スライス）
-        {
-          const order = ['off', 'clip', 'trim', 'slice'];
-          state.clipMode = order[(order.indexOf(state.clipMode) + 1) % order.length];
-          ui.syncFromState();
-          const jp = { off: 'オフ', clip: 'クリップ', trim: 'トリム', slice: 'スライス' };
-          ui.toast('平面カット: ' + jp[state.clipMode]);
-        }
-        break;
-      case 'KeyA':
-        state.ao = !state.ao; ui.syncFromState();
-        ui.toast('AO: ' + (state.ao ? 'ON' : 'OFF')); break;
-      case 'KeyG':
-        state.dynTopo = !state.dynTopo; ui.syncFromState();
-        ui.toast('動的トポロジ: ' + (state.dynTopo ? 'ON' : 'OFF')); break;
-      case 'KeyM':
-        ui.setMaterial((state.material + 1) % renderer.matcapCount); break;
-      case 'KeyF':
-        frameCamera(); ui.toast('全体表示'); break;
-      case 'KeyD':
-        app.dynamesh(); break;
-      case 'KeyB':
-        state.backfaceMask = !state.backfaceMask; ui.syncFromState();
-        ui.toast('バックフェイスマスク: ' + (state.backfaceMask ? 'ON' : 'OFF')); break;
-      case 'KeyL':
-        state.lazyRadius = state.lazyRadius > 0.5 ? 0 : 24; ui.syncFromState();
-        ui.toast('レイジーマウス: ' + (state.lazyRadius > 0.5 ? `ON (${state.lazyRadius}px)` : 'OFF')); break;
-      case 'KeyH':
-        state.grid = !state.grid; ui.syncFromState();
-        ui.toast('フロアグリッド: ' + (state.grid ? 'ON' : 'OFF')); break;
-      case 'PageUp':
-        e.preventDefault(); app.levelUp(); break;
-      case 'PageDown':
-        e.preventDefault(); app.levelDown(); break;
-      default: {
-        const m = /^Digit(\d)$/.exec(e.code);
-        if (m) {
-          const idx = (parseInt(m[1], 10) + 9) % 10;   // 1→0, 0→9
-          if (idx < BRUSH_IDS.length) ui.setBrush(BRUSH_IDS[idx]);
-        }
-      }
     }
   });
 

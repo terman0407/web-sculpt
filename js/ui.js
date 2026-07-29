@@ -9,6 +9,7 @@ import { DEFORMS } from './deform.js';
 import { MASK_OPS } from './masktools.js';
 import { GROUP_METHODS } from './polygroups.js';
 import { ALPHAS, ALPHA_SIZE, alphaData, STROKES } from './alpha.js';
+import { buildHelp, HELP_SOURCES } from './help.js';
 
 const el = (tag, cls, parent) => {
   const n = document.createElement(tag);
@@ -359,6 +360,16 @@ export function buildUI(app) {
     { label: 'OBJ', title: 'OBJ で書き出し（頂点カラー付き）', onClick: () => app.exportFile('obj') },
     { label: 'PLY', title: 'PLY で書き出し（ポリペイント保持）', onClick: () => app.exportFile('ply') },
     { label: 'STL', title: 'STL で書き出し（3D プリント向け）', onClick: () => app.exportFile('stl') },
+  ]);
+  // --- 使い方ページ -------------------------------------------------------
+  // 中身はツールの表から生成される（js/help.js）。キー操作は main.js の
+  // SHORTCUTS をそのまま読むので、キーを増やしてもここは触らなくてよい。
+  const help = buildHelp(document.getElementById('help'), {
+    shortcuts: app.shortcuts ? app.shortcuts() : [],
+  });
+  btnRow(meshBar, [
+    { label: '? 使い方', cls: 'wide', title: 'ツールの使い方とキー操作 (F1)',
+      onClick: () => help.toggle() },
   ]);
 
   // --- 右：ブラシ設定 ---------------------------------------------------
@@ -1242,6 +1253,13 @@ export function buildUI(app) {
     setBrush, setMaterial, toast, refreshStats, showBusy, hideBusy,
     askRestore, refreshLevels, refreshProjects, setAutosaveMark,
     refreshLayers, refreshGroups, refreshMorph, refreshSubtools,
+    /** 使い方ページ（F1 / ? / Esc から呼ばれる） */
+    openHelp() { help.open(); },
+    closeHelp() { help.close(); },
+    toggleHelp() { help.toggle(); },
+    helpIsOpen() { return help.isOpen(); },
+    /** 使い方ページが元にしているパレットの定義（ずれ検出のテスト用） */
+    helpSources() { return HELP_SOURCES; },
     /** トランスポーズのトグル表示を state に合わせる（キー操作から呼ばれる） */
     syncTranspose(on) { if (transposeToggle) transposeToggle.set(on); },
     syncFromState() {
