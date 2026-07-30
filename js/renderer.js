@@ -101,6 +101,10 @@ export class Renderer {
     this.overlayCap = 0;
     this.overlayCount = 0;
     this.overlayFront = true;
+    // オーバーレイの面（選択した面の塗り）。頂点の並びは線と同じ 7 float
+    this.overlayTriBuf = null;
+    this.overlayTriCap = 0;
+    this.overlayTriCount = 0;
     this.vbPos = null; this.vbNrm = null; this.vbCol = null; this.vbMask = null; this.vbCurv = null;
     this.ib = null;
     this.wireIb = null;
@@ -353,6 +357,17 @@ export class Renderer {
       fragment: { module: overlayMod, entryPoint: 'fs', targets: overlayTargets },
       primitive: { topology: 'line-list' },
       depthStencil: depthState(false, 'always'),
+    });
+    // 選択した面の塗り。線と同じ頂点形式・同じシェーダで、三角形として描く。
+    // 深度は「同じか手前なら通す」で書き込まない。面と**まったく同じ三角形**を
+    // 送る前提なので（editmesh の triangulate と同じ扇の切り方）深度が一致し、
+    // ずらさなくても z ファイティングにならない。
+    this.pipeOverlayTri = d.createRenderPipeline({
+      layout: mainLayout,
+      vertex: { module: overlayMod, entryPoint: 'vs', buffers: overlayVB },
+      fragment: { module: overlayMod, entryPoint: 'fs', targets: overlayTargets },
+      primitive: { topology: 'triangle-list' },
+      depthStencil: depthState(false, 'less-equal'),
     });
 
     // フロアグリッドはメッシュの後に描く（深度テストのみ、書き込みなし）
@@ -800,6 +815,33 @@ export class Renderer {
     this.overlayFront = front;
   }
 
+  /**
+   * オーバーレイの面を差し替える（選択した面の塗り）。
+   *
+   * 頂点の並びは線と同じ (x,y,z,r,g,b,a)。**三角形は表示メッシュとまったく同じ
+   * ものを渡すこと**（editmesh の triangulate と同じ扇の切り方）。深度が一致するので
+   * 「同じか手前なら通す」で隙間なく塗れる。違う切り方だと面の中で深度がずれて
+   * まだらになる。
+   *
+   * @param {Float32Array} verts 三角形の頂点ごとに 7 float
+   * @param {number} vertCount 頂点数（三角形数 × 3）
+   */
+  setOverlayTris(verts, vertCount) {
+    if (!verts || !vertCount) { this.overlayTriCount = 0; return; }
+    const d = this.device;
+    const need = vertCount * 7;
+    if (!this.overlayTriBuf || this.overlayTriCap < need) {
+      if (this.overlayTriBuf) this.overlayTriBuf.destroy();
+      this.overlayTriCap = Math.ceil(need * 1.5);
+      this.overlayTriBuf = d.createBuffer({
+        size: this.overlayTriCap * 4,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      });
+    }
+    d.queue.writeBuffer(this.overlayTriBuf, 0, verts, 0, need);
+    this.overlayTriCount = vertCount;
+  }
+
   _syncWireframe(mesh, now) {
     if (mesh.topoVersion === this.wireVersion) return;
     if (this.wireVersion >= 0 && now - this.wireBuiltAt < 160) return;   // 構築を間引く
@@ -1022,6 +1064,13 @@ export class Renderer {
         pass.setVertexBuffer(0, this.vbPos);
         pass.setIndexBuffer(this.wireIb, 'uint32');
         pass.drawIndexed(this.wireCount);
+      }
+
+      // 選択した面の塗り。線より先に描いて、線が上に乗るようにする
+      if (this.overlayTriCount > 0 && this.overlayTriBuf) {
+        pass.setPipeline(this.pipeOverlayTri);
+        pass.setVertexBuffer(0, this.overlayTriBuf);
+        pass.draw(this.overlayTriCount);
       }
 
       // オーバーレイの線（トランスポーズのハンドル / クリップのガイド）。

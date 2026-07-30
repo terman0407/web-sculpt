@@ -698,6 +698,8 @@ export function subdivideSelectedFaces(em) {
 //   4. 各面は、自分が属する区間の新頂点を使うように作り直す
 //   5. ベベル辺ごとに、両側の新頂点 4 個で帯を 1 枚張る
 //   6. **ベベル辺が 3 本以上集まる頂点には「角の面」を 1 枚張る**（前回抜けていた処理）
+//   7. ベベル辺が **1 本しか集まらない頂点（帯の端）** では、扇の途中の 1 枚に
+//      新頂点 2 個を差し込んで閉じる（その面の辺が 1 本増える）
 // ---------------------------------------------------------------------------
 
 /** 面 f のループで、頂点 v の次に来る頂点への辺（出ていく辺） */
@@ -748,13 +750,14 @@ function vertexFan(em, v) {
 /**
  * 選択した辺をベベルする（面取り）。
  *
- * **すべての端の頂点で「ベベルする辺が 2 本以上集まっている」ことを要求する。**
- * 1 本しか集まらない頂点（= 帯がそこで途切れる）は、扇を 1 か所で切っても区間が
- * 1 つしかできないため、帯の両側に別々の頂点を割り当てられない。無理に通すと
- * 潰れた面ができる。閉じたエッジループや立方体の全辺のような「通り抜ける」選択なら
- * どの頂点でも 2 本以上になるので、実用上はこれで足りる
- * （〔エッジループ〕で選んでから使うのが普通の流れ）。
+ * 辺の選び方は自由。**ループになっていなくても、1 本だけでも通る。**
  *
+ * 端の頂点（ベベル辺が 1 本しか集まらない頂点）では、扇を 1 か所で切っても区間が
+ * 1 つしかできないので、代わりに**扇の途中の 1 枚に新頂点 2 個を差し込む**。
+ * その面は辺が 1 本増える（四角なら五角形になる）。Blender の vertex terminator と
+ * 同じ考え方で、帯はそこで閉じる。
+ *
+ * 断るのは境界の辺と、扇が一周していない頂点（境界・非多様体）だけ。
  * 断るときは reason に理由を入れて返す。黙って壊すことはしない。
  *
  * 新頂点の位置は「その区間に属する面の重心の平均」へ amount だけ寄せた点。
@@ -788,16 +791,6 @@ export function bevelSelectedEdges(em, amount = 0.2) {
   const affected = [];
   for (let v = 0; v < em.nv; v++) if (kAt[v] > 0) affected.push(v);
 
-  const lone = affected.filter(v => kAt[v] === 1);
-  if (lone.length) {
-    return {
-      edges: 0, verts: 0, faces: 0, refused: bev.length,
-      reason: `ベベル辺が 1 本しか集まらない頂点が ${lone.length} 個あります。`
-        + '帯がそこで途切れるので処理できません。〔エッジループ〕で辺を繋がった形に'
-        + '選んでから実行してください',
-    };
-  }
-
   // 扇を作る。境界や非多様体が混ざっていたら断る
   const fans = new Map();
   for (const v of affected) {
@@ -819,7 +812,19 @@ export function bevelSelectedEdges(em, amount = 0.2) {
   const key = (v, f) => v * 1048576 + f;
   // 角の面を張るための、区間の新頂点（扇の回転順）
   const cornerRings = new Map();
+  // 端の頂点で「1 枚の面に新頂点 2 個を差し込む」ための対応（(v,f) → [先, 後]）
+  const pairAt = new Map();
   const c = new Float64Array(3);
+
+  /** 面の並び arc の重心の平均へ v を t だけ寄せた点 */
+  const towardArc = (v, arc) => {
+    const i3 = v * 3;
+    const ox = em.positions[i3], oy = em.positions[i3 + 1], oz = em.positions[i3 + 2];
+    let ax = 0, ay = 0, az = 0;
+    for (const f of arc) { em.faceCenter(f, c); ax += c[0]; ay += c[1]; az += c[2]; }
+    const inv = 1 / arc.length;
+    return [ox + (ax * inv - ox) * t, oy + (ay * inv - oy) * t, oz + (az * inv - oz) * t];
+  };
 
   for (const v of affected) {
     const { faces, seps } = fans.get(v);
@@ -827,7 +832,49 @@ export function bevelSelectedEdges(em, amount = 0.2) {
     // 区間の開始位置（seps[i] がベベル辺なら faces[i+1] が新しい区間の先頭）
     const starts = [];
     for (let i = 0; i < m; i++) if (isBev[seps[i]]) starts.push((i + 1) % m);
-    // kAt[v] >= 2 を保証しているので starts.length >= 2
+
+    // --- 端の頂点（ベベル辺が 1 本だけ）----------------------------------
+    //
+    // 帯はここで終わる。扇を 1 か所で切っても区間が 1 つしかできないので、
+    // 「扇の途中の 1 枚に新頂点 2 個を差し込む」ことで両側の頂点を作る
+    // （Blender の vertex terminator と同じ考え方）。
+    //
+    //   立方体の 1 辺だけをベベルした場合: 上面と前面は四角のまま、
+    //   横の面が五角形になり、帯 1 枚が増える。V=10 E=15 F=7 で χ=2。
+    //
+    // 差し込む面は扇の真ん中にする。両端の面（ベベル辺に接する 2 枚）は
+    // 帯の角に使うので、そこと重ならないように m >= 3 を要求する。
+    if (kAt[v] === 1) {
+      if (m < 3) {
+        return {
+          edges: 0, verts: 0, faces: 0, refused: bev.length,
+          reason: `頂点 ${v} のまわりに面が ${m} 枚しかありません。端の処理ができないのでベベルできません`,
+        };
+      }
+      const from = starts[0];
+      const arc = [];
+      for (let k = 0; k < m; k++) arc.push(faces[(from + k) % m]);
+      const split = Math.floor((m - 1) / 2);       // 1 <= split <= m-2
+      const headArc = arc.slice(0, split);         // 手前側（帯の片方）
+      const tailArc = arc.slice(split + 1);        // 奥側（帯のもう片方）
+      const pHead = towardArc(v, headArc);
+      const pTail = towardArc(v, tailArc);
+      // 手前側は元の頂点スロットを使い回す（孤児を作らない）
+      const i3v = v * 3;
+      P[i3v] = pHead[0]; P[i3v + 1] = pHead[1]; P[i3v + 2] = pHead[2];
+      const idHead = v;
+      P.push(pTail[0], pTail[1], pTail[2]);
+      const idTail = nv++;
+      for (const f of headArc) newAt.set(key(v, f), idHead);
+      for (const f of tailArc) newAt.set(key(v, f), idTail);
+      // 差し込む面のループでは「入ってきた辺の側 = 手前」「出ていく辺の側 = 奥」。
+      // 扇は outEdgeAt（ループ順の出ていく辺）で回しているので、
+      // ループ上は prev → 手前 → 奥 → next の順に並ぶ
+      pairAt.set(key(v, arc[split]), [idHead, idTail]);
+      cornerRings.set(v, [idHead, idTail]);
+      continue;
+    }
+
     const ring = [];
     const i3 = v * 3;
     const ox = em.positions[i3], oy = em.positions[i3 + 1], oz = em.positions[i3 + 2];
@@ -878,6 +925,9 @@ export function bevelSelectedEdges(em, amount = 0.2) {
     const loop = [];
     for (let k = 0; k < n; k++) {
       const u = em.faceVerts[s + k];
+      // 端の頂点を差し込む面はここで 1 頂点 → 2 頂点になる（面の辺が 1 本増える）
+      const pair = pairAt.get(key(u, f));
+      if (pair) { loop.push(pair[0], pair[1]); continue; }
       const r = newAt.get(key(u, f));
       loop.push(r === undefined ? u : r);
     }

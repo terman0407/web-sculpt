@@ -301,7 +301,8 @@ try {
   console.log(`       エッジループ ${r.loop.edges} 辺 → ベベル → 帯を押し出し:`
     + ` 面 ${r.before.faces} → ${r.afterExt.faces} / χ=${r.chi}`);
 
-  // 端が途切れる選択は、黙って壊さずに断る
+  // 端が途切れる選択（1 本だけ）でも通る。端の頂点は扇の途中の 1 枚に
+  // 新頂点 2 個を差し込むので、その面が n-gon になる
   r = await runA(`const W = window.WebSculpt, T = W.tools;
     T.editSelect('none');
     W.app.editSetSelectMode('edge');
@@ -309,12 +310,25 @@ try {
     T.edit.syncSelection('edge');
     const before = T.editInfo();
     T.editModel('bevel');
-    return { before, after: T.editInfo(), errs: T.edit.validate(),
+    const after = T.editInfo();
+    const em = T.edit;
+    let bnd = 0;
+    for (let e = 0; e < em.ne; e++) if (em.edgeFace[e*2+1] < 0) bnd++;
+    let want = 0;
+    for (let f = 0; f < em.nf; f++) if (em.faceAlive[f]) want += em.faceSize(f) - 2;
+    return { before, after, errs: em.validate(), bnd, nm: em.nonManifold,
+      want, have: W.mesh.liveTris, chi: em.nv - em.ne + after.faces,
       toast: (document.querySelector('#toast') || {}).textContent || '' };`);
-  ok(r.before.faces === r.after.faces && r.before.verts === r.after.verts,
-    `1 本だけの辺のベベルは断る (${r.before.faces}/${r.before.verts} → ${r.after.faces}/${r.after.verts})`);
-  ok(r.errs.length === 0, '断ったときに構造が変わらない');
-  ok(/1 本しか集まらない/.test(r.toast), `断った理由が画面に出る (${r.toast.slice(0, 40)})`);
+  ok(r.after.faces === r.before.faces + 1,
+    `1 本だけの辺のベベルで帯が 1 枚増える (${r.before.faces} → ${r.after.faces})`);
+  ok(r.after.verts === r.before.verts + 2,
+    `端が 2 か所なので頂点が +2 (${r.before.verts} → ${r.after.verts})`);
+  ok(r.after.ngon >= 2, `端の面が n-gon になる (${r.after.ngon})`);
+  ok(r.bnd === 0 && r.nm === 0, `穴も非多様体も出ない (境界 ${r.bnd} / 非多様体 ${r.nm})`);
+  ok(r.chi === 2, `オイラー標数が 2 のまま (${r.chi})`);
+  ok(r.errs.length === 0, `構造が壊れない (${r.errs.join(' / ')})`);
+  ok(r.want === r.have, `表示の三角形数が Σ(n-2) と一致 (${r.have} / ${r.want})`);
+  ok(/ベベル/.test(r.toast), `結果が画面に出る (${r.toast.slice(0, 30)})`);
 
   // --- 面を削除して穴を 2 つ開け、縁を選んでブリッジ（実アプリ経路）---------
   r = await runA(`const W = window.WebSculpt, T = W.tools;

@@ -321,16 +321,82 @@ head('ベベル');
     check(em, { closed: true, chi: 2, label: '1 面のまわり 4 辺をベベル' });
   }
 
-  // ベベル辺が 1 本しか集まらない頂点があるときは断る
+  // ループになっていない選択（端がある）も通る。端の頂点では扇の途中の 1 枚に
+  // 新頂点 2 個を差し込むので、その面の辺が 1 本増える（四角 → 五角形）。
   {
+    // 1 本だけ: 上面と前面は四角のまま、横の 2 面が五角形、帯 1 枚
     const em = cube();
     em.clearSelection();
     em.selEdge[0] = 1;
-    const before = { nv: em.nv, nf: em.liveFaces };
     const r = bevelSelectedEdges(em, 0.2);
-    ok(r.edges === 0, `1 本だけの辺をベベルしてしまった (${r.edges})`);
-    ok(/1 本しか集まらない/.test(r.reason), `理由が返らない (${r.reason})`);
-    ok(em.nv === before.nv && em.liveFaces === before.nf, '断ったのに形が変わっている');
+    ok(r.edges === 1, `1 本だけの辺をベベルできない (${r.edges} / ${r.reason})`);
+    ok(r.faces === 1, `帯が 1 枚にならない (${r.faces})`);
+    ok(r.corners === 0, `端だけなのに角の面を張った (${r.corners})`);
+    ok(em.nv === 10, `頂点が 8 - 2 + 4 = 10 にならない (${em.nv})`);
+    ok(em.ne === 15, `辺が 15 にならない (${em.ne})`);
+    ok(em.liveFaces === 7, `面が 7 にならない (${em.liveFaces})`);
+    const st = em.faceStats();
+    ok(st.ngon === 2, `五角形が 2 枚にならない (n-gon ${st.ngon})`);
+    check(em, { closed: true, chi: 2, label: '1 本だけの辺をベベル' });
+  }
+
+  // 繋がった 2 本（真ん中の頂点は 2 本、両端は 1 本）
+  {
+    const em = cube();
+    em.clearSelection();
+    // 辺 0 と、それと頂点を共有する別の辺を選ぶ
+    const a = em.edgeA[0], b = em.edgeB[0];
+    let second = -1;
+    for (let e = 1; e < em.ne; e++) {
+      const x = em.edgeA[e], y = em.edgeB[e];
+      if (x === b || y === b) { second = e; break; }
+    }
+    ok(second >= 0, '繋がった 2 本目が見つからない');
+    em.selEdge[0] = 1; em.selEdge[second] = 1;
+    const r = bevelSelectedEdges(em, 0.2);
+    ok(r.edges === 2, `2 本ベベルできない (${r.edges} / ${r.reason})`);
+    ok(r.faces === 2, `帯が 2 枚にならない (${r.faces})`);
+    ok(a !== b, '');
+    check(em, { closed: true, chi: 2, label: '繋がった 2 本（両端が開いている）' });
+  }
+
+  // 立方体の 1 面のまわりから 1 本抜いた「開いた 3 本」
+  {
+    const em = cube();
+    em.clearSelection();
+    const s = em.faceStart[0], n = em.faceSize(0);
+    let picked = 0;
+    for (let k = 0; k < n - 1; k++) {          // 4 本のうち 3 本だけ
+      const e = edgeOf(em, em.faceVerts[s + k], em.faceVerts[s + (k + 1) % n]);
+      if (e >= 0) { em.selEdge[e] = 1; picked++; }
+    }
+    ok(picked === 3, `3 本選べていない (${picked})`);
+    const r = bevelSelectedEdges(em, 0.2);
+    ok(r.edges === 3, `開いた 3 本をベベルできない (${r.edges} / ${r.reason})`);
+    ok(r.faces === 3, `帯が 3 枚にならない (${r.faces})`);
+    check(em, { closed: true, chi: 2, label: '開いた 3 本をベベル' });
+  }
+
+  // quadball のエッジループから一部だけ（開いた列）を選んでも通る
+  {
+    const g = PRIMITIVES.quadball();
+    const m = new SculptMesh();
+    m.setGeometry(g.positions, g.indices);
+    const em = editMeshFromSculpt(m, quadDominant);
+    let picked = -1, best = 0;
+    for (let e = 0; e < em.ne; e += 37) {
+      const L = edgeLoop(em, e);
+      if (L.closed && L.edges.length > best) { best = L.edges.length; picked = e; }
+    }
+    ok(picked >= 0, 'quadball に閉じたループが無い');
+    const loop = edgeLoop(em, picked).edges;
+    const half = loop.slice(0, Math.max(2, Math.floor(loop.length / 2)));
+    em.clearSelection();
+    for (const e of half) em.selEdge[e] = 1;
+    const r = bevelSelectedEdges(em, 0.15);
+    ok(r.edges === half.length,
+      `ループの半分 ${half.length} 辺をベベルできない (${r.edges} / ${r.reason})`);
+    check(em, { closed: true, chi: 2, label: `ループの一部 ${half.length} 辺をベベル`, outward: false });
   }
 
   // 境界の辺は断る

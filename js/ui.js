@@ -1058,13 +1058,12 @@ export function buildUI(app) {
     });
     btnRow(ed, [
       { label: 'ベベル（面取り）', cls: 'wide',
-        title: '選択した辺の角を落として帯を張ります（Blender の Ctrl+B）。'
-          + '〔エッジループ〕で繋がった形に選んでから使ってください',
+        title: '選択した辺の角を落として帯を張ります（Blender の Ctrl+B）',
         onClick: () => app.tools.editModel('bevel') },
     ]);
     el('p', 'note', ed).textContent =
-      'ベベルは辺が「通り抜ける」選択でだけ通ります。端が途切れる選択（辺が 1 本しか'
-      + '集まらない頂点がある）は、帯の両側に別の頂点を割り当てられないので断ります。';
+      '辺の選び方は自由です（ループになっていなくても、1 本だけでも通ります）。'
+      + '帯が途切れる端では、まわりの面 1 枚に頂点を差し込んで閉じます（その面の辺が 1 本増えます）。';
 
     el('div', 'subhead', ed).textContent = '面を増やす（面モードで使います）';
     slider(ed, {

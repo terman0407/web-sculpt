@@ -658,7 +658,10 @@ export class Tools {
     if (!this.edit) return;
     const em = this.edit;
     this.edit = null;
-    if (this.renderer) this.renderer.setOverlayLines(null, 0);
+    if (this.renderer) {
+      this.renderer.setOverlayLines(null, 0);
+      this.renderer.setOverlayTris(null, 0);
+    }
     if (apply) {
       const r = editMeshToSculpt(em, this.mesh);
       this.afterTopologyChange();
@@ -703,10 +706,16 @@ export class Tools {
    * 大きいメッシュだと全部の辺を線にすると頂点数が爆発する（1 辺 = 2 頂点 ×
    * 7 float）。編集する形は普通そこまで大きくないが、彫刻してから入ることも
    * あるので上限を設けて「選択と境界だけ」に落とす。
+   *
+   * 線の色は**濃い墨色**にしてある（Blender の編集モードと同じ考え方）。
+   * 明るい灰だと MatCap の明るい面の上でほとんど見えなかった。
+   *
+   * 面モードのときは、選択を線で示すのではなく**面を塗る**（editSyncFaceFill）。
    */
   editSyncOverlay() {
     const em = this.edit;
     if (!em || !this.renderer) return;
+    const faceMode = this.selectUnit === 'face';
     const MAX_EDGES = 300000;
     const full = em.ne <= MAX_EDGES;
     // 何本描くか数える
@@ -723,16 +732,28 @@ export class Tools {
       buf[w++] = r; buf[w++] = g; buf[w++] = b; buf[w++] = a;
     };
     for (let e = 0; e < em.ne; e++) {
-      const sel = em.selEdge[e];
+      // 面モードでは辺の選択色を出さない。選択は面の塗りで示す
+      const sel = em.selEdge[e] && !faceMode;
       const bnd = em.edgeFace[e * 2 + 1] < 0;
-      if (!full && !sel && !bnd) continue;
-      // 選択 = 橙、境界 = 赤寄り、その他 = 薄い灰
-      let r = 0.55, g = 0.60, b = 0.68, a = 0.30;
-      if (bnd) { r = 0.95; g = 0.35; b = 0.25; a = 0.85; }
-      if (sel) { r = 1.0; g = 0.60; b = 0.20; a = 0.95; }
+      if (!full && !em.selEdge[e] && !bnd) continue;
+      // 選択 = 橙、境界（穴の縁）= 赤、その他 = ほぼ黒の墨。
+      //
+      // 合成は乗算済みアルファ（src = one, dst = 1 - src.a）。**線は 1px しかないので
+      // 半透明にすると効かない。** 明るい灰の 30% だった頃は MatCap の明るい面の上で
+      // ほぼ見えず、濃い墨でも 55% / 82% では「薄い青灰の線」に見えた（実測）。
+      // 仕上げの FXAA が 1px の線を周りへ溶かすので、中心が濃くないと残らない。
+      // Blender の編集モードと同じく、**不透明の黒**にする。
+      //
+      // 色は**リニア空間**で渡す（描画バッファが rgba16float で、最後に sRGB へ
+      // 変換される）。0.05 のつもりで置くと sRGB では 0.24 相当の中間色になる。
+      // 墨として効かせるには 0.01 くらいまで落とす必要がある。
+      let r = 0.008, g = 0.010, b = 0.016, a = 1.0;
+      if (bnd) { r = 1.0; g = 0.30; b = 0.20; a = 1.0; }
+      if (sel) { r = 1.0; g = 0.58; b = 0.10; a = 1.0; }
       put(em.edgeA[e], r, g, b, a);
       put(em.edgeB[e], r, g, b, a);
     }
+    this.editSyncFaceFill();
     // 選択した頂点は小さな十字で示す（頂点モードで見えるように）
     let extra = null;
     if (this.selectUnit === 'vert') {
@@ -762,6 +783,57 @@ export class Tools {
     } else {
       this.renderer.setOverlayLines(buf, w / 7, false);
     }
+  }
+
+  /**
+   * 面モードのとき、選択した面を塗る。
+   *
+   * 三角形は **editmesh の triangulate とまったく同じ扇の切り方**（頂点 0 から）で
+   * 作る。表示メッシュと同じ三角形になるので深度が一致し、「同じか手前なら通す」
+   * で隙間なく塗れる。切り方を変えると面の中で深度がずれてまだらになる。
+   *
+   * 面モード以外では塗らない（頂点 / 辺モードでは選択面は派生物なので、
+   * 塗ると何を選んでいるのか分からなくなる）。Blender と同じ扱い。
+   */
+  editSyncFaceFill() {
+    const em = this.edit;
+    if (!em || !this.renderer) return;
+    if (this.selectUnit !== 'face') { this.renderer.setOverlayTris(null, 0); return; }
+    // 三角形数を数える（上限つき。塗りは見せるためのものなので削っても実害はない）
+    const MAX_TRIS = 200000;
+    let nt = 0;
+    for (let f = 0; f < em.nf; f++) {
+      if (!em.faceAlive[f] || !em.selFace[f]) continue;
+      nt += Math.max(0, em.faceSize(f) - 2);
+      if (nt > MAX_TRIS) break;
+    }
+    if (nt === 0) { this.renderer.setOverlayTris(null, 0); return; }
+    nt = Math.min(nt, MAX_TRIS);
+    const buf = new Float32Array(nt * 3 * 7);
+    const P = em.positions;
+    let w = 0;
+    // 選択の色。橙の半透明。下の陰影が透けるので形が読める濃さにしてある。
+    // オーバーレイの合成は **乗算済みアルファ**（src = one, dst = 1 - src.a）なので、
+    // 色に自分でアルファを掛けておく。掛けずに渡すと真っ白に飛ぶ（実際に飛んだ）。
+    const CA = 0.45;
+    const CR = 1.0 * CA, CG = 0.50 * CA, CB = 0.08 * CA;
+    const put = (v) => {
+      const i = v * 3;
+      buf[w++] = P[i]; buf[w++] = P[i + 1]; buf[w++] = P[i + 2];
+      buf[w++] = CR; buf[w++] = CG; buf[w++] = CB; buf[w++] = CA;
+    };
+    let made = 0;
+    for (let f = 0; f < em.nf && made < nt; f++) {
+      if (!em.faceAlive[f] || !em.selFace[f]) continue;
+      const s = em.faceStart[f], n = em.faceSize(f);
+      for (let k = 1; k + 1 < n && made < nt; k++) {
+        put(em.faceVerts[s]);
+        put(em.faceVerts[s + k]);
+        put(em.faceVerts[s + k + 1]);
+        made++;
+      }
+    }
+    this.renderer.setOverlayTris(buf, w / 7);
   }
 
   /** 表示用の三角形メッシュを作り直す（形を変えたあとに呼ぶ） */
