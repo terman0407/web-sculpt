@@ -27,7 +27,7 @@ import {
 } from './editmesh.js';
 import {
   selectLoopOrRing, loopCut, extrudeSelectedFaces, insetSelectedFaces,
-  subdivideSelectedFaces,
+  subdivideSelectedFaces, bevelSelectedEdges,
 } from './editops.js';
 
 /** 変形とマスク操作の既定パラメータ一式（state に置く） */
@@ -830,7 +830,7 @@ export class Tools {
 
   /**
    * モデリング操作（段 2 / 段 3）。
-   * op は 'loopSelect' | 'ringSelect' | 'loopCut' | 'extrude' | 'inset' | 'subdivide'
+   * op は 'loopSelect' | 'ringSelect' | 'loopCut' | 'extrude' | 'inset' | 'subdivide' | 'bevel'
    */
   editModel(op) {
     if (!this.edit) return;
@@ -874,6 +874,13 @@ export class Tools {
       const r = subdivideSelectedFaces(em);
       if (r.faces === 0) { this.toast('面が選択されていません'); return; }
       this.toast(`細分化: ${r.faces} 面 → ${r.faces * 4} 面（頂点 +${r.verts}）`);
+    } else if (op === 'bevel') {
+      const r = bevelSelectedEdges(em, st.editBevel || 0.2);
+      // 断るときは理由がそのまま出る。黙って壊さない方針
+      if (r.edges === 0) { this.toast(r.reason || '辺が選択されていません', 6000); return; }
+      this.toast(`ベベル: ${r.edges} 辺 → 帯 ${r.faces} 枚 / 角 ${r.corners} 枚（頂点 +${r.verts}）`
+        + `${r.refused ? `（${r.refused} 本は境界のため断りました）` : ''}`
+        + ' — 帯を選択にしてあるので続けて押し出せます', 5000);
     }
     this.editRefreshDisplay();
     if (this.ui && this.ui.refreshEdit) this.ui.refreshEdit();

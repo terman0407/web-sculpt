@@ -1008,6 +1008,20 @@ export function buildUI(app) {
         title: '選択した辺のエッジリングに沿って四角を割ります（Blender の Ctrl+R）',
         onClick: () => app.tools.editModel('loopCut') },
     ]);
+    slider(ed, {
+      label: 'ベベル量', min: 0.02, max: 0.49, step: 0.01, value: state.editBevel,
+      title: '角を落とす幅。区間の重心へ寄せる割合',
+      onInput: (v) => { state.editBevel = v; },
+    });
+    btnRow(ed, [
+      { label: 'ベベル（面取り）', cls: 'wide',
+        title: '選択した辺の角を落として帯を張ります（Blender の Ctrl+B）。'
+          + '〔エッジループ〕で繋がった形に選んでから使ってください',
+        onClick: () => app.tools.editModel('bevel') },
+    ]);
+    el('p', 'note', ed).textContent =
+      'ベベルは辺が「通り抜ける」選択でだけ通ります。端が途切れる選択（辺が 1 本しか'
+      + '集まらない頂点がある）は、帯の両側に別の頂点を割り当てられないので断ります。';
 
     el('div', 'subhead', ed).textContent = '面を増やす（面モードで使います）';
     slider(ed, {

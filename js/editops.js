@@ -268,6 +268,15 @@ export function loopCut(em, cuts = 1) {
  * 領域の平均法線ひとつで動かすと、向きの違う面をまとめて選んだときに
  * 平均が打ち消し合って動かない（実測で複製した頂点が元の位置に重なった）。
  *
+ * 複製は「頂点ごと」ではなく **「頂点のまわりで、選択辺を通って繋がる面のまとまり
+ * ごと」**。ある頂点で選択領域が辺では繋がらず頂点だけで触れ合っているとき
+ * （砂時計形）、複製を 1 個で済ませるとその縦の辺に壁が 4 枚集まって非多様体になる。
+ * まとまりごとに分ければ、それぞれが自分の縦辺を持つので辺は 2 面のままになる。
+ * 立方体の全辺をベベルして帯をまとめて押し出す流れがちょうどこれに当たる
+ * （帯は互いに辺を共有せず、24 個の扇頂点をそれぞれ 2 枚で分け合っている。
+ *  以前は非多様体辺が 48 本出ていた）。
+ * 普通の（辺で繋がった）領域ではまとまりが 1 つになるので結果は変わらない。
+ *
  * @param {number} offset 法線方向に動かす量
  */
 export function extrudeSelectedFaces(em, offset = 0) {
@@ -276,19 +285,51 @@ export function extrudeSelectedFaces(em, offset = 0) {
   if (sel.length === 0) return { faces: 0, verts: 0, walls: 0 };
   const selSet = new Set(sel);
 
-  const dup = new Map();
-  const P = Array.from(em.positions);
-  let nv = em.nv;
+  // 面の隅（faceVerts の添字がそのまま隅の識別子になる）に番号を振る
+  const cid = new Int32Array(em.faceVerts.length).fill(-1);
+  let nc = 0;
+  for (const f of sel) for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) cid[i] = nc++;
+  const parent = new Int32Array(nc);
+  for (let c = 0; c < nc; c++) parent[c] = c;
+  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+
+  // 選択領域の内側の辺をまたいで、両側の面の同じ頂点の隅を繋ぐ
   for (const f of sel) {
-    for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) {
-      const v = em.faceVerts[i];
-      if (dup.has(v)) continue;
-      dup.set(v, nv++);
-      P.push(em.positions[v * 3], em.positions[v * 3 + 1], em.positions[v * 3 + 2]);
+    const s = em.faceStart[f], n = em.faceSize(f);
+    for (let k = 0; k < n; k++) {
+      const ia = s + k, ib = s + (k + 1) % n;
+      const a = em.faceVerts[ia], b = em.faceVerts[ib];
+      const e = edgeOf(em, a, b);
+      if (e < 0) continue;
+      const f0 = em.edgeFace[e * 2], f1 = em.edgeFace[e * 2 + 1];
+      const g = f0 === f ? f1 : f0;
+      if (g < 0 || !selSet.has(g)) continue;
+      const gs = em.faceStart[g], gn = em.faceSize(g);
+      for (let j = 0; j < gn; j++) {
+        const u = em.faceVerts[gs + j];
+        if (u !== a && u !== b) continue;
+        const x = find(cid[u === a ? ia : ib]), y = find(cid[gs + j]);
+        if (x !== y) parent[y] = x;
+      }
     }
   }
 
-  // 頂点ごとの法線（その頂点に触っている選択面の平均）と、領域全体の平均法線
+  // まとまりごとに 1 個ずつ複製する
+  const P = Array.from(em.positions);
+  let nv = em.nv;
+  const dup = new Map();            // まとまりの代表 → 新頂点
+  for (const f of sel) {
+    for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) {
+      const r = find(cid[i]);
+      if (dup.has(r)) continue;
+      const v = em.faceVerts[i];
+      dup.set(r, nv++);
+      P.push(em.positions[v * 3], em.positions[v * 3 + 1], em.positions[v * 3 + 2]);
+    }
+  }
+  const dupAt = (i) => dup.get(find(cid[i]));
+
+  // まとまりごとの法線（そこに触っている選択面の平均）と、領域全体の平均法線
   const vn = new Map();
   const nrm = new Float64Array(3);
   let ax = 0, ay = 0, az = 0;
@@ -296,9 +337,9 @@ export function extrudeSelectedFaces(em, offset = 0) {
     em.faceNormal(f, nrm);
     ax += nrm[0]; ay += nrm[1]; az += nrm[2];
     for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) {
-      const v = em.faceVerts[i];
-      let a = vn.get(v);
-      if (!a) { a = [0, 0, 0]; vn.set(v, a); }
+      const r = find(cid[i]);
+      let a = vn.get(r);
+      if (!a) { a = [0, 0, 0]; vn.set(r, a); }
       a[0] += nrm[0]; a[1] += nrm[1]; a[2] += nrm[2];
     }
   }
@@ -307,8 +348,8 @@ export function extrudeSelectedFaces(em, offset = 0) {
     ax /= l; ay /= l; az /= l;
   }
   if (offset !== 0) {
-    for (const [v, nvi] of dup) {
-      const a = vn.get(v) || [ax, ay, az];
+    for (const [r, nvi] of dup) {
+      const a = vn.get(r) || [ax, ay, az];
       const l = Math.hypot(a[0], a[1], a[2]);
       // 法線が打ち消し合った頂点だけ、領域の平均法線で逃がす
       const dx = l > 1e-6 ? a[0] / l : ax;
@@ -323,21 +364,22 @@ export function extrudeSelectedFaces(em, offset = 0) {
   const add = [];
   for (const f of sel) {
     const loop = [];
-    for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) loop.push(dup.get(em.faceVerts[i]));
+    for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) loop.push(dupAt(i));
     add.push(loop);
   }
   let walls = 0;
   for (const f of sel) {
     const s = em.faceStart[f], n = em.faceSize(f);
     for (let k = 0; k < n; k++) {
-      const a = em.faceVerts[s + k], b = em.faceVerts[s + (k + 1) % n];
+      const ia = s + k, ib = s + (k + 1) % n;
+      const a = em.faceVerts[ia], b = em.faceVerts[ib];
       const e = edgeOf(em, a, b);
       if (e < 0) continue;
       // 領域の縁 = 反対側の面が選択されていない（または境界）
       const f0 = em.edgeFace[e * 2], f1 = em.edgeFace[e * 2 + 1];
       const other = f0 === f ? f1 : f0;
       if (other >= 0 && selSet.has(other)) continue;
-      add.push([a, b, dup.get(b), dup.get(a)]);
+      add.push([a, b, dupAt(ib), dupAt(ia)]);
       walls++;
     }
   }
@@ -517,14 +559,273 @@ export function subdivideSelectedFaces(em) {
 }
 
 // ---------------------------------------------------------------------------
-// ベベル（面取り）は入れていない。
+// ベベル（面取り）
 //
-// 一度書いてテストに落とした。難しいのは「ベベルする辺が集まる頂点」ではなく
-// **辺の両端の頂点**。辺 (a,b) の両側 2 面を内側へ寄せて帯を張ると、a と b を
-// 使っている「3 枚目の面」との間に隙間が残る（立方体では 1 頂点に 3 面ある）。
-// 実測で境界辺 10 本・オイラー標数 0 になった。
+// 一度「辺の両側 2 面を内側へ寄せて帯を張る」だけで書いて失敗した。辺 (a,b) の
+// 両端の頂点を使っている 3 枚目の面との間に隙間が残る（立方体では 1 頂点に 3 面）。
+// 実測で境界辺 10 本・オイラー標数 0。**帯を張るだけでは駄目で、頂点を分割する
+// 必要がある。**
 //
-// 正しくやるには端の頂点まわりの面を組み替えて角を塞ぐ必要があり、
-// 「辺を独立したものに限る」という制限では回避できない（端は必ず存在する）。
-// 中途半端に通すとメッシュが黙って壊れるので、出さないことにした。段 4 の課題。
+// 正しい手順:
+//   1. 頂点まわりの面を回転順に並べる（扇）
+//   2. ベベルする辺のところで扇を区切る。k 本のベベル辺があれば k 個の区間になる
+//   3. 区間ごとに新しい頂点を 1 個作る（= 頂点の分割）
+//   4. 各面は、自分が属する区間の新頂点を使うように作り直す
+//   5. ベベル辺ごとに、両側の新頂点 4 個で帯を 1 枚張る
+//   6. **ベベル辺が 3 本以上集まる頂点には「角の面」を 1 枚張る**（前回抜けていた処理）
 // ---------------------------------------------------------------------------
+
+/** 面 f のループで、頂点 v の次に来る頂点への辺（出ていく辺） */
+function outEdgeAt(em, f, v) {
+  const s = em.faceStart[f], n = em.faceSize(f);
+  for (let k = 0; k < n; k++) {
+    if (em.faceVerts[s + k] !== v) continue;
+    return edgeOf(em, v, em.faceVerts[s + (k + 1) % n]);
+  }
+  return -1;
+}
+
+/**
+ * 頂点 v のまわりの面を回転順に並べる。
+ *
+ * 各面 f について「v から出ていく辺」を取り、その辺のもう片方の面へ渡る。
+ * これを繰り返すと扇を一定の向きに回れる。
+ *
+ * @returns {{faces: number[], seps: number[], closed: boolean}|null}
+ *   faces[i] と faces[i+1] の間の辺が seps[i]（閉じているなら seps は faces と同じ長さ）。
+ *   境界がある・非多様体で一周できない場合は null。
+ */
+function vertexFan(em, v) {
+  const start = em.vFaceStart[v], end = em.vFaceStart[v + 1];
+  const total = end - start;
+  if (total === 0) return null;
+  const f0 = em.vFace[start];
+  const faces = [f0], seps = [];
+  let f = f0;
+  for (let guard = 0; guard < total + 2; guard++) {
+    const e = outEdgeAt(em, f, v);
+    if (e < 0) return null;
+    const g0 = em.edgeFace[e * 2], g1 = em.edgeFace[e * 2 + 1];
+    if (g0 < 0 || g1 < 0) return null;          // 境界。扇が閉じない
+    const nxt = g0 === f ? g1 : g0;
+    seps.push(e);
+    if (nxt === f0) {
+      // 一周した。拾った面の数が v の隣接面の数と合っていなければ非多様体
+      return faces.length === total ? { faces, seps, closed: true } : null;
+    }
+    if (faces.includes(nxt)) return null;       // 8 の字。扱わない
+    faces.push(nxt);
+    f = nxt;
+  }
+  return null;
+}
+
+/**
+ * 選択した辺をベベルする（面取り）。
+ *
+ * **すべての端の頂点で「ベベルする辺が 2 本以上集まっている」ことを要求する。**
+ * 1 本しか集まらない頂点（= 帯がそこで途切れる）は、扇を 1 か所で切っても区間が
+ * 1 つしかできないため、帯の両側に別々の頂点を割り当てられない。無理に通すと
+ * 潰れた面ができる。閉じたエッジループや立方体の全辺のような「通り抜ける」選択なら
+ * どの頂点でも 2 本以上になるので、実用上はこれで足りる
+ * （〔エッジループ〕で選んでから使うのが普通の流れ）。
+ *
+ * 断るときは reason に理由を入れて返す。黙って壊すことはしない。
+ *
+ * 新頂点の位置は「その区間に属する面の重心の平均」へ amount だけ寄せた点。
+ * 辺方向に一定距離ずらす方式より自己交差しにくく、面の大きさに自然に追従する。
+ *
+ * @param {number} amount 0..0.5 くらい。区間の重心へ寄せる割合
+ */
+export function bevelSelectedEdges(em, amount = 0.2) {
+  const t = Math.max(0.01, Math.min(0.49, amount));
+  const sel = [];
+  for (let e = 0; e < em.ne; e++) if (em.selEdge[e]) sel.push(e);
+  if (sel.length === 0) return { edges: 0, verts: 0, faces: 0, refused: 0, reason: '辺が選択されていません' };
+
+  // 境界・非多様体の辺は扱えない
+  const bev = [];
+  let refused = 0;
+  for (const e of sel) {
+    const f0 = em.edgeFace[e * 2], f1 = em.edgeFace[e * 2 + 1];
+    if (f0 < 0 || f1 < 0 || f0 === f1) { refused++; continue; }
+    bev.push(e);
+  }
+  if (bev.length === 0) {
+    return { edges: 0, verts: 0, faces: 0, refused, reason: '境界の辺はベベルできません' };
+  }
+  const isBev = new Uint8Array(em.ne);
+  for (const e of bev) isBev[e] = 1;
+
+  // 端の頂点ごとにベベル辺の本数を数える
+  const kAt = new Int32Array(em.nv);
+  for (const e of bev) { kAt[em.edgeA[e]]++; kAt[em.edgeB[e]]++; }
+  const affected = [];
+  for (let v = 0; v < em.nv; v++) if (kAt[v] > 0) affected.push(v);
+
+  const lone = affected.filter(v => kAt[v] === 1);
+  if (lone.length) {
+    return {
+      edges: 0, verts: 0, faces: 0, refused: bev.length,
+      reason: `ベベル辺が 1 本しか集まらない頂点が ${lone.length} 個あります。`
+        + '帯がそこで途切れるので処理できません。〔エッジループ〕で辺を繋がった形に'
+        + '選んでから実行してください',
+    };
+  }
+
+  // 扇を作る。境界や非多様体が混ざっていたら断る
+  const fans = new Map();
+  for (const v of affected) {
+    const fan = vertexFan(em, v);
+    if (!fan) {
+      return {
+        edges: 0, verts: 0, faces: 0, refused: bev.length,
+        reason: `頂点 ${v} のまわりが一周していません（境界か非多様体）。ベベルできません`,
+      };
+    }
+    fans.set(v, fan);
+  }
+
+  // 区間へ切る。faces[i] と faces[i+1] の間が seps[i]
+  const P = Array.from(em.positions);
+  let nv = em.nv;
+  // corner[(v,f)] → 新頂点
+  const newAt = new Map();
+  const key = (v, f) => v * 1048576 + f;
+  // 角の面を張るための、区間の新頂点（扇の回転順）
+  const cornerRings = new Map();
+  const c = new Float64Array(3);
+
+  for (const v of affected) {
+    const { faces, seps } = fans.get(v);
+    const m = faces.length;
+    // 区間の開始位置（seps[i] がベベル辺なら faces[i+1] が新しい区間の先頭）
+    const starts = [];
+    for (let i = 0; i < m; i++) if (isBev[seps[i]]) starts.push((i + 1) % m);
+    // kAt[v] >= 2 を保証しているので starts.length >= 2
+    const ring = [];
+    const i3 = v * 3;
+    const ox = em.positions[i3], oy = em.positions[i3 + 1], oz = em.positions[i3 + 2];
+    for (let s = 0; s < starts.length; s++) {
+      const from = starts[s];
+      const to = starts[(s + 1) % starts.length];
+      // from から to の直前までが 1 区間
+      const arc = [];
+      let i = from;
+      for (let guard = 0; guard <= m; guard++) {
+        arc.push(faces[i]);
+        i = (i + 1) % m;
+        if (i === to) break;
+      }
+      // 区間の面の重心の平均へ寄せる
+      let ax = 0, ay = 0, az = 0;
+      for (const f of arc) { em.faceCenter(f, c); ax += c[0]; ay += c[1]; az += c[2]; }
+      const inv = 1 / arc.length;
+      ax = ox + (ax * inv - ox) * t;
+      ay = oy + (ay * inv - oy) * t;
+      az = oz + (az * inv - oz) * t;
+      // **1 区間目は元の頂点スロットを使い回す。** 全部を新規にすると元の頂点が
+      // どの面からも参照されない孤児として残り、頂点数が水増しされる
+      // （立方体の全辺ベベルで 24 のはずが 32 になり、オイラー標数が 10 に見えた。
+      //  面と辺は正しかったので、位相ではなく数え方の問題だった）。
+      let id;
+      if (s === 0) {
+        id = v;
+        P[i3] = ax; P[i3 + 1] = ay; P[i3 + 2] = az;
+      } else {
+        P.push(ax, ay, az);
+        id = nv++;
+      }
+      ring.push(id);
+      for (const f of arc) newAt.set(key(v, f), id);
+    }
+    cornerRings.set(v, ring);
+  }
+  const newVerts = nv - em.nv;
+
+  // 影響を受ける頂点を使っている面を作り直す
+  const kill = new Set();
+  const add = [];
+  const touched = new Set();
+  for (const v of affected) for (const f of fans.get(v).faces) touched.add(f);
+  for (const f of touched) {
+    const s = em.faceStart[f], n = em.faceSize(f);
+    const loop = [];
+    for (let k = 0; k < n; k++) {
+      const u = em.faceVerts[s + k];
+      const r = newAt.get(key(u, f));
+      loop.push(r === undefined ? u : r);
+    }
+    add.push(loop);
+    kill.add(f);
+  }
+
+  // ベベル辺ごとの帯。
+  // f0 のループに a→b の向きで現れるなら (b0, a0, a1, b1)。
+  // 立方体の全辺ベベルで法線を計算して確かめた（下・前の辺の帯が (0,-1,-1) 方向を
+  // 向く = 外向き）。逆順にすると帯が裏返る。
+  let bands = 0;
+  const bandFirst = add.length;     // add の中で帯が始まる位置
+  for (const e of bev) {
+    const a = em.edgeA[e], b = em.edgeB[e];
+    const f0 = em.edgeFace[e * 2], f1 = em.edgeFace[e * 2 + 1];
+    const a0 = newAt.get(key(a, f0)), b0 = newAt.get(key(b, f0));
+    const a1 = newAt.get(key(a, f1)), b1 = newAt.get(key(b, f1));
+    if (a0 === undefined || b0 === undefined || a1 === undefined || b1 === undefined) continue;
+    if (a0 === a1 || b0 === b1) continue;      // 潰れる（起きないはずだが念のため）
+    const s0 = em.faceStart[f0], n0 = em.faceSize(f0);
+    let aFirst = false;
+    for (let k = 0; k < n0; k++) {
+      const u = em.faceVerts[s0 + k], w = em.faceVerts[s0 + (k + 1) % n0];
+      if (u === a && w === b) { aFirst = true; break; }
+      if (u === b && w === a) { aFirst = false; break; }
+    }
+    add.push(aFirst ? [b0, a0, a1, b1] : [a0, b0, b1, a1]);
+    bands++;
+  }
+
+  // ベベル辺が 3 本以上集まる頂点には角の面を張る。
+  // 巻き方は頂点法線（まわりの面の平均）と突き合わせて決める。扇を回る向きが
+  // 外向きになるかは形によって変わるので、計算して合わせるのが確実。
+  let corners = 0;
+  const fn = new Float64Array(3);
+  for (const v of affected) {
+    if (kAt[v] < 3) continue;
+    const ring = cornerRings.get(v);
+    if (ring.length < 3) continue;
+    let nx = 0, ny = 0, nz = 0;
+    for (const f of fans.get(v).faces) { em.faceNormal(f, fn); nx += fn[0]; ny += fn[1]; nz += fn[2]; }
+    // ring の巻き方を Newell で見て、頂点法線と逆なら反転する
+    let gx = 0, gy = 0, gz = 0;
+    for (let k = 0; k < ring.length; k++) {
+      const p = ring[k] * 3, q = ring[(k + 1) % ring.length] * 3;
+      gx += (P[p + 1] - P[q + 1]) * (P[p + 2] + P[q + 2]);
+      gy += (P[p + 2] - P[q + 2]) * (P[p] + P[q]);
+      gz += (P[p] - P[q]) * (P[p + 1] + P[q + 1]);
+    }
+    add.push(gx * nx + gy * ny + gz * nz >= 0 ? ring.slice() : ring.slice().reverse());
+    corners++;
+  }
+
+  // _replaceFaces は「生き残った面を元の順で並べたあと、add を順に足す」ので、
+  // add[i] の新しい面番号は（生き残り数 + i）になる。帯を選択に残すのに使う。
+  // 「新しい頂点だけで出来ている面」で判定する方法は使えない: 1 区間目は元の
+  // 頂点スロットを使い回すので、帯にも古い番号が混ざる。
+  let survivors = 0;
+  for (let f = 0; f < em.nf; f++) if (em.faceAlive[f] && !kill.has(f)) survivors++;
+
+  em.positions = new Float32Array(P);
+  em.nv = nv;
+  em.selVert = new Uint8Array(nv);
+  em._replaceFaces([...kill], add);
+  em.rebuild();
+  // 張った帯を選択にしておく（続けて動かせるように）
+  em.clearSelection();
+  for (let i = 0; i < bands; i++) {
+    const f = survivors + bandFirst + i;
+    if (f < em.nf && em.faceAlive[f]) em.selFace[f] = 1;
+  }
+  em.syncSelection('face');
+  em.version++; em.topoVersion++;
+  return { edges: bev.length, verts: newVerts, faces: bands, corners, refused, reason: '' };
+}

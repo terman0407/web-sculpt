@@ -261,6 +261,61 @@ try {
   console.log(`       立方体 → リング選択 → ループカット → 押し出し → インセット`
     + ` → 内側へ押し出し → 細分化: 面 ${r.before.faces} → ${r.afterSub.faces} / χ=${r.chi}`);
 
+  // --- ベベル → 帯を押し出す（実アプリ経路）-------------------------------
+  // 閉じたエッジループを選んでベベルし、選択に残った帯をそのまま押し出す。
+  // 帯は互いに辺を共有せず頂点だけで触れ合うので、押し出しの複製を頂点ごとに
+  // 1 個で済ませると非多様体になる。そこがアプリ経路でも直っているか見る。
+  r = await runA(`const W = window.WebSculpt, T = W.tools;
+    T.editSelect('none');
+    W.app.editSetSelectMode('edge');
+    T.edit.selEdge[0] = 1;
+    T.edit.syncSelection('edge');
+    T.editModel('loopSelect');
+    const loop = T.editInfo().sel;
+    const before = T.editInfo();
+    W.state.editBevel = 0.25;
+    T.editModel('bevel');
+    const afterBev = T.editInfo();
+    const bevSel = T.editInfo().sel;
+    W.state.editExtrude = 0.15;
+    T.editModel('extrude');
+    const afterExt = T.editInfo();
+    const em = T.edit;
+    let bnd = 0, nm = em.nonManifold || 0;
+    for (let e = 0; e < em.ne; e++) if (em.edgeFace[e*2+1] < 0) bnd++;
+    let want = 0;
+    for (let f = 0; f < em.nf; f++) if (em.faceAlive[f]) want += em.faceSize(f) - 2;
+    return { loop, before, afterBev, bevSel, afterExt, bnd, nm,
+      want, have: W.mesh.liveTris,
+      chi: em.nv - em.ne + afterExt.faces, errs: em.validate() };`);
+  ok(r.loop.edges > 4, `ベベル用のエッジループが伸びる (${r.loop.edges} 辺)`);
+  ok(r.afterBev.faces > r.before.faces, `ベベルで面が増える (${r.before.faces} → ${r.afterBev.faces})`);
+  ok(r.bevSel.faces === r.loop.edges,
+    `張った帯がループの辺数だけ選択に残る (${r.bevSel.faces} / ${r.loop.edges})`);
+  ok(r.afterExt.faces > r.afterBev.faces, `帯を押し出せる (${r.afterBev.faces} → ${r.afterExt.faces})`);
+  ok(r.nm === 0, `ベベル → 押し出しで非多様体辺が出ない (${r.nm})`);
+  ok(r.bnd === 0, `ベベル → 押し出しで穴が開かない (境界辺 ${r.bnd})`);
+  ok(r.chi === 2, `ベベル → 押し出しでオイラー標数が 2 のまま (${r.chi})`);
+  ok(r.errs.length === 0, `ベベル → 押し出しで構造が壊れない (${r.errs.join(' / ')})`);
+  ok(r.want === r.have, `ベベル後も表示の三角形数が Σ(n-2) と一致 (${r.have} / ${r.want})`);
+  console.log(`       エッジループ ${r.loop.edges} 辺 → ベベル → 帯を押し出し:`
+    + ` 面 ${r.before.faces} → ${r.afterExt.faces} / χ=${r.chi}`);
+
+  // 端が途切れる選択は、黙って壊さずに断る
+  r = await runA(`const W = window.WebSculpt, T = W.tools;
+    T.editSelect('none');
+    W.app.editSetSelectMode('edge');
+    T.edit.selEdge[0] = 1;
+    T.edit.syncSelection('edge');
+    const before = T.editInfo();
+    T.editModel('bevel');
+    return { before, after: T.editInfo(), errs: T.edit.validate(),
+      toast: (document.querySelector('#toast') || {}).textContent || '' };`);
+  ok(r.before.faces === r.after.faces && r.before.verts === r.after.verts,
+    `1 本だけの辺のベベルは断る (${r.before.faces}/${r.before.verts} → ${r.after.faces}/${r.after.verts})`);
+  ok(r.errs.length === 0, '断ったときに構造が変わらない');
+  ok(/1 本しか集まらない/.test(r.toast), `断った理由が画面に出る (${r.toast.slice(0, 40)})`);
+
   // 辺が選択されていないときは断る（黙って何もしないのではなく）
   r = await runA(`const W = window.WebSculpt, T = W.tools;
     T.editSelect('none');
@@ -268,6 +323,7 @@ try {
     T.editModel('loopCut');
     T.editModel('extrude');
     T.editModel('inset');
+    T.editModel('bevel');
     return { before, after: T.editInfo().faces, errs: T.edit.validate() };`);
   ok(r.before === r.after, `選択が無いときは何もしない (${r.before} → ${r.after})`);
   ok(r.errs.length === 0, '選択が無いときの操作でも構造が保たれる');
@@ -275,7 +331,8 @@ try {
   // UI にボタンが出ているか
   r = await run(`const t = [...document.querySelectorAll('#rightPanel .btn')].map(b => b.textContent);
     return { t };`);
-  for (const label of ['エッジループ', 'エッジリング', 'ループカット', '押し出し', 'インセット', '面を細分化']) {
+  for (const label of ['エッジループ', 'エッジリング', 'ループカット', '押し出し', 'インセット',
+    '面を細分化', 'ベベル（面取り）']) {
     ok(r.t.includes(label), `ボタン「${label}」がある`);
   }
 

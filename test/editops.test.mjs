@@ -14,7 +14,7 @@
 import { EditMesh, editMeshFromSculpt } from '../js/editmesh.js';
 import {
   edgeOf, edgeRing, edgeLoop, selectLoopOrRing, loopCut,
-  extrudeSelectedFaces, insetSelectedFaces, subdivideSelectedFaces,
+  extrudeSelectedFaces, insetSelectedFaces, subdivideSelectedFaces, bevelSelectedEdges,
 } from '../js/editops.js';
 import { SculptMesh, PRIMITIVES } from '../js/mesh.js';
 import { quadDominant } from '../js/remesh.js';
@@ -282,6 +282,116 @@ head('面の細分化');
   ok(chi2 === 2, `一部細分化でオイラー標数が崩れた (${chi2})`);
   console.log(`  一部細分化: V=${em2.nv} E=${em2.ne} F=${em2.liveFaces}`
     + ` (四角 ${st2.quad} / n-gon ${st2.ngon}) χ=${chi2}`);
+}
+
+// ---------------------------------------------------------------------------
+head('ベベル');
+{
+  // 立方体の全 12 辺（どの頂点でもベベル辺が 3 本集まる）
+  {
+    const em = cube();
+    em.selectAll('edge');
+    const r = bevelSelectedEdges(em, 0.25);
+    ok(r.edges === 12, `12 辺ベベルできない (${r.edges} / ${r.reason})`);
+    // 各頂点が 3 分割される: 8*3 = 24 頂点
+    ok(em.nv === 24, `頂点が 24 にならない (${em.nv})`);
+    // 面: 元 6 + 帯 12 + 角 8 = 26
+    ok(r.faces === 12, `帯が 12 枚でない (${r.faces})`);
+    ok(r.corners === 8, `角の面が 8 枚でない (${r.corners})`);
+    ok(em.liveFaces === 26, `面が 26 にならない (${em.liveFaces})`);
+    check(em, { closed: true, chi: 2, label: '立方体の全 12 辺をベベル' });
+    const st = em.faceStats();
+    ok(st.tri === 8, `角が三角形 8 枚になっていない (三角 ${st.tri})`);
+  }
+
+  // 1 面のまわりの 4 辺（閉じたループ。どの頂点でもベベル辺が 2 本）
+  {
+    const em = cube();
+    em.clearSelection();
+    const s = em.faceStart[0], n = em.faceSize(0);
+    for (let k = 0; k < n; k++) {
+      const e = edgeOf(em, em.faceVerts[s + k], em.faceVerts[s + (k + 1) % n]);
+      em.selEdge[e] = 1;
+    }
+    const r = bevelSelectedEdges(em, 0.2);
+    ok(r.edges === 4, `4 辺ベベルできない (${r.edges} / ${r.reason})`);
+    ok(r.corners === 0, `2 本しか集まらないのに角の面を張った (${r.corners})`);
+    ok(em.nv === 8 + 4, `頂点が 12 にならない (${em.nv})`);
+    check(em, { closed: true, chi: 2, label: '1 面のまわり 4 辺をベベル' });
+  }
+
+  // ベベル辺が 1 本しか集まらない頂点があるときは断る
+  {
+    const em = cube();
+    em.clearSelection();
+    em.selEdge[0] = 1;
+    const before = { nv: em.nv, nf: em.liveFaces };
+    const r = bevelSelectedEdges(em, 0.2);
+    ok(r.edges === 0, `1 本だけの辺をベベルしてしまった (${r.edges})`);
+    ok(/1 本しか集まらない/.test(r.reason), `理由が返らない (${r.reason})`);
+    ok(em.nv === before.nv && em.liveFaces === before.nf, '断ったのに形が変わっている');
+  }
+
+  // 境界の辺は断る
+  {
+    const em = cube();
+    em.clearSelection();
+    em.selFace[0] = 1;
+    em.syncSelection('face');
+    em.deleteSelectedFaces();
+    em.clearSelection();
+    let n = 0;
+    for (let e = 0; e < em.ne; e++) if (em.edgeFace[e * 2 + 1] < 0) { em.selEdge[e] = 1; n++; }
+    ok(n > 0, '境界辺が見つからない');
+    const r = bevelSelectedEdges(em, 0.2);
+    ok(r.edges === 0, `境界辺をベベルしてしまった (${r.edges})`);
+    ok(em.validate().length === 0, '断ったのに構造が変わっている');
+  }
+
+  // ベベル → 押し出し / ループカットの連携
+  {
+    const em = cube();
+    em.selectAll('edge');
+    bevelSelectedEdges(em, 0.2);
+    // ベベルで張った帯が選択されている
+    ok(em.selectionCount().faces > 0, 'ベベル後に帯が選択されていない');
+    extrudeSelectedFaces(em, 0.1);
+    check(em, { closed: true, chi: 2, label: 'ベベル → 押し出し', outward: false });
+    em.clearSelection();
+    // 四角の辺を 1 本選んでループカット
+    for (let e = 0; e < em.ne; e++) {
+      const f0 = em.edgeFace[e * 2], f1 = em.edgeFace[e * 2 + 1];
+      if (f0 >= 0 && f1 >= 0 && em.faceSize(f0) === 4 && em.faceSize(f1) === 4) { em.selEdge[e] = 1; break; }
+    }
+    loopCut(em, 1);
+    ok(em.validate().length === 0, `ベベル → ループカットで壊れた (${em.validate().join(' / ')})`);
+    console.log(`  ベベル → 押し出し → ループカット: V=${em.nv} E=${em.ne} F=${em.liveFaces}`
+      + ` χ=${em.nv - em.ne + em.liveFaces}`);
+  }
+
+  // 四角化した球（価数がばらつく形）でも通ること
+  {
+    const g = PRIMITIVES.quadball();
+    const m = new SculptMesh();
+    m.setGeometry(g.positions, g.indices);
+    const em = editMeshFromSculpt(m, quadDominant);
+    // 1 本の辺のエッジループを選んでベベルする（閉じたループなら k=2 になる）
+    em.clearSelection();
+    let picked = -1, best = 0;
+    for (let e = 0; e < em.ne; e += 37) {
+      const L = edgeLoop(em, e);
+      if (L.closed && L.edges.length > best) { best = L.edges.length; picked = e; }
+    }
+    if (picked >= 0) {
+      em.clearSelection();
+      for (const e of edgeLoop(em, picked).edges) em.selEdge[e] = 1;
+      const r = bevelSelectedEdges(em, 0.15);
+      ok(r.edges === best, `ループ ${best} 辺をベベルできない (${r.edges} / ${r.reason})`);
+      check(em, { closed: true, chi: 2, label: `quadball の閉じたループ ${best} 辺をベベル`, outward: false });
+    } else {
+      console.log('  quadball に閉じたエッジループが見つからず、この検査はスキップ');
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -109,6 +109,7 @@ const state = {
   editCuts: 1,            // ループカットの本数
   editExtrude: 0.25,      // 押し出し量（モデル半径に対する割合）
   editInset: 0.2,         // インセット量 0..1
+  editBevel: 0.2,         // ベベル量 0..0.49（区間の重心へ寄せる割合）
   invertOrbitY: false,
   bgPreset: 'dark',
   bgTop: BG_PRESETS.dark.top,
