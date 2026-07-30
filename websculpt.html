@@ -1023,6 +1023,23 @@ kbd {
   z-index: 12;
 }
 
+/* 投げ縄選択の輪。ビューポート全面に敷いて、中に polyline を引く */
+.lasso {
+  position: absolute;
+  inset: 0;
+  display: none;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 12;
+}
+.lasso polyline {
+  fill: #f0925f14;
+  stroke: var(--accent-2);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+}
+
 /* モーダル変形（G / R / S）中の表示。Blender のヘッダ行に相当する。
    ビューポートの上端に出す（下端はブラシ情報とぶつかる） */
 .modalhud {
@@ -1098,6 +1115,8 @@ kbd {
       <!-- 編集モードの矩形選択。オーバーレイ線のバッファは編集メッシュの
            ワイヤ表示に使っているので、矩形は DOM で描く -->
       <div id="editbox" class="editbox"></div>
+      <!-- 投げ縄選択の輪。矩形と違って自由な形なので SVG で描く -->
+      <svg id="lasso" class="lasso"><polyline points=""></polyline></svg>
       <!-- モーダル変形（G / R / S）中の表示。いまの操作・軸・量と操作方法を出す -->
       <div id="modalhud" class="modalhud"></div>
       <div id="rpv" class="rpv">
@@ -9082,6 +9101,10 @@ class Renderer {
     this.overlayCap = 0;
     this.overlayCount = 0;
     this.overlayFront = true;
+    // オーバーレイの面（選択した面の塗り）。頂点の並びは線と同じ 7 float
+    this.overlayTriBuf = null;
+    this.overlayTriCap = 0;
+    this.overlayTriCount = 0;
     this.vbPos = null; this.vbNrm = null; this.vbCol = null; this.vbMask = null; this.vbCurv = null;
     this.ib = null;
     this.wireIb = null;
@@ -9334,6 +9357,17 @@ class Renderer {
       fragment: { module: overlayMod, entryPoint: 'fs', targets: overlayTargets },
       primitive: { topology: 'line-list' },
       depthStencil: depthState(false, 'always'),
+    });
+    // 選択した面の塗り。線と同じ頂点形式・同じシェーダで、三角形として描く。
+    // 深度は「同じか手前なら通す」で書き込まない。面と**まったく同じ三角形**を
+    // 送る前提なので（editmesh の triangulate と同じ扇の切り方）深度が一致し、
+    // ずらさなくても z ファイティングにならない。
+    this.pipeOverlayTri = d.createRenderPipeline({
+      layout: mainLayout,
+      vertex: { module: overlayMod, entryPoint: 'vs', buffers: overlayVB },
+      fragment: { module: overlayMod, entryPoint: 'fs', targets: overlayTargets },
+      primitive: { topology: 'triangle-list' },
+      depthStencil: depthState(false, 'less-equal'),
     });
 
     // フロアグリッドはメッシュの後に描く（深度テストのみ、書き込みなし）
@@ -9781,6 +9815,33 @@ class Renderer {
     this.overlayFront = front;
   }
 
+  /**
+   * オーバーレイの面を差し替える（選択した面の塗り）。
+   *
+   * 頂点の並びは線と同じ (x,y,z,r,g,b,a)。**三角形は表示メッシュとまったく同じ
+   * ものを渡すこと**（editmesh の triangulate と同じ扇の切り方）。深度が一致するので
+   * 「同じか手前なら通す」で隙間なく塗れる。違う切り方だと面の中で深度がずれて
+   * まだらになる。
+   *
+   * @param {Float32Array} verts 三角形の頂点ごとに 7 float
+   * @param {number} vertCount 頂点数（三角形数 × 3）
+   */
+  setOverlayTris(verts, vertCount) {
+    if (!verts || !vertCount) { this.overlayTriCount = 0; return; }
+    const d = this.device;
+    const need = vertCount * 7;
+    if (!this.overlayTriBuf || this.overlayTriCap < need) {
+      if (this.overlayTriBuf) this.overlayTriBuf.destroy();
+      this.overlayTriCap = Math.ceil(need * 1.5);
+      this.overlayTriBuf = d.createBuffer({
+        size: this.overlayTriCap * 4,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      });
+    }
+    d.queue.writeBuffer(this.overlayTriBuf, 0, verts, 0, need);
+    this.overlayTriCount = vertCount;
+  }
+
   _syncWireframe(mesh, now) {
     if (mesh.topoVersion === this.wireVersion) return;
     if (this.wireVersion >= 0 && now - this.wireBuiltAt < 160) return;   // 構築を間引く
@@ -10003,6 +10064,13 @@ class Renderer {
         pass.setVertexBuffer(0, this.vbPos);
         pass.setIndexBuffer(this.wireIb, 'uint32');
         pass.drawIndexed(this.wireCount);
+      }
+
+      // 選択した面の塗り。線より先に描いて、線が上に乗るようにする
+      if (this.overlayTriCount > 0 && this.overlayTriBuf) {
+        pass.setPipeline(this.pipeOverlayTri);
+        pass.setVertexBuffer(0, this.overlayTriBuf);
+        pass.draw(this.overlayTriCount);
       }
 
       // オーバーレイの線（トランスポーズのハンドル / クリップのガイド）。
@@ -12594,8 +12662,8 @@ function sections(shortcuts) {
       steps: [
         '<b>Tab</b> を押します（または〔ポリゴンモデリング〕でモードを切り替えます）。ワイヤフレームが出ます。',
         '選択の単位を <b>1</b> 頂点 / <b>2</b> 辺 / <b>3</b> 面 で選びます。',
-        'ビューポートを<b>クリック</b>で選択、<b>ドラッグ</b>で矩形選択。Shift で追加します。'
-        + '<b>Alt+クリック</b>でエッジループになります。',
+        'ビューポートを<b>クリック</b>で選択、<b>ドラッグ</b>で範囲選択。Shift で追加します。'
+        + '<b>B</b> で矩形 ⇄ 投げ縄、<b>Alt+クリック</b>でエッジループになります。',
         '<b>E</b> 押し出し、<b>I</b> インセット、<b>Ctrl+B</b> ベベル、<b>Ctrl+R</b> ループカットで面を増やします。',
         '<b>G</b> 移動 / <b>R</b> 回転 / <b>S</b> 拡大縮小。'
         + '押した瞬間から<b>ボタンを押さずにマウスを動かすだけ</b>で変形します。'
@@ -12603,6 +12671,11 @@ function sections(shortcuts) {
         '<b>Tab</b> でスカルプトへ戻ると、三角形化して彫刻メッシュへ書き戻します。',
       ],
       items: [
+        { name: '範囲選択（矩形 / 投げ縄）', sub: 'B で切り替え',
+          desc: 'ドラッグで囲って選ぶ。矩形は四角、投げ縄はなぞった輪の中。'
+            + '<b>既定では見えている面だけ</b>を選び、裏側は拾わない' },
+        { name: 'X 線表示', sub: 'Alt+Z',
+          desc: '入れると裏側まで突き抜けて選ぶ。反対側も一度に選びたいときに使う' },
         { name: 'すべて / 解除 / 反転', desc: '選択の基本操作' },
         { name: '広げる / 縮める', desc: '選択を隣へ 1 段ぶん広げる・縁を 1 段ぶん外す' },
         { name: '繋がり', desc: '選択に繋がっている塊を全部選ぶ（Blender の Select Linked）' },
@@ -12645,14 +12718,19 @@ function sections(shortcuts) {
         + '<b>1 ビットも違わない元の座標へ戻ります</b>。',
         'ハンドルを掴んで軸をきっちり指定したいときは <b>Shift+G</b>（またはパネルの'
         + '〔移動のギズモ〕など）でギズモを立てます。ZBrush のトランスポーズと同じ方式です。',
-        '選択している辺は橙、形の縁（穴の境界）は赤で出ます。'
-        + '赤が出ていたら閉じていない場所があるという意味です。',
+        '辺は<b>黒い線</b>で出ます。選択している辺は橙、形の縁（穴の境界）は赤です。'
+        + '赤が出ていたら閉じていない場所があるという意味です。'
+        + '<b>面モードでは選択した面を橙で塗ります</b>（線ではなく面の色で示します）。',
+        '範囲選択は<b>見えている面だけ</b>を拾います（裏側は選ばれません）。'
+        + '判定は面の向きで見ているので、他のパーツに隠れているところ'
+        + '（胴の裏の手など）は弾けません。反対側もまとめて選びたいときは'
+        + '<b>Alt+Z</b> で X 線表示を入れてください。',
         'ループカットは<b>1 回に 1 リングまで</b>です。直交する 2 リングは同じ四角を共有するので、'
         + '同時に切ると分割点が浮いて穴が開きます（Blender の Ctrl+R も 1 リングずつです）。',
-        'ベベルは辺が<b>「通り抜ける」選択</b>でだけ通ります。閉じたエッジループや'
-        + '立方体の全辺のように、どの頂点にもベベル辺が 2 本以上集まっている選択が条件です。'
-        + '端が途切れる選択は帯の両側に別々の頂点を割り当てられないので、'
-        + '黙って壊さずに理由を出して断ります。',
+        'ベベルは<b>辺の選び方が自由</b>です。ループになっていなくても、1 本だけでも通ります。'
+        + '帯が途切れる端では、まわりの面 1 枚に頂点を 2 個差し込んで閉じます'
+        + '（その面の辺が 1 本増えて、四角なら五角形になります。Blender と同じ処理です）。'
+        + '断るのは穴の縁（境界の辺）と、まわりが一周していない頂点だけです。',
         'ベベルのあとは<b>張った帯が選択されたまま</b>なので、続けて押し出すと'
         + '角に沿ったリブ（畝）になります。',
         'ブリッジは<b>穴の縁（境界の辺）を 2 つ</b>選んで使います。'
@@ -12809,7 +12887,7 @@ function shortcutModes(shortcuts) {
   ]);
   groups.model.set('マウス', [
     { keys: '左クリック', jp: '選ぶ（Shift で追加、何も無い所で解除）' },
-    { keys: '左ドラッグ', jp: '矩形選択' },
+    { keys: '左ドラッグ', jp: '範囲選択（矩形 / 投げ縄。B で切り替え）' },
     { keys: 'Alt+クリック', jp: 'エッジループを選ぶ' },
     { keys: 'Ctrl+Alt+クリック', jp: 'エッジリングを選ぶ' },
     { keys: '中ドラッグ', jp: '視点を回す（Blender と同じ）' },
@@ -14013,6 +14091,7 @@ function buildUI(app) {
 
   // --- ポリゴンモデリング（モデリングモード）--------------------------------
   let modeSeg = null, editModeSeg = null, editInfoEl = null;
+  let selShapeSeg = null, xrayToggle = null;
   {
     const ed = section(P.model, 'ポリゴンモデリング');
     el('p', 'note', ed).textContent =
@@ -14034,8 +14113,25 @@ function buildUI(app) {
       { label: '面', value: 'face', title: '面を選ぶ（3）' },
     ], state.editSelect, (v) => app.editSetSelectMode(v));
     el('p', 'note', ed).textContent =
-      'ビューポートをクリックで選択、ドラッグで矩形選択。Shift で追加選択します。'
+      'ビューポートをクリックで選択、ドラッグで範囲選択。Shift で追加選択します。'
       + 'Alt+クリックでエッジループ、Ctrl+Alt+クリックでエッジリングになります。';
+
+    el('div', 'subhead', ed).textContent = '範囲選択の形（B）';
+    selShapeSeg = segmented(ed, [
+      { label: '矩形', value: 'box', title: 'ドラッグした四角に入るものを選びます' },
+      { label: '投げ縄', value: 'lasso', title: 'ドラッグでなぞった輪の中を選びます' },
+    ], state.selectShape, (v) => {
+      state.selectShape = v;
+      toast('範囲選択: ' + (v === 'lasso' ? '投げ縄' : '矩形'));
+    });
+    xrayToggle = toggle(ed, {
+      label: 'X 線表示（裏側も選ぶ）', value: state.editXray,
+      title: '既定では見えている面だけを選びます。入れると裏側まで突き抜けて選びます（Alt+Z）',
+      onChange: (on) => {
+        state.editXray = on;
+        toast('X 線表示: ' + (on ? 'ON（裏側も選ぶ）' : 'OFF（見えている所だけ）'));
+      },
+    });
 
     el('div', 'subhead', ed).textContent = '選択';
     btnRow(ed, [
@@ -14074,13 +14170,12 @@ function buildUI(app) {
     });
     btnRow(ed, [
       { label: 'ベベル（面取り）', cls: 'wide',
-        title: '選択した辺の角を落として帯を張ります（Blender の Ctrl+B）。'
-          + '〔エッジループ〕で繋がった形に選んでから使ってください',
+        title: '選択した辺の角を落として帯を張ります（Blender の Ctrl+B）',
         onClick: () => app.tools.editModel('bevel') },
     ]);
     el('p', 'note', ed).textContent =
-      'ベベルは辺が「通り抜ける」選択でだけ通ります。端が途切れる選択（辺が 1 本しか'
-      + '集まらない頂点がある）は、帯の両側に別の頂点を割り当てられないので断ります。';
+      '辺の選び方は自由です（ループになっていなくても、1 本だけでも通ります）。'
+      + '帯が途切れる端では、まわりの面 1 枚に頂点を差し込んで閉じます（その面の辺が 1 本増えます）。';
 
     el('div', 'subhead', ed).textContent = '面を増やす（面モードで使います）';
     slider(ed, {
@@ -14629,6 +14724,8 @@ function buildUI(app) {
     refreshEdit() {
       if (modeSeg) modeSeg.set(state.mode);
       if (editModeSeg) editModeSeg.set(state.editSelect);
+      if (selShapeSeg) selShapeSeg.set(state.selectShape);
+      if (xrayToggle) xrayToggle.set(state.editXray);
       if (!editInfoEl) return;
       const i = app.tools ? app.tools.editInfo() : null;
       if (!i) { editInfoEl.textContent = 'スカルプトモードです（Tab でモデリングへ）。'; return; }
@@ -19629,17 +19726,50 @@ function pickFace(em, p, maxDist) {
 }
 
 /**
- * 画面上の矩形に入るものを選ぶ（ボックス選択）。
+ * カメラを向いている面（と、それに触っている頂点・辺）に印を付ける。
+ *
+ * 範囲選択で**裏側まで拾ってしまわない**ために使う。判定は面ごとの向きで、
+ *   面   … その面がカメラを向いているか
+ *   辺   … 両側のどちらかの面がカメラを向いているか
+ *   頂点 … 触っている面のどれかがカメラを向いているか
+ * とする。頂点の可視を「面の可視から」決めるのが大事で、頂点だけで見ると
+ * 立方体の裏面の 4 頂点は横の面（こちら向き）にも触っているので可視に見えてしまい、
+ * 裏面まで選ばれる。
+ *
+ * 他のパーツに隠れている場合（胴の裏の手など）はここでは弾けない。深度バッファを
+ * 読み戻せば厳密にできるが、選択が 1 フレーム遅れる作りになるので採っていない。
+ * 突き抜けて選びたいときは xray を立てる（Blender の X 線表示と同じ）。
+ */
+function frontFacing(em, eye) {
+  const faceOk = new Uint8Array(em.nf);
+  const vertOk = new Uint8Array(em.nv);
+  const n = new Float64Array(3), c = new Float64Array(3);
+  for (let f = 0; f < em.nf; f++) {
+    if (!em.faceAlive[f]) continue;
+    em.faceNormal(f, n);
+    em.faceCenter(f, c);
+    const d = (eye[0] - c[0]) * n[0] + (eye[1] - c[1]) * n[1] + (eye[2] - c[2]) * n[2];
+    if (d <= 0) continue;
+    faceOk[f] = 1;
+    for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) vertOk[em.faceVerts[i]] = 1;
+  }
+  return { faceOk, vertOk };
+}
+
+/**
+ * 画面上の領域に入るものを選ぶ（矩形と投げ縄の共通処理）。
+ *
  * @param {(x,y,z) => [number,number,boolean]} project ワールド → 画面。
  *   3 つ目は「カメラの前にあるか」
- * @param {object} rect {x0, y0, x1, y1}
+ * @param {(x: number, y: number) => boolean} inRegion 画面座標が領域に入るか
  * @param {string} mode 'vert' | 'edge' | 'face'
  * @param {boolean} add true なら既存の選択に足す
+ * @param {object} [opts] { eye, xray } eye を渡すと裏側を拾わない。xray で無効化
  */
-function boxSelect(em, project, rect, mode, add = false) {
-  const x0 = Math.min(rect.x0, rect.x1), x1 = Math.max(rect.x0, rect.x1);
-  const y0 = Math.min(rect.y0, rect.y1), y1 = Math.max(rect.y0, rect.y1);
+function regionSelect(em, project, inRegion, mode, add = false, opts = null) {
   if (!add) em.clearSelection();
+  const eye = opts && opts.eye && !(opts && opts.xray) ? opts.eye : null;
+  const vis = eye ? frontFacing(em, eye) : null;
   const inside = new Uint8Array(em.nv);
   const P = em.positions;
   let hit = 0;
@@ -19647,20 +19777,30 @@ function boxSelect(em, project, rect, mode, add = false) {
     const i = v * 3;
     const s = project(P[i], P[i + 1], P[i + 2]);
     if (!s[2]) continue;
-    if (s[0] >= x0 && s[0] <= x1 && s[1] >= y0 && s[1] <= y1) { inside[v] = 1; hit++; }
+    if (!inRegion(s[0], s[1])) continue;
+    inside[v] = 1; hit++;
   }
   if (mode === 'vert') {
-    for (let v = 0; v < em.nv; v++) if (inside[v]) em.selVert[v] = 1;
+    for (let v = 0; v < em.nv; v++) {
+      if (inside[v] && (!vis || vis.vertOk[v])) em.selVert[v] = 1;
+    }
     em.syncSelection('vert');
   } else if (mode === 'edge') {
-    // 辺は両端が矩形に入っているものだけ（Blender の既定と同じ）
+    // 辺は両端が領域に入っているものだけ（Blender の既定と同じ）
     for (let e = 0; e < em.ne; e++) {
-      if (inside[em.edgeA[e]] && inside[em.edgeB[e]]) em.selEdge[e] = 1;
+      if (!inside[em.edgeA[e]] || !inside[em.edgeB[e]]) continue;
+      if (vis) {
+        const f0 = em.edgeFace[e * 2], f1 = em.edgeFace[e * 2 + 1];
+        const ok = (f0 >= 0 && vis.faceOk[f0]) || (f1 >= 0 && vis.faceOk[f1]);
+        if (!ok) continue;
+      }
+      em.selEdge[e] = 1;
     }
     em.syncSelection('edge');
   } else {
     for (let f = 0; f < em.nf; f++) {
       if (!em.faceAlive[f]) continue;
+      if (vis && !vis.faceOk[f]) continue;
       let all = 1;
       for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) {
         if (!inside[em.faceVerts[i]]) { all = 0; break; }
@@ -19671,7 +19811,51 @@ function boxSelect(em, project, rect, mode, add = false) {
   }
   return { candidates: hit, ...em.selectionCount() };
 }
-  return { SELECT_MODES, EditMesh, editMeshFromSculpt, triangulate, editMeshToSculpt, pickVert, pickEdge, pickFace, boxSelect };
+
+/**
+ * 画面上の矩形に入るものを選ぶ（ボックス選択）。
+ * @param {object} rect {x0, y0, x1, y1}
+ */
+function boxSelect(em, project, rect, mode, add = false, opts = null) {
+  const x0 = Math.min(rect.x0, rect.x1), x1 = Math.max(rect.x0, rect.x1);
+  const y0 = Math.min(rect.y0, rect.y1), y1 = Math.max(rect.y0, rect.y1);
+  const inRect = (x, y) => x >= x0 && x <= x1 && y >= y0 && y <= y1;
+  return regionSelect(em, project, inRect, mode, add, opts);
+}
+
+/**
+ * 画面上の自由な囲みに入るものを選ぶ（投げ縄選択）。
+ *
+ * 判定は交差数（点から右へ伸ばした半直線が辺を何回横切るか）。囲みは閉じている
+ * ものとして扱う（最後の点と最初の点を繋ぐ）ので、輪を閉じ切らなくても効く。
+ *
+ * @param {Array<number>} pts 画面座標を x, y の順に並べたもの
+ */
+function lassoSelect(em, project, pts, mode, add = false, opts = null) {
+  const n = pts.length >> 1;
+  if (n < 3) return { candidates: 0, ...em.selectionCount() };
+  // まず外接矩形で粗く弾く（交差数の計算は点数に比例するので、外は先に落とす）
+  let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const x = pts[i * 2], y = pts[i * 2 + 1];
+    if (x < bx0) bx0 = x;
+    if (x > bx1) bx1 = x;
+    if (y < by0) by0 = y;
+    if (y > by1) by1 = y;
+  }
+  const inLasso = (x, y) => {
+    if (x < bx0 || x > bx1 || y < by0 || y > by1) return false;
+    let cross = false;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const xi = pts[i * 2], yi = pts[i * 2 + 1];
+      const xj = pts[j * 2], yj = pts[j * 2 + 1];
+      if ((yi > y) !== (yj > y) && x < xi + ((y - yi) / (yj - yi)) * (xj - xi)) cross = !cross;
+    }
+    return cross;
+  };
+  return regionSelect(em, project, inLasso, mode, add, opts);
+}
+  return { SELECT_MODES, EditMesh, editMeshFromSculpt, triangulate, editMeshToSculpt, pickVert, pickEdge, pickFace, boxSelect, lassoSelect };
 })();
 
 /* ===== editops.js ===== */
@@ -20376,6 +20560,8 @@ function subdivideSelectedFaces(em) {
 //   4. 各面は、自分が属する区間の新頂点を使うように作り直す
 //   5. ベベル辺ごとに、両側の新頂点 4 個で帯を 1 枚張る
 //   6. **ベベル辺が 3 本以上集まる頂点には「角の面」を 1 枚張る**（前回抜けていた処理）
+//   7. ベベル辺が **1 本しか集まらない頂点（帯の端）** では、扇の途中の 1 枚に
+//      新頂点 2 個を差し込んで閉じる（その面の辺が 1 本増える）
 // ---------------------------------------------------------------------------
 
 /** 面 f のループで、頂点 v の次に来る頂点への辺（出ていく辺） */
@@ -20426,13 +20612,14 @@ function vertexFan(em, v) {
 /**
  * 選択した辺をベベルする（面取り）。
  *
- * **すべての端の頂点で「ベベルする辺が 2 本以上集まっている」ことを要求する。**
- * 1 本しか集まらない頂点（= 帯がそこで途切れる）は、扇を 1 か所で切っても区間が
- * 1 つしかできないため、帯の両側に別々の頂点を割り当てられない。無理に通すと
- * 潰れた面ができる。閉じたエッジループや立方体の全辺のような「通り抜ける」選択なら
- * どの頂点でも 2 本以上になるので、実用上はこれで足りる
- * （〔エッジループ〕で選んでから使うのが普通の流れ）。
+ * 辺の選び方は自由。**ループになっていなくても、1 本だけでも通る。**
  *
+ * 端の頂点（ベベル辺が 1 本しか集まらない頂点）では、扇を 1 か所で切っても区間が
+ * 1 つしかできないので、代わりに**扇の途中の 1 枚に新頂点 2 個を差し込む**。
+ * その面は辺が 1 本増える（四角なら五角形になる）。Blender の vertex terminator と
+ * 同じ考え方で、帯はそこで閉じる。
+ *
+ * 断るのは境界の辺と、扇が一周していない頂点（境界・非多様体）だけ。
  * 断るときは reason に理由を入れて返す。黙って壊すことはしない。
  *
  * 新頂点の位置は「その区間に属する面の重心の平均」へ amount だけ寄せた点。
@@ -20466,16 +20653,6 @@ function bevelSelectedEdges(em, amount = 0.2) {
   const affected = [];
   for (let v = 0; v < em.nv; v++) if (kAt[v] > 0) affected.push(v);
 
-  const lone = affected.filter(v => kAt[v] === 1);
-  if (lone.length) {
-    return {
-      edges: 0, verts: 0, faces: 0, refused: bev.length,
-      reason: `ベベル辺が 1 本しか集まらない頂点が ${lone.length} 個あります。`
-        + '帯がそこで途切れるので処理できません。〔エッジループ〕で辺を繋がった形に'
-        + '選んでから実行してください',
-    };
-  }
-
   // 扇を作る。境界や非多様体が混ざっていたら断る
   const fans = new Map();
   for (const v of affected) {
@@ -20497,7 +20674,19 @@ function bevelSelectedEdges(em, amount = 0.2) {
   const key = (v, f) => v * 1048576 + f;
   // 角の面を張るための、区間の新頂点（扇の回転順）
   const cornerRings = new Map();
+  // 端の頂点で「1 枚の面に新頂点 2 個を差し込む」ための対応（(v,f) → [先, 後]）
+  const pairAt = new Map();
   const c = new Float64Array(3);
+
+  /** 面の並び arc の重心の平均へ v を t だけ寄せた点 */
+  const towardArc = (v, arc) => {
+    const i3 = v * 3;
+    const ox = em.positions[i3], oy = em.positions[i3 + 1], oz = em.positions[i3 + 2];
+    let ax = 0, ay = 0, az = 0;
+    for (const f of arc) { em.faceCenter(f, c); ax += c[0]; ay += c[1]; az += c[2]; }
+    const inv = 1 / arc.length;
+    return [ox + (ax * inv - ox) * t, oy + (ay * inv - oy) * t, oz + (az * inv - oz) * t];
+  };
 
   for (const v of affected) {
     const { faces, seps } = fans.get(v);
@@ -20505,7 +20694,49 @@ function bevelSelectedEdges(em, amount = 0.2) {
     // 区間の開始位置（seps[i] がベベル辺なら faces[i+1] が新しい区間の先頭）
     const starts = [];
     for (let i = 0; i < m; i++) if (isBev[seps[i]]) starts.push((i + 1) % m);
-    // kAt[v] >= 2 を保証しているので starts.length >= 2
+
+    // --- 端の頂点（ベベル辺が 1 本だけ）----------------------------------
+    //
+    // 帯はここで終わる。扇を 1 か所で切っても区間が 1 つしかできないので、
+    // 「扇の途中の 1 枚に新頂点 2 個を差し込む」ことで両側の頂点を作る
+    // （Blender の vertex terminator と同じ考え方）。
+    //
+    //   立方体の 1 辺だけをベベルした場合: 上面と前面は四角のまま、
+    //   横の面が五角形になり、帯 1 枚が増える。V=10 E=15 F=7 で χ=2。
+    //
+    // 差し込む面は扇の真ん中にする。両端の面（ベベル辺に接する 2 枚）は
+    // 帯の角に使うので、そこと重ならないように m >= 3 を要求する。
+    if (kAt[v] === 1) {
+      if (m < 3) {
+        return {
+          edges: 0, verts: 0, faces: 0, refused: bev.length,
+          reason: `頂点 ${v} のまわりに面が ${m} 枚しかありません。端の処理ができないのでベベルできません`,
+        };
+      }
+      const from = starts[0];
+      const arc = [];
+      for (let k = 0; k < m; k++) arc.push(faces[(from + k) % m]);
+      const split = Math.floor((m - 1) / 2);       // 1 <= split <= m-2
+      const headArc = arc.slice(0, split);         // 手前側（帯の片方）
+      const tailArc = arc.slice(split + 1);        // 奥側（帯のもう片方）
+      const pHead = towardArc(v, headArc);
+      const pTail = towardArc(v, tailArc);
+      // 手前側は元の頂点スロットを使い回す（孤児を作らない）
+      const i3v = v * 3;
+      P[i3v] = pHead[0]; P[i3v + 1] = pHead[1]; P[i3v + 2] = pHead[2];
+      const idHead = v;
+      P.push(pTail[0], pTail[1], pTail[2]);
+      const idTail = nv++;
+      for (const f of headArc) newAt.set(key(v, f), idHead);
+      for (const f of tailArc) newAt.set(key(v, f), idTail);
+      // 差し込む面のループでは「入ってきた辺の側 = 手前」「出ていく辺の側 = 奥」。
+      // 扇は outEdgeAt（ループ順の出ていく辺）で回しているので、
+      // ループ上は prev → 手前 → 奥 → next の順に並ぶ
+      pairAt.set(key(v, arc[split]), [idHead, idTail]);
+      cornerRings.set(v, [idHead, idTail]);
+      continue;
+    }
+
     const ring = [];
     const i3 = v * 3;
     const ox = em.positions[i3], oy = em.positions[i3 + 1], oz = em.positions[i3 + 2];
@@ -20556,6 +20787,9 @@ function bevelSelectedEdges(em, amount = 0.2) {
     const loop = [];
     for (let k = 0; k < n; k++) {
       const u = em.faceVerts[s + k];
+      // 端の頂点を差し込む面はここで 1 頂点 → 2 頂点になる（面の辺が 1 本増える）
+      const pair = pairAt.get(key(u, f));
+      if (pair) { loop.push(pair[0], pair[1]); continue; }
       const r = newAt.get(key(u, f));
       loop.push(r === undefined ? u : r);
     }
@@ -20853,7 +21087,7 @@ const { STROKES, strokeDefaults } = __M['alpha.js'];
 const { remesh, quadDominant, edgeLengthForTris } = __M['remesh.js'];
 const { initRemeshWorker, remeshInWorker, remeshWorkerState, remeshWorkerError, remeshWorkerWasm } = __M['remeshworker.js'];
 const { clamp } = __M['math.js'];
-const { editMeshFromSculpt, editMeshToSculpt, pickVert, pickEdge, pickFace, boxSelect } = __M['editmesh.js'];
+const { editMeshFromSculpt, editMeshToSculpt, pickVert, pickEdge, pickFace, boxSelect, lassoSelect } = __M['editmesh.js'];
 const { selectLoopOrRing, loopCut, extrudeSelectedFaces, insetSelectedFaces, insetRegion, subdivideSelectedFaces, bevelSelectedEdges, bridgeEdgeLoops } = __M['editops.js'];
 
 /** 変形とマスク操作の既定パラメータ一式（state に置く） */
@@ -21484,7 +21718,10 @@ class Tools {
     if (!this.edit) return;
     const em = this.edit;
     this.edit = null;
-    if (this.renderer) this.renderer.setOverlayLines(null, 0);
+    if (this.renderer) {
+      this.renderer.setOverlayLines(null, 0);
+      this.renderer.setOverlayTris(null, 0);
+    }
     if (apply) {
       const r = editMeshToSculpt(em, this.mesh);
       this.afterTopologyChange();
@@ -21529,10 +21766,16 @@ class Tools {
    * 大きいメッシュだと全部の辺を線にすると頂点数が爆発する（1 辺 = 2 頂点 ×
    * 7 float）。編集する形は普通そこまで大きくないが、彫刻してから入ることも
    * あるので上限を設けて「選択と境界だけ」に落とす。
+   *
+   * 線の色は**濃い墨色**にしてある（Blender の編集モードと同じ考え方）。
+   * 明るい灰だと MatCap の明るい面の上でほとんど見えなかった。
+   *
+   * 面モードのときは、選択を線で示すのではなく**面を塗る**（editSyncFaceFill）。
    */
   editSyncOverlay() {
     const em = this.edit;
     if (!em || !this.renderer) return;
+    const faceMode = this.selectUnit === 'face';
     const MAX_EDGES = 300000;
     const full = em.ne <= MAX_EDGES;
     // 何本描くか数える
@@ -21549,16 +21792,28 @@ class Tools {
       buf[w++] = r; buf[w++] = g; buf[w++] = b; buf[w++] = a;
     };
     for (let e = 0; e < em.ne; e++) {
-      const sel = em.selEdge[e];
+      // 面モードでは辺の選択色を出さない。選択は面の塗りで示す
+      const sel = em.selEdge[e] && !faceMode;
       const bnd = em.edgeFace[e * 2 + 1] < 0;
-      if (!full && !sel && !bnd) continue;
-      // 選択 = 橙、境界 = 赤寄り、その他 = 薄い灰
-      let r = 0.55, g = 0.60, b = 0.68, a = 0.30;
-      if (bnd) { r = 0.95; g = 0.35; b = 0.25; a = 0.85; }
-      if (sel) { r = 1.0; g = 0.60; b = 0.20; a = 0.95; }
+      if (!full && !em.selEdge[e] && !bnd) continue;
+      // 選択 = 橙、境界（穴の縁）= 赤、その他 = ほぼ黒の墨。
+      //
+      // 合成は乗算済みアルファ（src = one, dst = 1 - src.a）。**線は 1px しかないので
+      // 半透明にすると効かない。** 明るい灰の 30% だった頃は MatCap の明るい面の上で
+      // ほぼ見えず、濃い墨でも 55% / 82% では「薄い青灰の線」に見えた（実測）。
+      // 仕上げの FXAA が 1px の線を周りへ溶かすので、中心が濃くないと残らない。
+      // Blender の編集モードと同じく、**不透明の黒**にする。
+      //
+      // 色は**リニア空間**で渡す（描画バッファが rgba16float で、最後に sRGB へ
+      // 変換される）。0.05 のつもりで置くと sRGB では 0.24 相当の中間色になる。
+      // 墨として効かせるには 0.01 くらいまで落とす必要がある。
+      let r = 0.008, g = 0.010, b = 0.016, a = 1.0;
+      if (bnd) { r = 1.0; g = 0.30; b = 0.20; a = 1.0; }
+      if (sel) { r = 1.0; g = 0.58; b = 0.10; a = 1.0; }
       put(em.edgeA[e], r, g, b, a);
       put(em.edgeB[e], r, g, b, a);
     }
+    this.editSyncFaceFill();
     // 選択した頂点は小さな十字で示す（頂点モードで見えるように）
     let extra = null;
     if (this.selectUnit === 'vert') {
@@ -21588,6 +21843,57 @@ class Tools {
     } else {
       this.renderer.setOverlayLines(buf, w / 7, false);
     }
+  }
+
+  /**
+   * 面モードのとき、選択した面を塗る。
+   *
+   * 三角形は **editmesh の triangulate とまったく同じ扇の切り方**（頂点 0 から）で
+   * 作る。表示メッシュと同じ三角形になるので深度が一致し、「同じか手前なら通す」
+   * で隙間なく塗れる。切り方を変えると面の中で深度がずれてまだらになる。
+   *
+   * 面モード以外では塗らない（頂点 / 辺モードでは選択面は派生物なので、
+   * 塗ると何を選んでいるのか分からなくなる）。Blender と同じ扱い。
+   */
+  editSyncFaceFill() {
+    const em = this.edit;
+    if (!em || !this.renderer) return;
+    if (this.selectUnit !== 'face') { this.renderer.setOverlayTris(null, 0); return; }
+    // 三角形数を数える（上限つき。塗りは見せるためのものなので削っても実害はない）
+    const MAX_TRIS = 200000;
+    let nt = 0;
+    for (let f = 0; f < em.nf; f++) {
+      if (!em.faceAlive[f] || !em.selFace[f]) continue;
+      nt += Math.max(0, em.faceSize(f) - 2);
+      if (nt > MAX_TRIS) break;
+    }
+    if (nt === 0) { this.renderer.setOverlayTris(null, 0); return; }
+    nt = Math.min(nt, MAX_TRIS);
+    const buf = new Float32Array(nt * 3 * 7);
+    const P = em.positions;
+    let w = 0;
+    // 選択の色。橙の半透明。下の陰影が透けるので形が読める濃さにしてある。
+    // オーバーレイの合成は **乗算済みアルファ**（src = one, dst = 1 - src.a）なので、
+    // 色に自分でアルファを掛けておく。掛けずに渡すと真っ白に飛ぶ（実際に飛んだ）。
+    const CA = 0.45;
+    const CR = 1.0 * CA, CG = 0.50 * CA, CB = 0.08 * CA;
+    const put = (v) => {
+      const i = v * 3;
+      buf[w++] = P[i]; buf[w++] = P[i + 1]; buf[w++] = P[i + 2];
+      buf[w++] = CR; buf[w++] = CG; buf[w++] = CB; buf[w++] = CA;
+    };
+    let made = 0;
+    for (let f = 0; f < em.nf && made < nt; f++) {
+      if (!em.faceAlive[f] || !em.selFace[f]) continue;
+      const s = em.faceStart[f], n = em.faceSize(f);
+      for (let k = 1; k + 1 < n && made < nt; k++) {
+        put(em.faceVerts[s]);
+        put(em.faceVerts[s + k]);
+        put(em.faceVerts[s + k + 1]);
+        made++;
+      }
+    }
+    this.renderer.setOverlayTris(buf, w / 7);
   }
 
   /** 表示用の三角形メッシュを作り直す（形を変えたあとに呼ぶ） */
@@ -21645,10 +21951,19 @@ class Tools {
     return hit;
   }
 
-  /** 矩形選択。project はワールド → 画面 */
-  editBoxSelect(project, rect, add = false) {
+  /**
+   * 範囲選択。project はワールド → 画面。
+   *
+   * region は矩形 {x0,y0,x1,y1} か、投げ縄 {pts: [x,y,x,y,...]}。
+   * eye（カメラ位置）を渡すと**裏側を拾わない**。〔X 線表示〕が入っているときは
+   * 突き抜けて選ぶ（Blender と同じ扱い）。
+   */
+  editRegionSelect(project, region, add = false, eye = null) {
     if (!this.edit) return null;
-    const r = boxSelect(this.edit, project, rect, this.selectUnit, add);
+    const opts = { eye, xray: !!this.state.editXray };
+    const r = region.pts
+      ? lassoSelect(this.edit, project, region.pts, this.selectUnit, add, opts)
+      : boxSelect(this.edit, project, region, this.selectUnit, add, opts);
     this.editSyncOverlay();
     this.redraw();
     if (this.ui && this.ui.refreshEdit) this.ui.refreshEdit();
@@ -22307,6 +22622,8 @@ const state = {
   mode: 'sculpt',
   // ポリゴンモデリング（モデリングモードの設定）
   editSelect: 'face',     // 'vert' | 'edge' | 'face'
+  selectShape: 'box',     // 範囲選択の形 'box' | 'lasso'
+  editXray: false,        // X 線表示（裏側も範囲選択で拾う）
   editCuts: 1,            // ループカットの本数
   editExtrude: 0.25,      // 押し出し量（モデル半径に対する割合）
   editInset: 0.2,         // インセット量 0..1
@@ -23488,6 +23805,20 @@ const SHORTCUTS = [
       app.editSetSelectMode(kind);
       ui.toast('選択の単位: ' + { vert: '頂点', edge: '辺', face: '面' }[kind]);
     } },
+  { group: '選択', modes: ['model'], keys: 'B', jp: '範囲選択の形を 矩形 ⇄ 投げ縄 で切り替える',
+    code: 'KeyB',
+    run: () => {
+      state.selectShape = state.selectShape === 'lasso' ? 'box' : 'lasso';
+      if (ui.refreshEdit) ui.refreshEdit();
+      ui.toast('範囲選択: ' + (state.selectShape === 'lasso' ? '投げ縄' : '矩形'));
+    } },
+  { group: '選択', modes: ['model'], keys: 'Alt+Z', jp: 'X 線表示（裏側も選べるようにする）',
+    code: 'KeyZ', alt: true, prevent: true,
+    run: () => {
+      state.editXray = !state.editXray;
+      if (ui.refreshEdit) ui.refreshEdit();
+      ui.toast('X 線表示: ' + (state.editXray ? 'ON（裏側も選ぶ）' : 'OFF（見えている所だけ）'));
+    } },
   { group: '選択', modes: ['model'], keys: 'A', jp: 'すべて選ぶ', code: 'KeyA',
     run: () => tools.editSelect('all') },
   { group: '選択', modes: ['model'], keys: 'Alt+A', jp: '選択を解除する', code: 'KeyA', alt: true, prevent: true,
@@ -23604,18 +23935,34 @@ const SHORTCUTS = [
 ];
 
 // ---------------------------------------------------------------------------
-// 編集モードの選択（クリックで拾う / ドラッグで矩形選択）
+// 編集モードの選択（クリックで拾う / ドラッグで矩形または投げ縄）
 //
-// 矩形は DOM の div で描く。オーバーレイ線のバッファは編集メッシュのワイヤ表示に
-// 使っていて 1 本しかないので、そこへ混ぜると毎フレーム作り直しになる。
+// 囲みは DOM で描く（矩形は div、投げ縄は SVG の polyline）。オーバーレイ線の
+// バッファは編集メッシュのワイヤ表示に使っていて 1 本しかないので、そこへ混ぜると
+// 毎フレーム作り直しになる。
 // ---------------------------------------------------------------------------
 const editBox = {
-  on: false, x0: 0, y0: 0, x1: 0, y1: 0, add: false, loop: false, ring: false, el: null,
+  on: false, x0: 0, y0: 0, x1: 0, y1: 0, add: false, loop: false, ring: false,
+  lasso: false, pts: [], el: null, lassoEl: null, lassoLine: null,
 };
 
 function editBoxEl() {
   if (!editBox.el) editBox.el = document.getElementById('editbox');
   return editBox.el;
+}
+
+function editLassoLine() {
+  if (!editBox.lassoLine) {
+    editBox.lassoEl = document.getElementById('lasso');
+    editBox.lassoLine = editBox.lassoEl ? editBox.lassoEl.querySelector('polyline') : null;
+  }
+  return editBox.lassoLine;
+}
+
+function editHideRegion() {
+  const el = editBoxEl();
+  if (el) el.style.display = 'none';
+  if (editBox.lassoEl) editBox.lassoEl.style.display = 'none';
 }
 
 function editDragBegin(x, y, add, alt, ctrl) {
@@ -23625,13 +23972,31 @@ function editDragBegin(x, y, add, alt, ctrl) {
   // Alt+クリック = エッジループ、Ctrl+Alt+クリック = エッジリング
   editBox.loop = !!alt && !ctrl;
   editBox.ring = !!alt && !!ctrl;
-  const el = editBoxEl();
-  if (el) { el.style.display = 'none'; }
+  // 囲みの形はモードで決める（B で切り替え）。ループ選択のときは使わない
+  editBox.lasso = state.selectShape === 'lasso' && !editBox.loop && !editBox.ring;
+  editBox.pts = editBox.lasso ? [x, y] : [];
+  editHideRegion();
 }
 
 function editDragMove(x, y) {
   if (!editBox.on) return;
   editBox.x1 = x; editBox.y1 = y;
+  if (editBox.lasso) {
+    // 3px 以上動いたときだけ点を足す（点が増えすぎると判定が重くなる）
+    const n = editBox.pts.length;
+    const dx = x - editBox.pts[n - 2], dy = y - editBox.pts[n - 1];
+    if (dx * dx + dy * dy >= 9) editBox.pts.push(x, y);
+    const line = editLassoLine();
+    if (!line) return;
+    if (editBox.pts.length < 6) { editBox.lassoEl.style.display = 'none'; return; }
+    editBox.lassoEl.style.display = 'block';
+    let s = '';
+    for (let i = 0; i < editBox.pts.length; i += 2) s += `${editBox.pts[i]},${editBox.pts[i + 1]} `;
+    // 始点へ戻して閉じた輪に見せる（判定も閉じた輪として行う）
+    s += `${editBox.pts[0]},${editBox.pts[1]}`;
+    line.setAttribute('points', s);
+    return;
+  }
   const el = editBoxEl();
   if (!el) return;
   const w = Math.abs(x - editBox.x0), h = Math.abs(y - editBox.y0);
@@ -23659,10 +24024,9 @@ function makeProjector() {
 function editDragEnd() {
   if (!editBox.on) return;
   editBox.on = false;
-  const el = editBoxEl();
-  if (el) el.style.display = 'none';
+  editHideRegion();
   const w = Math.abs(editBox.x1 - editBox.x0), h = Math.abs(editBox.y1 - editBox.y0);
-  if (w < 4 && h < 4) {
+  if ((w < 4 && h < 4) && editBox.pts.length < 6) {
     // クリック扱い。カーソル下の表面のワールド座標から一番近いものを拾う
     if (renderer.pick.ok) {
       // Alt+クリックは「拾った辺からループ / リングへ伸ばす」。辺モードでないと
@@ -23684,11 +24048,15 @@ function editDragEnd() {
     }
     return;
   }
-  const r = tools.editBoxSelect(makeProjector(),
-    { x0: editBox.x0, y0: editBox.y0, x1: editBox.x1, y1: editBox.y1 }, editBox.add);
+  // カメラ位置を渡すと裏側を拾わない（X 線表示のときは突き抜けて拾う）
+  const region = editBox.lasso && editBox.pts.length >= 6
+    ? { pts: editBox.pts }
+    : { x0: editBox.x0, y0: editBox.y0, x1: editBox.x1, y1: editBox.y1 };
+  const r = tools.editRegionSelect(makeProjector(), region, editBox.add, camera.eye);
   if (r) {
-    ui.toast(`選択: 頂点 ${r.verts.toLocaleString()} / 辺 ${r.edges.toLocaleString()}`
-      + ` / 面 ${r.faces.toLocaleString()}`);
+    ui.toast(`${editBox.lasso ? '投げ縄' : '矩形'}選択: 頂点 ${r.verts.toLocaleString()}`
+      + ` / 辺 ${r.edges.toLocaleString()} / 面 ${r.faces.toLocaleString()}`
+      + `${state.editXray ? '（X 線表示: 裏側も）' : ''}`);
   }
 }
 

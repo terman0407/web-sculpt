@@ -1,4 +1,4 @@
-// ---------------------------------------------------------------------------
+﻿// ---------------------------------------------------------------------------
 // 編集メッシュ（ポリゴンモデリング）の検証。
 //   node test/editmesh.test.mjs
 //
@@ -13,7 +13,7 @@ import { SculptMesh, PRIMITIVES } from '../js/mesh.js';
 import { quadDominant } from '../js/remesh.js';
 import {
   EditMesh, editMeshFromSculpt, editMeshToSculpt, triangulate,
-  pickVert, pickEdge, pickFace, boxSelect,
+  pickVert, pickEdge, pickFace, boxSelect, lassoSelect,
 } from '../js/editmesh.js';
 
 let failures = 0;
@@ -307,6 +307,122 @@ head('当たり判定と矩形選択');
     }
   }
   ok(fbad === 0, `矩形にまたがる面が選ばれている (${fbad})`);
+}
+
+/** 手作りの単位立方体（四角 6 枚・外向き）。範囲選択の検査に使う */
+function cube() {
+  const P = new Float32Array([
+    -1, -1, -1, 1, -1, -1, 1, 1, -1, -1, 1, -1,
+    -1, -1, 1, 1, -1, 1, 1, 1, 1, -1, 1, 1,
+  ]);
+  const F = [
+    [0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4],
+    [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7],
+  ];
+  const verts = [], starts = [0];
+  for (const f of F) { verts.push(...f); starts.push(verts.length); }
+  const em = new EditMesh();
+  em.setGeometry(P, Int32Array.from(verts), Int32Array.from(starts));
+  return em;
+}
+
+// ---------------------------------------------------------------------------
+// 範囲選択は既定で**裏側を拾わない**（カメラ位置を渡したとき）。
+// 立方体を +Z から見て全面を囲うと、こちら向きの面だけが選ばれるべき。
+// 頂点の可視を「面の向きから」決めているのが要点で、頂点だけで見ると裏面の
+// 4 頂点も横の面（こちら向き）に触っているので可視に見え、裏面まで選ばれる。
+head('範囲選択の裏側（オクルージョン）');
+{
+  const em = cube();
+  // +Z から見る想定。x, y をそのまま画面座標に使う
+  const project = (x, y, z) => [x, y, z > -99];
+  const eye = [0, 0, 10];
+  const all = { x0: -9, y0: -9, x1: 9, y1: 9 };
+
+  // カメラ位置を渡さないと従来どおり全部拾う（既存の呼び方を壊さない）
+  boxSelect(em, project, all, 'face');
+  const noEye = em.selectionCount().faces;
+  ok(noEye === em.liveFaces, `eye 無しでは全部拾う (${noEye}/${em.liveFaces})`);
+
+  // 面モード: +Z を向いている面だけ
+  boxSelect(em, project, all, 'face', false, { eye });
+  const n = new Float64Array(3), c = new Float64Array(3);
+  let selected = 0, back = 0;
+  for (let f = 0; f < em.nf; f++) {
+    if (!em.faceAlive[f] || !em.selFace[f]) continue;
+    selected++;
+    em.faceNormal(f, n);
+    em.faceCenter(f, c);
+    if ((eye[0] - c[0]) * n[0] + (eye[1] - c[1]) * n[1] + (eye[2] - c[2]) * n[2] <= 0) back++;
+  }
+  ok(back === 0, `裏を向いた面が選ばれている (${back} 枚)`);
+  ok(selected === 1, `+Z を向いた 1 枚だけが選ばれる (${selected} 枚)`);
+
+  // 頂点モード: 裏面だけに触っている頂点（z < 0 の 4 個）は選ばれない
+  boxSelect(em, project, all, 'vert', false, { eye });
+  let vbad = 0, vsel = 0;
+  for (let v = 0; v < em.nv; v++) {
+    if (!em.selVert[v]) continue;
+    vsel++;
+    if (em.positions[v * 3 + 2] < 0) vbad++;
+  }
+  ok(vsel === 4, `手前の 4 頂点だけが選ばれる (${vsel})`);
+  ok(vbad === 0, `裏側の頂点が選ばれている (${vbad})`);
+
+  // X 線表示なら突き抜けて拾う
+  boxSelect(em, project, all, 'face', false, { eye, xray: true });
+  ok(em.selectionCount().faces === em.liveFaces,
+    `X 線表示では全部拾う (${em.selectionCount().faces}/${em.liveFaces})`);
+}
+
+// ---------------------------------------------------------------------------
+head('投げ縄選択');
+{
+  const em = cube();
+  const project = (x, y, z) => [x, y, z > -99];
+  const eye = [0, 0, 10];
+
+  // x > 0 側だけを囲う三角形（辺で切らないよう 0.05 から）
+  const tri = [0.05, -9, 9, -9, 9, 9, 0.05, 9];
+  lassoSelect(em, project, tri, 'vert', false, { eye, xray: true });
+  let bad = 0, sel = 0;
+  for (let v = 0; v < em.nv; v++) {
+    if (!em.selVert[v]) continue;
+    sel++;
+    if (em.positions[v * 3] < 0.05) bad++;
+  }
+  ok(sel === 4, `輪の中の 4 頂点が選ばれる (${sel})`);
+  ok(bad === 0, `輪の外の頂点が選ばれている (${bad})`);
+
+  // 点が 3 つ未満なら何もしない（線を引きかけただけのとき）
+  em.clearSelection();
+  const r0 = lassoSelect(em, project, [0, 0, 1, 1], 'vert', false, { eye });
+  ok(r0.verts === 0, `点が足りない輪で選ばれた (${r0.verts})`);
+
+  // 投げ縄も裏側を拾わない
+  const wide = [-9, -9, 9, -9, 9, 9, -9, 9];
+  lassoSelect(em, project, wide, 'face', false, { eye });
+  let back = 0;
+  const n = new Float64Array(3), c = new Float64Array(3);
+  for (let f = 0; f < em.nf; f++) {
+    if (!em.faceAlive[f] || !em.selFace[f]) continue;
+    em.faceNormal(f, n);
+    em.faceCenter(f, c);
+    if ((eye[0] - c[0]) * n[0] + (eye[1] - c[1]) * n[1] + (eye[2] - c[2]) * n[2] <= 0) back++;
+  }
+  ok(back === 0, `投げ縄で裏を向いた面が選ばれている (${back})`);
+  ok(em.selectionCount().faces === 1, `投げ縄でも手前の 1 枚だけ (${em.selectionCount().faces})`);
+
+  // 凹んだ輪（C 字）でも交差数で正しく判定できる
+  {
+    const em2 = cube();
+    // 右半分を囲むが、真ん中に切れ込みを入れた形
+    const cshape = [0.05, -9, 9, -9, 9, 9, 0.05, 9, 0.05, 0.5, 5, 0.5, 5, -0.5, 0.05, -0.5];
+    lassoSelect(em2, project, cshape, 'vert', false, { eye, xray: true });
+    let n2 = 0;
+    for (let v = 0; v < em2.nv; v++) if (em2.selVert[v]) n2++;
+    ok(n2 === 4, `凹んだ輪でも中の頂点が拾える (${n2})`);
+  }
 }
 
 // ---------------------------------------------------------------------------

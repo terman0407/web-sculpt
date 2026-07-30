@@ -997,6 +997,7 @@ export function buildUI(app) {
 
   // --- ポリゴンモデリング（モデリングモード）--------------------------------
   let modeSeg = null, editModeSeg = null, editInfoEl = null;
+  let selShapeSeg = null, xrayToggle = null;
   {
     const ed = section(P.model, 'ポリゴンモデリング');
     el('p', 'note', ed).textContent =
@@ -1018,8 +1019,25 @@ export function buildUI(app) {
       { label: '面', value: 'face', title: '面を選ぶ（3）' },
     ], state.editSelect, (v) => app.editSetSelectMode(v));
     el('p', 'note', ed).textContent =
-      'ビューポートをクリックで選択、ドラッグで矩形選択。Shift で追加選択します。'
+      'ビューポートをクリックで選択、ドラッグで範囲選択。Shift で追加選択します。'
       + 'Alt+クリックでエッジループ、Ctrl+Alt+クリックでエッジリングになります。';
+
+    el('div', 'subhead', ed).textContent = '範囲選択の形（B）';
+    selShapeSeg = segmented(ed, [
+      { label: '矩形', value: 'box', title: 'ドラッグした四角に入るものを選びます' },
+      { label: '投げ縄', value: 'lasso', title: 'ドラッグでなぞった輪の中を選びます' },
+    ], state.selectShape, (v) => {
+      state.selectShape = v;
+      toast('範囲選択: ' + (v === 'lasso' ? '投げ縄' : '矩形'));
+    });
+    xrayToggle = toggle(ed, {
+      label: 'X 線表示（裏側も選ぶ）', value: state.editXray,
+      title: '既定では見えている面だけを選びます。入れると裏側まで突き抜けて選びます（Alt+Z）',
+      onChange: (on) => {
+        state.editXray = on;
+        toast('X 線表示: ' + (on ? 'ON（裏側も選ぶ）' : 'OFF（見えている所だけ）'));
+      },
+    });
 
     el('div', 'subhead', ed).textContent = '選択';
     btnRow(ed, [
@@ -1612,6 +1630,8 @@ export function buildUI(app) {
     refreshEdit() {
       if (modeSeg) modeSeg.set(state.mode);
       if (editModeSeg) editModeSeg.set(state.editSelect);
+      if (selShapeSeg) selShapeSeg.set(state.selectShape);
+      if (xrayToggle) xrayToggle.set(state.editXray);
       if (!editInfoEl) return;
       const i = app.tools ? app.tools.editInfo() : null;
       if (!i) { editInfoEl.textContent = 'スカルプトモードです（Tab でモデリングへ）。'; return; }

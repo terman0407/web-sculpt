@@ -107,6 +107,100 @@ try {
   ok(r.sel.verts > 4, `矩形選択で複数選ばれる (頂点 ${r.sel.verts} / 面 ${r.sel.faces})`);
   ok(r.boxHidden === 'none', '離すと矩形が消える');
 
+  // --- 矩形選択が裏側まで突き抜けないこと ---------------------------------
+  // 形の全体を囲っても、選ばれるのはこちらを向いている面だけであるべき。
+  // X 線表示を入れると突き抜けて全部拾う（Blender と同じ）。
+  {
+    const dragAll = async () => {
+      await mouse('mouseMoved', cx - 320, cy - 320);
+      await mouse('mousePressed', cx - 320, cy - 320);
+      for (let k = 1; k <= 8; k++) {
+        await mouse('mouseMoved', cx - 320 + k * 80, cy - 320 + k * 80, { dragging: true });
+        await frames(1);
+      }
+      await mouse('mouseReleased', cx + 320, cy + 320);
+      await frames(4);
+    };
+    await run(`const W = window.WebSculpt;
+      W.app.editSetSelectMode('face');
+      W.state.editXray = false;
+      W.tools.editSelect('none');
+      return 1;`);
+    await dragAll();
+    r = await run(`const W = window.WebSculpt, em = W.tools.edit;
+      const n = new Float64Array(3), c = new Float64Array(3);
+      const eye = W.camera.eye;
+      let sel = 0, back = 0;
+      for (let f = 0; f < em.nf; f++) {
+        if (!em.faceAlive[f] || !em.selFace[f]) continue;
+        sel++;
+        em.faceNormal(f, n); em.faceCenter(f, c);
+        if ((eye[0]-c[0])*n[0] + (eye[1]-c[1])*n[1] + (eye[2]-c[2])*n[2] <= 0) back++;
+      }
+      return { sel, back, total: em.liveFaces };`);
+    ok(r.sel > 0, `全体を囲って何か選ばれる (${r.sel})`);
+    ok(r.back === 0, `裏を向いた面が選ばれている (${r.back} / ${r.sel} 枚)`);
+    ok(r.sel < r.total, `全部は選ばれない (${r.sel} < ${r.total}）`);
+    console.log(`       全体を囲う矩形選択: ${r.sel} / ${r.total} 枚（裏 ${r.back} 枚）`);
+
+    // X 線表示なら突き抜ける
+    await run(`window.WebSculpt.state.editXray = true;
+      window.WebSculpt.tools.editSelect('none'); return 1;`);
+    await dragAll();
+    r = await run(`const em = window.WebSculpt.tools.edit;
+      let sel = 0;
+      for (let f = 0; f < em.nf; f++) if (em.faceAlive[f] && em.selFace[f]) sel++;
+      return { sel, total: em.liveFaces };`);
+    ok(r.sel === r.total, `X 線表示では裏側も選ばれる (${r.sel} / ${r.total})`);
+    await run(`window.WebSculpt.state.editXray = false; return 1;`);
+  }
+
+  // --- 投げ縄選択 ---------------------------------------------------------
+  {
+    await run(`const W = window.WebSculpt;
+      W.state.selectShape = 'lasso';
+      W.tools.editSelect('none');
+      return 1;`);
+    // 円を描くようになぞる
+    const R = 150;
+    const at = (i, n) => [Math.round(cx + Math.cos(i / n * Math.PI * 2) * R),
+      Math.round(cy + Math.sin(i / n * Math.PI * 2) * R)];
+    const N = 24;
+    let p = at(0, N);
+    await mouse('mouseMoved', p[0], p[1]);
+    await mouse('mousePressed', p[0], p[1]);
+    for (let i = 1; i <= N; i++) {
+      p = at(i, N);
+      await mouse('mouseMoved', p[0], p[1], { dragging: true });
+      await frames(1);
+    }
+    const lassoShown = await run(`const e = document.getElementById('lasso');
+      const pl = e.querySelector('polyline');
+      return { display: e.style.display, pts: (pl.getAttribute('points') || '').trim().split(/\\s+/).length };`);
+    ok(lassoShown.display === 'block', `なぞっている間に輪が出る (${lassoShown.display})`);
+    ok(lassoShown.pts > 8, `輪の点が溜まる (${lassoShown.pts} 点)`);
+    await mouse('mouseReleased', p[0], p[1]);
+    await frames(4);
+    r = await run(`const W = window.WebSculpt, em = W.tools.edit;
+      const n = new Float64Array(3), c = new Float64Array(3);
+      const eye = W.camera.eye;
+      let sel = 0, back = 0;
+      for (let f = 0; f < em.nf; f++) {
+        if (!em.faceAlive[f] || !em.selFace[f]) continue;
+        sel++;
+        em.faceNormal(f, n); em.faceCenter(f, c);
+        if ((eye[0]-c[0])*n[0] + (eye[1]-c[1])*n[1] + (eye[2]-c[2])*n[2] <= 0) back++;
+      }
+      return { sel, back, total: em.liveFaces,
+        hidden: document.getElementById('lasso').style.display };`);
+    ok(r.sel > 0, `投げ縄で選ばれる (${r.sel} 枚)`);
+    ok(r.sel < r.total, `輪の外は選ばれない (${r.sel} < ${r.total})`);
+    ok(r.back === 0, `投げ縄でも裏側を拾わない (${r.back} 枚)`);
+    ok(r.hidden === 'none', '離すと輪が消える');
+    console.log(`       半径 ${R}px の輪で投げ縄選択: ${r.sel} / ${r.total} 枚`);
+    await run(`window.WebSculpt.state.selectShape = 'box'; return 1;`);
+  }
+
   // 編集モード中は彫刻されないこと
   r = await run(`const W = window.WebSculpt;
     return { tris: W.mesh.liveTris, stroking: W.sculptor.stroking };`);

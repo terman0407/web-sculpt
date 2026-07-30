@@ -1013,6 +1013,23 @@ kbd {
   z-index: 12;
 }
 
+/* 投げ縄選択の輪。ビューポート全面に敷いて、中に polyline を引く */
+.lasso {
+  position: absolute;
+  inset: 0;
+  display: none;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 12;
+}
+.lasso polyline {
+  fill: #f0925f14;
+  stroke: var(--accent-2);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+}
+
 /* モーダル変形（G / R / S）中の表示。Blender のヘッダ行に相当する。
    ビューポートの上端に出す（下端はブラシ情報とぶつかる） */
 .modalhud {

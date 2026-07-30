@@ -23,7 +23,7 @@ import { remesh, quadDominant, edgeLengthForTris } from './remesh.js';
 import { initRemeshWorker, remeshInWorker, remeshWorkerState, remeshWorkerError, remeshWorkerWasm } from './remeshworker.js';
 import { clamp } from './math.js';
 import {
-  editMeshFromSculpt, editMeshToSculpt, pickVert, pickEdge, pickFace, boxSelect,
+  editMeshFromSculpt, editMeshToSculpt, pickVert, pickEdge, pickFace, boxSelect, lassoSelect,
 } from './editmesh.js';
 import {
   selectLoopOrRing, loopCut, extrudeSelectedFaces, insetSelectedFaces, insetRegion,
@@ -891,10 +891,19 @@ export class Tools {
     return hit;
   }
 
-  /** 矩形選択。project はワールド → 画面 */
-  editBoxSelect(project, rect, add = false) {
+  /**
+   * 範囲選択。project はワールド → 画面。
+   *
+   * region は矩形 {x0,y0,x1,y1} か、投げ縄 {pts: [x,y,x,y,...]}。
+   * eye（カメラ位置）を渡すと**裏側を拾わない**。〔X 線表示〕が入っているときは
+   * 突き抜けて選ぶ（Blender と同じ扱い）。
+   */
+  editRegionSelect(project, region, add = false, eye = null) {
     if (!this.edit) return null;
-    const r = boxSelect(this.edit, project, rect, this.selectUnit, add);
+    const opts = { eye, xray: !!this.state.editXray };
+    const r = region.pts
+      ? lassoSelect(this.edit, project, region.pts, this.selectUnit, add, opts)
+      : boxSelect(this.edit, project, region, this.selectUnit, add, opts);
     this.editSyncOverlay();
     this.redraw();
     if (this.ui && this.ui.refreshEdit) this.ui.refreshEdit();

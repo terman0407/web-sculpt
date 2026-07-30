@@ -113,6 +113,8 @@ const state = {
   mode: 'sculpt',
   // ポリゴンモデリング（モデリングモードの設定）
   editSelect: 'face',     // 'vert' | 'edge' | 'face'
+  selectShape: 'box',     // 範囲選択の形 'box' | 'lasso'
+  editXray: false,        // X 線表示（裏側も範囲選択で拾う）
   editCuts: 1,            // ループカットの本数
   editExtrude: 0.25,      // 押し出し量（モデル半径に対する割合）
   editInset: 0.2,         // インセット量 0..1
@@ -1294,6 +1296,20 @@ const SHORTCUTS = [
       app.editSetSelectMode(kind);
       ui.toast('選択の単位: ' + { vert: '頂点', edge: '辺', face: '面' }[kind]);
     } },
+  { group: '選択', modes: ['model'], keys: 'B', jp: '範囲選択の形を 矩形 ⇄ 投げ縄 で切り替える',
+    code: 'KeyB',
+    run: () => {
+      state.selectShape = state.selectShape === 'lasso' ? 'box' : 'lasso';
+      if (ui.refreshEdit) ui.refreshEdit();
+      ui.toast('範囲選択: ' + (state.selectShape === 'lasso' ? '投げ縄' : '矩形'));
+    } },
+  { group: '選択', modes: ['model'], keys: 'Alt+Z', jp: 'X 線表示（裏側も選べるようにする）',
+    code: 'KeyZ', alt: true, prevent: true,
+    run: () => {
+      state.editXray = !state.editXray;
+      if (ui.refreshEdit) ui.refreshEdit();
+      ui.toast('X 線表示: ' + (state.editXray ? 'ON（裏側も選ぶ）' : 'OFF（見えている所だけ）'));
+    } },
   { group: '選択', modes: ['model'], keys: 'A', jp: 'すべて選ぶ', code: 'KeyA',
     run: () => tools.editSelect('all') },
   { group: '選択', modes: ['model'], keys: 'Alt+A', jp: '選択を解除する', code: 'KeyA', alt: true, prevent: true,
@@ -1410,18 +1426,34 @@ const SHORTCUTS = [
 ];
 
 // ---------------------------------------------------------------------------
-// 編集モードの選択（クリックで拾う / ドラッグで矩形選択）
+// 編集モードの選択（クリックで拾う / ドラッグで矩形または投げ縄）
 //
-// 矩形は DOM の div で描く。オーバーレイ線のバッファは編集メッシュのワイヤ表示に
-// 使っていて 1 本しかないので、そこへ混ぜると毎フレーム作り直しになる。
+// 囲みは DOM で描く（矩形は div、投げ縄は SVG の polyline）。オーバーレイ線の
+// バッファは編集メッシュのワイヤ表示に使っていて 1 本しかないので、そこへ混ぜると
+// 毎フレーム作り直しになる。
 // ---------------------------------------------------------------------------
 const editBox = {
-  on: false, x0: 0, y0: 0, x1: 0, y1: 0, add: false, loop: false, ring: false, el: null,
+  on: false, x0: 0, y0: 0, x1: 0, y1: 0, add: false, loop: false, ring: false,
+  lasso: false, pts: [], el: null, lassoEl: null, lassoLine: null,
 };
 
 function editBoxEl() {
   if (!editBox.el) editBox.el = document.getElementById('editbox');
   return editBox.el;
+}
+
+function editLassoLine() {
+  if (!editBox.lassoLine) {
+    editBox.lassoEl = document.getElementById('lasso');
+    editBox.lassoLine = editBox.lassoEl ? editBox.lassoEl.querySelector('polyline') : null;
+  }
+  return editBox.lassoLine;
+}
+
+function editHideRegion() {
+  const el = editBoxEl();
+  if (el) el.style.display = 'none';
+  if (editBox.lassoEl) editBox.lassoEl.style.display = 'none';
 }
 
 function editDragBegin(x, y, add, alt, ctrl) {
@@ -1431,13 +1463,31 @@ function editDragBegin(x, y, add, alt, ctrl) {
   // Alt+クリック = エッジループ、Ctrl+Alt+クリック = エッジリング
   editBox.loop = !!alt && !ctrl;
   editBox.ring = !!alt && !!ctrl;
-  const el = editBoxEl();
-  if (el) { el.style.display = 'none'; }
+  // 囲みの形はモードで決める（B で切り替え）。ループ選択のときは使わない
+  editBox.lasso = state.selectShape === 'lasso' && !editBox.loop && !editBox.ring;
+  editBox.pts = editBox.lasso ? [x, y] : [];
+  editHideRegion();
 }
 
 function editDragMove(x, y) {
   if (!editBox.on) return;
   editBox.x1 = x; editBox.y1 = y;
+  if (editBox.lasso) {
+    // 3px 以上動いたときだけ点を足す（点が増えすぎると判定が重くなる）
+    const n = editBox.pts.length;
+    const dx = x - editBox.pts[n - 2], dy = y - editBox.pts[n - 1];
+    if (dx * dx + dy * dy >= 9) editBox.pts.push(x, y);
+    const line = editLassoLine();
+    if (!line) return;
+    if (editBox.pts.length < 6) { editBox.lassoEl.style.display = 'none'; return; }
+    editBox.lassoEl.style.display = 'block';
+    let s = '';
+    for (let i = 0; i < editBox.pts.length; i += 2) s += `${editBox.pts[i]},${editBox.pts[i + 1]} `;
+    // 始点へ戻して閉じた輪に見せる（判定も閉じた輪として行う）
+    s += `${editBox.pts[0]},${editBox.pts[1]}`;
+    line.setAttribute('points', s);
+    return;
+  }
   const el = editBoxEl();
   if (!el) return;
   const w = Math.abs(x - editBox.x0), h = Math.abs(y - editBox.y0);
@@ -1465,10 +1515,9 @@ function makeProjector() {
 function editDragEnd() {
   if (!editBox.on) return;
   editBox.on = false;
-  const el = editBoxEl();
-  if (el) el.style.display = 'none';
+  editHideRegion();
   const w = Math.abs(editBox.x1 - editBox.x0), h = Math.abs(editBox.y1 - editBox.y0);
-  if (w < 4 && h < 4) {
+  if ((w < 4 && h < 4) && editBox.pts.length < 6) {
     // クリック扱い。カーソル下の表面のワールド座標から一番近いものを拾う
     if (renderer.pick.ok) {
       // Alt+クリックは「拾った辺からループ / リングへ伸ばす」。辺モードでないと
@@ -1490,11 +1539,15 @@ function editDragEnd() {
     }
     return;
   }
-  const r = tools.editBoxSelect(makeProjector(),
-    { x0: editBox.x0, y0: editBox.y0, x1: editBox.x1, y1: editBox.y1 }, editBox.add);
+  // カメラ位置を渡すと裏側を拾わない（X 線表示のときは突き抜けて拾う）
+  const region = editBox.lasso && editBox.pts.length >= 6
+    ? { pts: editBox.pts }
+    : { x0: editBox.x0, y0: editBox.y0, x1: editBox.x1, y1: editBox.y1 };
+  const r = tools.editRegionSelect(makeProjector(), region, editBox.add, camera.eye);
   if (r) {
-    ui.toast(`選択: 頂点 ${r.verts.toLocaleString()} / 辺 ${r.edges.toLocaleString()}`
-      + ` / 面 ${r.faces.toLocaleString()}`);
+    ui.toast(`${editBox.lasso ? '投げ縄' : '矩形'}選択: 頂点 ${r.verts.toLocaleString()}`
+      + ` / 辺 ${r.edges.toLocaleString()} / 面 ${r.faces.toLocaleString()}`
+      + `${state.editXray ? '（X 線表示: 裏側も）' : ''}`);
   }
 }
 

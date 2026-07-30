@@ -676,17 +676,50 @@ export function pickFace(em, p, maxDist) {
 }
 
 /**
- * 画面上の矩形に入るものを選ぶ（ボックス選択）。
+ * カメラを向いている面（と、それに触っている頂点・辺）に印を付ける。
+ *
+ * 範囲選択で**裏側まで拾ってしまわない**ために使う。判定は面ごとの向きで、
+ *   面   … その面がカメラを向いているか
+ *   辺   … 両側のどちらかの面がカメラを向いているか
+ *   頂点 … 触っている面のどれかがカメラを向いているか
+ * とする。頂点の可視を「面の可視から」決めるのが大事で、頂点だけで見ると
+ * 立方体の裏面の 4 頂点は横の面（こちら向き）にも触っているので可視に見えてしまい、
+ * 裏面まで選ばれる。
+ *
+ * 他のパーツに隠れている場合（胴の裏の手など）はここでは弾けない。深度バッファを
+ * 読み戻せば厳密にできるが、選択が 1 フレーム遅れる作りになるので採っていない。
+ * 突き抜けて選びたいときは xray を立てる（Blender の X 線表示と同じ）。
+ */
+function frontFacing(em, eye) {
+  const faceOk = new Uint8Array(em.nf);
+  const vertOk = new Uint8Array(em.nv);
+  const n = new Float64Array(3), c = new Float64Array(3);
+  for (let f = 0; f < em.nf; f++) {
+    if (!em.faceAlive[f]) continue;
+    em.faceNormal(f, n);
+    em.faceCenter(f, c);
+    const d = (eye[0] - c[0]) * n[0] + (eye[1] - c[1]) * n[1] + (eye[2] - c[2]) * n[2];
+    if (d <= 0) continue;
+    faceOk[f] = 1;
+    for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) vertOk[em.faceVerts[i]] = 1;
+  }
+  return { faceOk, vertOk };
+}
+
+/**
+ * 画面上の領域に入るものを選ぶ（矩形と投げ縄の共通処理）。
+ *
  * @param {(x,y,z) => [number,number,boolean]} project ワールド → 画面。
  *   3 つ目は「カメラの前にあるか」
- * @param {object} rect {x0, y0, x1, y1}
+ * @param {(x: number, y: number) => boolean} inRegion 画面座標が領域に入るか
  * @param {string} mode 'vert' | 'edge' | 'face'
  * @param {boolean} add true なら既存の選択に足す
+ * @param {object} [opts] { eye, xray } eye を渡すと裏側を拾わない。xray で無効化
  */
-export function boxSelect(em, project, rect, mode, add = false) {
-  const x0 = Math.min(rect.x0, rect.x1), x1 = Math.max(rect.x0, rect.x1);
-  const y0 = Math.min(rect.y0, rect.y1), y1 = Math.max(rect.y0, rect.y1);
+function regionSelect(em, project, inRegion, mode, add = false, opts = null) {
   if (!add) em.clearSelection();
+  const eye = opts && opts.eye && !(opts && opts.xray) ? opts.eye : null;
+  const vis = eye ? frontFacing(em, eye) : null;
   const inside = new Uint8Array(em.nv);
   const P = em.positions;
   let hit = 0;
@@ -694,20 +727,30 @@ export function boxSelect(em, project, rect, mode, add = false) {
     const i = v * 3;
     const s = project(P[i], P[i + 1], P[i + 2]);
     if (!s[2]) continue;
-    if (s[0] >= x0 && s[0] <= x1 && s[1] >= y0 && s[1] <= y1) { inside[v] = 1; hit++; }
+    if (!inRegion(s[0], s[1])) continue;
+    inside[v] = 1; hit++;
   }
   if (mode === 'vert') {
-    for (let v = 0; v < em.nv; v++) if (inside[v]) em.selVert[v] = 1;
+    for (let v = 0; v < em.nv; v++) {
+      if (inside[v] && (!vis || vis.vertOk[v])) em.selVert[v] = 1;
+    }
     em.syncSelection('vert');
   } else if (mode === 'edge') {
-    // 辺は両端が矩形に入っているものだけ（Blender の既定と同じ）
+    // 辺は両端が領域に入っているものだけ（Blender の既定と同じ）
     for (let e = 0; e < em.ne; e++) {
-      if (inside[em.edgeA[e]] && inside[em.edgeB[e]]) em.selEdge[e] = 1;
+      if (!inside[em.edgeA[e]] || !inside[em.edgeB[e]]) continue;
+      if (vis) {
+        const f0 = em.edgeFace[e * 2], f1 = em.edgeFace[e * 2 + 1];
+        const ok = (f0 >= 0 && vis.faceOk[f0]) || (f1 >= 0 && vis.faceOk[f1]);
+        if (!ok) continue;
+      }
+      em.selEdge[e] = 1;
     }
     em.syncSelection('edge');
   } else {
     for (let f = 0; f < em.nf; f++) {
       if (!em.faceAlive[f]) continue;
+      if (vis && !vis.faceOk[f]) continue;
       let all = 1;
       for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) {
         if (!inside[em.faceVerts[i]]) { all = 0; break; }
@@ -717,4 +760,48 @@ export function boxSelect(em, project, rect, mode, add = false) {
     em.syncSelection('face');
   }
   return { candidates: hit, ...em.selectionCount() };
+}
+
+/**
+ * 画面上の矩形に入るものを選ぶ（ボックス選択）。
+ * @param {object} rect {x0, y0, x1, y1}
+ */
+export function boxSelect(em, project, rect, mode, add = false, opts = null) {
+  const x0 = Math.min(rect.x0, rect.x1), x1 = Math.max(rect.x0, rect.x1);
+  const y0 = Math.min(rect.y0, rect.y1), y1 = Math.max(rect.y0, rect.y1);
+  const inRect = (x, y) => x >= x0 && x <= x1 && y >= y0 && y <= y1;
+  return regionSelect(em, project, inRect, mode, add, opts);
+}
+
+/**
+ * 画面上の自由な囲みに入るものを選ぶ（投げ縄選択）。
+ *
+ * 判定は交差数（点から右へ伸ばした半直線が辺を何回横切るか）。囲みは閉じている
+ * ものとして扱う（最後の点と最初の点を繋ぐ）ので、輪を閉じ切らなくても効く。
+ *
+ * @param {Array<number>} pts 画面座標を x, y の順に並べたもの
+ */
+export function lassoSelect(em, project, pts, mode, add = false, opts = null) {
+  const n = pts.length >> 1;
+  if (n < 3) return { candidates: 0, ...em.selectionCount() };
+  // まず外接矩形で粗く弾く（交差数の計算は点数に比例するので、外は先に落とす）
+  let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const x = pts[i * 2], y = pts[i * 2 + 1];
+    if (x < bx0) bx0 = x;
+    if (x > bx1) bx1 = x;
+    if (y < by0) by0 = y;
+    if (y > by1) by1 = y;
+  }
+  const inLasso = (x, y) => {
+    if (x < bx0 || x > bx1 || y < by0 || y > by1) return false;
+    let cross = false;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const xi = pts[i * 2], yi = pts[i * 2 + 1];
+      const xj = pts[j * 2], yj = pts[j * 2 + 1];
+      if ((yi > y) !== (yj > y) && x < xi + ((y - yi) / (yj - yi)) * (xj - xi)) cross = !cross;
+    }
+    return cross;
+  };
+  return regionSelect(em, project, inLasso, mode, add, opts);
 }
