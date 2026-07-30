@@ -316,6 +316,98 @@ try {
   ok(r.errs.length === 0, '断ったときに構造が変わらない');
   ok(/1 本しか集まらない/.test(r.toast), `断った理由が画面に出る (${r.toast.slice(0, 40)})`);
 
+  // --- 面を削除して穴を 2 つ開け、縁を選んでブリッジ（実アプリ経路）---------
+  r = await runA(`const W = window.WebSculpt, T = W.tools;
+    // 離れた 2 枚（+x 側と -x 側でいちばん中心寄り）を消して穴を 2 つ開ける
+    const em = T.edit, ctr = new Float64Array(3);
+    T.editSelect('none');
+    W.app.editSetSelectMode('face');
+    for (const sx of [1, -1]) {
+      let bestF = -1, bestD = Infinity;
+      for (let f = 0; f < em.nf; f++) {
+        if (!em.faceAlive[f]) continue;
+        em.faceCenter(f, ctr);
+        if (Math.sign(ctr[0]) !== sx || Math.abs(ctr[0]) < 0.7) continue;
+        const d = ctr[1]*ctr[1] + ctr[2]*ctr[2];
+        if (d < bestD) { bestD = d; bestF = f; }
+      }
+      if (bestF >= 0) em.selFace[bestF] = 1;
+    }
+    em.syncSelection('face');
+    const picked = T.editInfo().sel.faces;
+    T.editApply('delete');
+    const holed = T.editInfo();
+    let bnd = 0;
+    for (let e = 0; e < em.ne; e++) if (em.edgeFace[e*2+1] < 0) bnd++;
+    // 辺モードで縁を全部選ぶ
+    W.app.editSetSelectMode('edge');
+    T.editSelect('none');
+    for (let e = 0; e < em.ne; e++) if (em.edgeFace[e*2+1] < 0) em.selEdge[e] = 1;
+    em.syncSelection('edge');
+    T.editModel('bridge');
+    const bridged = T.editInfo();
+    let bnd2 = 0;
+    for (let e = 0; e < em.ne; e++) if (em.edgeFace[e*2+1] < 0) bnd2++;
+    let want = 0;
+    for (let f = 0; f < em.nf; f++) if (em.faceAlive[f]) want += em.faceSize(f) - 2;
+    return { picked, holed, bnd, bridged, bnd2, want, have: W.mesh.liveTris,
+      chi: em.nv - em.ne + bridged.faces, nm: em.nonManifold, errs: em.validate() };`);
+  ok(r.picked === 2, `穴を開ける 2 枚が選べる (${r.picked})`);
+  ok(r.bnd > 0, `面を削除して穴が開く (境界辺 ${r.bnd})`);
+  ok(r.bridged.sel.faces > 0, `ブリッジで張った帯が選択に残る (${r.bridged.sel.faces})`);
+  ok(r.bnd2 === 0, `ブリッジで穴が閉じる (境界辺 ${r.bnd2})`);
+  ok(r.nm === 0, `ブリッジで非多様体辺が出ない (${r.nm})`);
+  ok(r.chi === 0, `ブリッジで取っ手ができる（χ=0） (${r.chi})`);
+  ok(r.errs.length === 0, `ブリッジで構造が壊れない (${r.errs.join(' / ')})`);
+  ok(r.want === r.have, `ブリッジ後も表示の三角形数が Σ(n-2) と一致 (${r.have} / ${r.want})`);
+  console.log(`       面を 2 枚削除 → 縁を選んでブリッジ: 面 ${r.holed.faces} → ${r.bridged.faces}`
+    + ` / χ=${r.chi}`);
+
+  // 面に挟まれた辺で押すと、そう言って断る
+  r = await runA(`const W = window.WebSculpt, T = W.tools;
+    const em = T.edit;
+    T.editSelect('none');
+    W.app.editSetSelectMode('edge');
+    let n = 0;
+    for (let e = 0; e < em.ne && n < 4; e++) if (em.edgeFace[e*2+1] >= 0) { em.selEdge[e] = 1; n++; }
+    em.syncSelection('edge');
+    const before = T.editInfo().faces;
+    T.editModel('bridge');
+    return { before, after: T.editInfo().faces,
+      toast: (document.querySelector('#toast') || {}).textContent || '' };`);
+  ok(r.before === r.after, `境界でない辺のブリッジは断る (${r.before} → ${r.after})`);
+  ok(/面に挟まれた辺/.test(r.toast), `断った理由が画面に出る (${r.toast.slice(0, 40)})`);
+
+  // --- 領域インセットは境目に帯を作らない（面ごととの違い）-----------------
+  r = await runA(`const W = window.WebSculpt, T = W.tools;
+    const em = T.edit;
+    W.app.editSetSelectMode('face');
+    T.editSelect('none');
+    // 辺を共有する 2 枚を選ぶ
+    let f0 = -1, f1 = -1;
+    for (let e = 0; e < em.ne; e++) {
+      const a = em.edgeFace[e*2], b = em.edgeFace[e*2+1];
+      if (a >= 0 && b >= 0) { f0 = a; f1 = b; break; }
+    }
+    em.selFace[f0] = 1; em.selFace[f1] = 1;
+    em.syncSelection('face');
+    const before = T.editInfo().faces;
+    W.state.editInset = 0.3;
+    T.editModel('inset');
+    const region = T.editInfo();
+    // 縮めた 2 枚がまだ辺を共有しているか
+    let sharedInner = 0;
+    for (let e = 0; e < em.ne; e++) {
+      const a = em.edgeFace[e*2], b = em.edgeFace[e*2+1];
+      if (a >= 0 && b >= 0 && em.selFace[a] && em.selFace[b]) sharedInner++;
+    }
+    return { before, region, sharedInner, nm: em.nonManifold, errs: em.validate() };`);
+  ok(r.region.faces === r.before + 6,
+    `領域インセットで帯 6 枚ぶん増える (${r.before} → ${r.region.faces})`);
+  ok(r.sharedInner === 1, `縮めた 2 枚が辺を共有している (${r.sharedInner})`);
+  ok(r.nm === 0, `領域インセットで非多様体辺が出ない (${r.nm})`);
+  ok(r.errs.length === 0, `領域インセットで構造が壊れない (${r.errs.join(' / ')})`);
+
   // 辺が選択されていないときは断る（黙って何もしないのではなく）
   r = await runA(`const W = window.WebSculpt, T = W.tools;
     T.editSelect('none');
@@ -323,7 +415,9 @@ try {
     T.editModel('loopCut');
     T.editModel('extrude');
     T.editModel('inset');
+    T.editModel('insetFaces');
     T.editModel('bevel');
+    T.editModel('bridge');
     return { before, after: T.editInfo().faces, errs: T.edit.validate() };`);
   ok(r.before === r.after, `選択が無いときは何もしない (${r.before} → ${r.after})`);
   ok(r.errs.length === 0, '選択が無いときの操作でも構造が保たれる');
@@ -332,7 +426,7 @@ try {
   r = await run(`const t = [...document.querySelectorAll('#rightPanel .btn')].map(b => b.textContent);
     return { t };`);
   for (const label of ['エッジループ', 'エッジリング', 'ループカット', '押し出し', 'インセット',
-    '面を細分化', 'ベベル（面取り）']) {
+    'インセット（面ごと）', '面を細分化', 'ベベル（面取り）', 'ブリッジ']) {
     ok(r.t.includes(label), `ボタン「${label}」がある`);
   }
 

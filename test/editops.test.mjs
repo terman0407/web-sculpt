@@ -14,7 +14,8 @@
 import { EditMesh, editMeshFromSculpt } from '../js/editmesh.js';
 import {
   edgeOf, edgeRing, edgeLoop, selectLoopOrRing, loopCut,
-  extrudeSelectedFaces, insetSelectedFaces, subdivideSelectedFaces, bevelSelectedEdges,
+  extrudeSelectedFaces, insetSelectedFaces, insetRegion, subdivideSelectedFaces,
+  bevelSelectedEdges, bridgeEdgeLoops,
 } from '../js/editops.js';
 import { SculptMesh, PRIMITIVES } from '../js/mesh.js';
 import { quadDominant } from '../js/remesh.js';
@@ -391,6 +392,263 @@ head('ベベル');
     } else {
       console.log('  quadball に閉じたエッジループが見つからず、この検査はスキップ');
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+head('領域インセット（Blender の I）');
+{
+  // 1 枚だけなら面ごとインセットと同じ結果
+  {
+    const a = cube(), b = cube();
+    a.clearSelection(); a.selFace[0] = 1; a.syncSelection('face');
+    b.clearSelection(); b.selFace[0] = 1; b.syncSelection('face');
+    insetRegion(a, 0.3);
+    insetSelectedFaces(b, 0.3);
+    ok(a.nv === b.nv && a.ne === b.ne && a.liveFaces === b.liveFaces,
+      `1 枚のとき面ごとインセットと違う (${a.nv}/${a.ne}/${a.liveFaces}`
+      + ` vs ${b.nv}/${b.ne}/${b.liveFaces})`);
+    check(a, { closed: true, chi: 2, label: '1 面を領域インセット' });
+  }
+
+  // 隣り合う 2 枚: 境目に帯を作らない（面ごとインセットとの違い）
+  {
+    const em = cube();
+    em.clearSelection();
+    // 辺を共有する 2 枚を選ぶ
+    const e = 0, f0 = em.edgeFace[0], f1 = em.edgeFace[1];
+    ok(f0 >= 0 && f1 >= 0, '共有辺が見つからない');
+    em.selFace[f0] = 1; em.selFace[f1] = 1;
+    em.syncSelection('face');
+    const r = insetRegion(em, 0.3);
+    ok(r.faces === 2, `2 面を処理していない (${r.faces})`);
+    ok(r.band === 6, `帯が 6 枚にならない (${r.band})`);   // 2 枚の輪郭は 6 辺
+    ok(em.liveFaces === 12, `面が 4+2+6=12 にならない (${em.liveFaces})`);
+    // 縮めた 2 枚がまだ辺を共有している（境目に帯が挟まっていない）
+    let sharedInner = 0;
+    for (let x = 0; x < em.ne; x++) {
+      const g0 = em.edgeFace[x * 2], g1 = em.edgeFace[x * 2 + 1];
+      if (g0 >= 0 && g1 >= 0 && em.selFace[g0] && em.selFace[g1]) sharedInner++;
+    }
+    ok(sharedInner === 1, `縮めた 2 枚が辺を共有していない (${sharedInner})`);
+    check(em, { closed: true, chi: 2, label: '隣り合う 2 面を領域インセット' });
+
+    const per = cube();
+    per.clearSelection();
+    per.selFace[f0] = 1; per.selFace[f1] = 1;
+    per.syncSelection('face');
+    insetSelectedFaces(per, 0.3);
+    ok(per.liveFaces === 14, `面ごとインセットは 14 面のはず (${per.liveFaces})`);
+    ok(em.liveFaces < per.liveFaces, '領域インセットが面ごとと同じ面数になっている');
+  }
+
+  // 縁が無い（全部選んだ）ときは断る
+  {
+    const em = cube();
+    em.selectAll('face');
+    const before = { nv: em.nv, nf: em.liveFaces };
+    const r = insetRegion(em, 0.3);
+    ok(r.faces === 0, `縁が無いのにインセットしてしまった (${r.faces})`);
+    ok(/縁がありません/.test(r.reason), `理由が返らない (${r.reason})`);
+    ok(em.nv === before.nv && em.liveFaces === before.nf, '断ったのに形が変わっている');
+  }
+
+  // 領域インセット → 内側へ押し出し（凹み）
+  {
+    const em = cube();
+    em.clearSelection();
+    em.selFace[em.edgeFace[0]] = 1; em.selFace[em.edgeFace[1]] = 1;
+    em.syncSelection('face');
+    insetRegion(em, 0.35);
+    extrudeSelectedFaces(em, -0.3);
+    check(em, { closed: true, chi: 2, label: '領域インセット → 内側へ押し出し', outward: false });
+  }
+
+  // 頂点だけで触れ合う 2 枚（砂時計形）でも非多様体にならない
+  {
+    const em = cube();
+    em.selectAll('face');
+    subdivideSelectedFaces(em);          // 24 枚の四角にする
+    em.clearSelection();
+    // 頂点を 1 個だけ共有する 2 枚を探す
+    let pa = -1, pb = -1;
+    for (let f = 0; f < em.nf && pa < 0; f++) {
+      if (!em.faceAlive[f]) continue;
+      const vs = new Set();
+      for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) vs.add(em.faceVerts[i]);
+      for (let g = 0; g < em.nf; g++) {
+        if (g === f || !em.faceAlive[g]) continue;
+        let sharedN = 0;
+        for (let i = em.faceStart[g]; i < em.faceStart[g + 1]; i++) if (vs.has(em.faceVerts[i])) sharedN++;
+        if (sharedN === 1) { pa = f; pb = g; break; }
+      }
+    }
+    ok(pa >= 0, '頂点だけを共有する 2 枚が見つからない');
+    em.selFace[pa] = 1; em.selFace[pb] = 1;
+    em.syncSelection('face');
+    const r = insetRegion(em, 0.3);
+    ok(r.faces === 2, `砂時計形で処理できない (${r.faces} / ${r.reason})`);
+    check(em, { closed: true, chi: 2, label: '頂点だけで触れ合う 2 面を領域インセット', outward: false });
+    // 続けて押し出しても壊れない
+    extrudeSelectedFaces(em, 0.2);
+    check(em, { closed: true, chi: 2, label: '砂時計形を領域インセット → 押し出し', outward: false });
+  }
+}
+
+// ---------------------------------------------------------------------------
+head('ブリッジ（Bridge Edge Loops）');
+
+/** 立方体 2 個（x 方向に離れている）。繋いで 1 つの形にできる */
+function twoCubes() {
+  const P = [], verts = [], starts = [0];
+  for (const dx of [-2.5, 2.5]) {
+    const base = P.length / 3;
+    for (const [x, y, z] of [
+      [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
+      [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1],
+    ]) P.push(x + dx, y, z);
+    for (const f of [
+      [0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4],
+      [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7],
+    ]) { verts.push(...f.map(i => i + base)); starts.push(verts.length); }
+  }
+  const em = new EditMesh();
+  em.setGeometry(Float32Array.from(P), Int32Array.from(verts), Int32Array.from(starts));
+  return em;
+}
+
+/** 境界辺を全部選ぶ */
+function selectBoundary(em) {
+  em.clearSelection();
+  let n = 0;
+  for (let e = 0; e < em.ne; e++) if (em.edgeFace[e * 2 + 1] < 0) { em.selEdge[e] = 1; n++; }
+  return n;
+}
+
+{
+  // 離れた 2 つの立方体を、向かい合う面を消して繋ぐ → 1 つの閉じた形（χ=2）
+  {
+    const em = twoCubes();
+    ok(em.liveFaces === 12 && em.nv === 16, `立方体 2 個になっていない (${em.nv}/${em.liveFaces})`);
+    // 向かい合う面（左の +x 面と右の -x 面）を消す
+    em.clearSelection();
+    const ctr = new Float64Array(3);
+    for (let f = 0; f < em.nf; f++) {
+      em.faceCenter(f, ctr);
+      if (Math.abs(Math.abs(ctr[0]) - 1.5) < 1e-6) em.selFace[f] = 1;
+    }
+    ok(em.selectionCount().faces === 2, `向かい合う 2 面が選べない (${em.selectionCount().faces})`);
+    em.syncSelection('face');
+    em.deleteSelectedFaces();
+    const nb = selectBoundary(em);
+    ok(nb === 8, `境界辺が 8 本にならない (${nb})`);
+    const r = bridgeEdgeLoops(em);
+    ok(r.faces === 4, `帯が 4 枚張られない (${r.faces} / ${r.reason})`);
+    ok(em.selectionCount().faces === 4, `張った帯が選択に残らない (${em.selectionCount().faces})`);
+    check(em, { closed: true, chi: 2, label: '離れた 2 つの穴をブリッジ', outward: false });
+  }
+
+  // 同じ形の離れた 2 つの穴を繋ぐと取っ手になる（χ=0 のトーラス）
+  {
+    const em = cube();
+    // 2 回細分化して 96 枚にする（細分化は選択を引き継がないので選び直す）。
+    // 穴どうしが十分離れていないと、桁になる辺が既にあってブリッジが断られる
+    em.selectAll('face');
+    subdivideSelectedFaces(em);
+    em.selectAll('face');
+    subdivideSelectedFaces(em);
+    ok(em.liveFaces === 96, `96 枚にならない (${em.liveFaces})`);
+    em.clearSelection();
+    // +x 側と -x 側の、中心にいちばん近い面を 1 枚ずつ消す
+    const ctr = new Float64Array(3);
+    for (const sx of [1, -1]) {
+      let bestF = -1, bestD = Infinity;
+      for (let f = 0; f < em.nf; f++) {
+        if (!em.faceAlive[f]) continue;
+        em.faceCenter(f, ctr);
+        if (Math.sign(ctr[0]) !== sx || Math.abs(ctr[0]) < 0.9) continue;
+        const d = ctr[1] * ctr[1] + ctr[2] * ctr[2];
+        if (d < bestD) { bestD = d; bestF = f; }
+      }
+      ok(bestF >= 0, `${sx > 0 ? '+x' : '-x'} 側の面が見つからない`);
+      em.selFace[bestF] = 1;
+    }
+    em.syncSelection('face');
+    em.deleteSelectedFaces();
+    selectBoundary(em);
+    const r = bridgeEdgeLoops(em);
+    ok(r.faces === 4, `取っ手の帯が張られない (${r.faces} / ${r.reason})`);
+    check(em, { closed: true, chi: 0, label: '同じ形の 2 つの穴をブリッジ（取っ手）', outward: false });
+  }
+
+  // 立方体の向かい合う 2 面を消して繋ぐのは断る（側面の辺が既に埋まっている）
+  {
+    const em = cube();
+    em.clearSelection();
+    em.selFace[0] = 1; em.selFace[1] = 1;      // z=-1 と z=+1
+    em.syncSelection('face');
+    em.deleteSelectedFaces();
+    selectBoundary(em);
+    const before = { nf: em.liveFaces, ne: em.ne };
+    const r = bridgeEdgeLoops(em);
+    ok(r.faces === 0, `非多様体になる繋ぎ方を通してしまった (${r.faces})`);
+    ok(/既に 2 面が付いた辺/.test(r.reason), `理由が返らない (${r.reason})`);
+    ok(em.liveFaces === before.nf && em.ne === before.ne, '断ったのに形が変わっている');
+  }
+
+  // 頂点数が違うループは断る
+  {
+    const em = twoCubes();
+    em.clearSelection();
+    const ctr = new Float64Array(3);
+    for (let f = 0; f < em.nf; f++) {
+      em.faceCenter(f, ctr);
+      if (Math.abs(Math.abs(ctr[0]) - 1.5) < 1e-6) em.selFace[f] = 1;
+    }
+    em.syncSelection('face');
+    em.deleteSelectedFaces();
+    // 片方の穴の縁に 1 本ループカットを入れて数を変える… のではなく、
+    // 片方の穴の縁の辺を細分化する代わりに、隣の面を細分化して縁の辺を増やす
+    em.clearSelection();
+    let target = -1;
+    for (let f = 0; f < em.nf; f++) {
+      if (!em.faceAlive[f]) continue;
+      let bnd = 0;
+      const s = em.faceStart[f], n = em.faceSize(f);
+      for (let k = 0; k < n; k++) {
+        const e = edgeOf(em, em.faceVerts[s + k], em.faceVerts[s + (k + 1) % n]);
+        if (e >= 0 && em.edgeFace[e * 2 + 1] < 0) bnd++;
+      }
+      em.faceCenter(f, ctr);
+      if (bnd === 1 && ctr[0] < 0) { target = f; break; }
+    }
+    ok(target >= 0, '穴に接する面が見つからない');
+    em.selFace[target] = 1;
+    em.syncSelection('face');
+    subdivideSelectedFaces(em);          // 片方の縁だけ辺が 1 本増える
+    selectBoundary(em);
+    const r = bridgeEdgeLoops(em);
+    ok(r.faces === 0, `頂点数が違うのに繋いでしまった (${r.faces})`);
+    ok(/頂点数が違います/.test(r.reason), `理由が返らない (${r.reason})`);
+  }
+
+  // 面に挟まれた辺（境界でない辺）を選んだときは、そう言って断る
+  {
+    const em = cube();
+    em.clearSelection();
+    em.selEdge[0] = 1; em.selEdge[1] = 1;
+    const r = bridgeEdgeLoops(em);
+    ok(r.faces === 0, `境界でない辺で繋いでしまった (${r.faces})`);
+    ok(/面に挟まれた辺/.test(r.reason), `理由が返らない (${r.reason})`);
+  }
+
+  // 何も選んでいないとき
+  {
+    const em = cube();
+    em.clearSelection();
+    const r = bridgeEdgeLoops(em);
+    ok(r.faces === 0, '何も選んでいないのに動いた');
+    ok(/選択されていません/.test(r.reason), `理由が返らない (${r.reason})`);
   }
 }
 

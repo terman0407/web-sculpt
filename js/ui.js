@@ -1040,9 +1040,15 @@ export function buildUI(app) {
       onInput: (v) => { state.editInset = v; },
     });
     btnRow(ed, [
-      { label: 'インセット', title: '面の内側に一段小さい面を作ります（Blender の Shift+I 相当。面ごと）',
+      { label: 'インセット', title: '選択した面をまとめて 1 つの領域として縮めます（Blender の I）。'
+          + '隣り合う面の境目に帯ができません',
         onClick: () => app.tools.editModel('inset') },
-      { label: '面を細分化', title: '選択した面を 4 分割します',
+      { label: 'インセット（面ごと）', title: '面 1 枚ずつ縮めます（Blender の Shift+I）。'
+          + '隣り合う面を同時に選ぶと境目に帯ができます',
+        onClick: () => app.tools.editModel('insetFaces') },
+    ]);
+    btnRow(ed, [
+      { label: '面を細分化', cls: 'wide', title: '選択した面を 4 分割します',
         onClick: () => app.tools.editModel('subdivide') },
     ]);
     el('p', 'note', ed).textContent =
@@ -1060,6 +1066,17 @@ export function buildUI(app) {
       { label: '面の向きを反転', cls: 'wide', title: '選択した面の裏表を入れ替えます',
         onClick: () => app.tools.editApply('flip') },
     ]);
+
+    el('div', 'subhead', ed).textContent = '穴を繋ぐ（辺モードで使います）';
+    btnRow(ed, [
+      { label: 'ブリッジ', cls: 'wide',
+        title: '選択した 2 つの穴の縁を四角の帯で繋ぎます（Blender の Bridge Edge Loops）',
+        onClick: () => app.tools.editModel('bridge') },
+    ]);
+    el('p', 'note', ed).textContent =
+      '〔面を削除〕で穴を 2 つ開け、辺モードでその縁を両方選んでから押します。'
+      + '離れた穴どうしを繋ぐと筒になり、同じ形の上の 2 つを繋ぐと取っ手になります。'
+      + '頂点数が同じ縁どうしでだけ通ります。';
     el('p', 'note', ed).textContent =
       '選択した頂点を動かすには、〔トランスポーズ〕ではなくこの下の〔選択を動かす〕を使います。';
     btnRow(ed, [

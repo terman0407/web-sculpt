@@ -26,8 +26,8 @@ import {
   editMeshFromSculpt, editMeshToSculpt, pickVert, pickEdge, pickFace, boxSelect,
 } from './editmesh.js';
 import {
-  selectLoopOrRing, loopCut, extrudeSelectedFaces, insetSelectedFaces,
-  subdivideSelectedFaces, bevelSelectedEdges,
+  selectLoopOrRing, loopCut, extrudeSelectedFaces, insetSelectedFaces, insetRegion,
+  subdivideSelectedFaces, bevelSelectedEdges, bridgeEdgeLoops,
 } from './editops.js';
 
 /** 変形とマスク操作の既定パラメータ一式（state に置く） */
@@ -830,7 +830,8 @@ export class Tools {
 
   /**
    * モデリング操作（段 2 / 段 3）。
-   * op は 'loopSelect' | 'ringSelect' | 'loopCut' | 'extrude' | 'inset' | 'subdivide' | 'bevel'
+   * op は 'loopSelect' | 'ringSelect' | 'loopCut' | 'extrude' | 'inset' | 'insetFaces'
+   * | 'subdivide' | 'bevel' | 'bridge'
    */
   editModel(op) {
     if (!this.edit) return;
@@ -867,9 +868,17 @@ export class Tools {
       if (r.faces === 0) { this.toast('面が選択されていません'); return; }
       this.toast(`押し出し: ${r.faces} 面 / 側面 ${r.walls} 枚`);
     } else if (op === 'inset') {
+      const r = insetRegion(em, st.editInset || 0.2);
+      if (r.faces === 0) { this.toast(r.reason || '面が選択されていません', 5000); return; }
+      this.toast(`インセット（領域）: ${r.faces} 面 / 帯 ${r.band} 枚`);
+    } else if (op === 'insetFaces') {
       const r = insetSelectedFaces(em, st.editInset || 0.2);
       if (r.faces === 0) { this.toast('面が選択されていません'); return; }
-      this.toast(`インセット: ${r.faces} 面（面ごと）`);
+      this.toast(`インセット（面ごと）: ${r.faces} 面`);
+    } else if (op === 'bridge') {
+      const r = bridgeEdgeLoops(em);
+      if (r.faces === 0) { this.toast(r.reason || '辺が選択されていません', 6000); return; }
+      this.toast(`ブリッジ: 帯 ${r.faces} 枚で 2 つの穴を繋ぎました（${r.verts} 頂点ずつ）`, 4000);
     } else if (op === 'subdivide') {
       const r = subdivideSelectedFaces(em);
       if (r.faces === 0) { this.toast('面が選択されていません'); return; }

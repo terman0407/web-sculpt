@@ -256,6 +256,75 @@ export function loopCut(em, cuts = 1) {
 }
 
 /**
+ * 選択面の「隅」を、頂点ごと・扇ごとのまとまりに分ける。
+ *
+ * 隅 = （面, その面のループ中の 1 頂点）。faceVerts の添字がそのまま隅の識別子に
+ * なるので、番号を振り直す必要がない。
+ *
+ * 同じ頂点の隅どうしを、**選択領域の内側の辺をまたいで**繋ぐ（Union-Find）。
+ * こうすると「ある頂点のまわりで、選択面が辺を通って繋がっているかたまり」が
+ * 1 つのまとまりになる。領域が辺では繋がらず頂点だけで触れ合っているとき
+ * （砂時計形）は、同じ頂点にまとまりが 2 つできる。
+ *
+ * 押し出しと領域インセットは、どちらも「まとまりごとに新しい頂点を 1 個作る」。
+ * 頂点ごとに 1 個で済ませると、砂時計の腰のところで辺に面が 4 枚集まって
+ * 非多様体になる。
+ *
+ * @returns {{cid: Int32Array, cvert: Int32Array, nc: number, find: (x: number) => number}}
+ *   cid[faceVerts の添字] → 隅の番号（選択外は -1）、cvert[隅] → 頂点、
+ *   find(隅) → まとまりの代表
+ */
+function cornerGroups(em, sel, selSet) {
+  const cid = new Int32Array(em.faceVerts.length).fill(-1);
+  let nc = 0;
+  for (const f of sel) for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) cid[i] = nc++;
+  const cvert = new Int32Array(nc);
+  for (const f of sel) for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) cvert[cid[i]] = em.faceVerts[i];
+  const parent = new Int32Array(nc);
+  for (let c = 0; c < nc; c++) parent[c] = c;
+  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+
+  for (const f of sel) {
+    const s = em.faceStart[f], n = em.faceSize(f);
+    for (let k = 0; k < n; k++) {
+      const ia = s + k, ib = s + (k + 1) % n;
+      const a = em.faceVerts[ia], b = em.faceVerts[ib];
+      const e = edgeOf(em, a, b);
+      if (e < 0) continue;
+      const f0 = em.edgeFace[e * 2], f1 = em.edgeFace[e * 2 + 1];
+      const g = f0 === f ? f1 : f0;
+      if (g < 0 || !selSet.has(g)) continue;
+      const gs = em.faceStart[g], gn = em.faceSize(g);
+      for (let j = 0; j < gn; j++) {
+        const u = em.faceVerts[gs + j];
+        if (u !== a && u !== b) continue;
+        const x = find(cid[u === a ? ia : ib]), y = find(cid[gs + j]);
+        if (x !== y) parent[y] = x;
+      }
+    }
+  }
+  return { cid, cvert, nc, find };
+}
+
+/** 選択領域の縁の辺（反対側の面が選択されていない辺）を、面ごとの隅の対で返す */
+function regionRim(em, sel, selSet) {
+  const rim = [];
+  for (const f of sel) {
+    const s = em.faceStart[f], n = em.faceSize(f);
+    for (let k = 0; k < n; k++) {
+      const ia = s + k, ib = s + (k + 1) % n;
+      const e = edgeOf(em, em.faceVerts[ia], em.faceVerts[ib]);
+      if (e < 0) continue;
+      const f0 = em.edgeFace[e * 2], f1 = em.edgeFace[e * 2 + 1];
+      const other = f0 === f ? f1 : f0;
+      if (other >= 0 && selSet.has(other)) continue;
+      rim.push([f, ia, ib]);
+    }
+  }
+  return rim;
+}
+
+/**
  * 選択した面を押し出す。
  *
  * 選択領域の頂点を複製して選択面をそちらへ繋ぎ替え、領域の縁に側面の四角を張る。
@@ -284,35 +353,7 @@ export function extrudeSelectedFaces(em, offset = 0) {
   for (let f = 0; f < em.nf; f++) if (em.faceAlive[f] && em.selFace[f]) sel.push(f);
   if (sel.length === 0) return { faces: 0, verts: 0, walls: 0 };
   const selSet = new Set(sel);
-
-  // 面の隅（faceVerts の添字がそのまま隅の識別子になる）に番号を振る
-  const cid = new Int32Array(em.faceVerts.length).fill(-1);
-  let nc = 0;
-  for (const f of sel) for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) cid[i] = nc++;
-  const parent = new Int32Array(nc);
-  for (let c = 0; c < nc; c++) parent[c] = c;
-  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
-
-  // 選択領域の内側の辺をまたいで、両側の面の同じ頂点の隅を繋ぐ
-  for (const f of sel) {
-    const s = em.faceStart[f], n = em.faceSize(f);
-    for (let k = 0; k < n; k++) {
-      const ia = s + k, ib = s + (k + 1) % n;
-      const a = em.faceVerts[ia], b = em.faceVerts[ib];
-      const e = edgeOf(em, a, b);
-      if (e < 0) continue;
-      const f0 = em.edgeFace[e * 2], f1 = em.edgeFace[e * 2 + 1];
-      const g = f0 === f ? f1 : f0;
-      if (g < 0 || !selSet.has(g)) continue;
-      const gs = em.faceStart[g], gn = em.faceSize(g);
-      for (let j = 0; j < gn; j++) {
-        const u = em.faceVerts[gs + j];
-        if (u !== a && u !== b) continue;
-        const x = find(cid[u === a ? ia : ib]), y = find(cid[gs + j]);
-        if (x !== y) parent[y] = x;
-      }
-    }
-  }
+  const { cid, cvert, find } = cornerGroups(em, sel, selSet);
 
   // まとまりごとに 1 個ずつ複製する
   const P = Array.from(em.positions);
@@ -322,7 +363,7 @@ export function extrudeSelectedFaces(em, offset = 0) {
     for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) {
       const r = find(cid[i]);
       if (dup.has(r)) continue;
-      const v = em.faceVerts[i];
+      const v = cvert[r];
       dup.set(r, nv++);
       P.push(em.positions[v * 3], em.positions[v * 3 + 1], em.positions[v * 3 + 2]);
     }
@@ -367,22 +408,11 @@ export function extrudeSelectedFaces(em, offset = 0) {
     for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) loop.push(dupAt(i));
     add.push(loop);
   }
-  let walls = 0;
-  for (const f of sel) {
-    const s = em.faceStart[f], n = em.faceSize(f);
-    for (let k = 0; k < n; k++) {
-      const ia = s + k, ib = s + (k + 1) % n;
-      const a = em.faceVerts[ia], b = em.faceVerts[ib];
-      const e = edgeOf(em, a, b);
-      if (e < 0) continue;
-      // 領域の縁 = 反対側の面が選択されていない（または境界）
-      const f0 = em.edgeFace[e * 2], f1 = em.edgeFace[e * 2 + 1];
-      const other = f0 === f ? f1 : f0;
-      if (other >= 0 && selSet.has(other)) continue;
-      add.push([a, b, dupAt(ib), dupAt(ia)]);
-      walls++;
-    }
+  const rim = regionRim(em, sel, selSet);
+  for (const [, ia, ib] of rim) {
+    add.push([em.faceVerts[ia], em.faceVerts[ib], dupAt(ib), dupAt(ia)]);
   }
+  const walls = rim.length;
 
   em.positions = new Float32Array(P);
   em.nv = nv;
@@ -473,6 +503,101 @@ export function insetSelectedFaces(em, amount = 0.2) {
   em.syncSelection('face');
   em.version++; em.topoVersion++;
   return { faces: sel.length, verts: newVerts };
+}
+
+/**
+ * 選択した面を**領域まとめて**インセットする（Blender の I）。
+ *
+ * `insetSelectedFaces`（Shift+I 相当）が面 1 枚ずつ縮めるのに対して、こちらは
+ * 選択領域を 1 つの塊として扱う。**領域の縁の頂点だけ**を内側へ寄せた新頂点に
+ * 置き換え、領域の内側の頂点はそのまま使う。だから隣り合う面の境目に帯ができない。
+ *
+ * 内側へ寄せる向きは、その頂点に触っている**選択面の重心の平均**へ向かう方向。
+ * 面ごとインセットが「その面の重心へ寄せる」のと同じ考え方で、選択が 1 枚のときは
+ * 面ごとインセットと同じ結果になる。領域全体の重心へ寄せる方式は、大きい領域や
+ * 凹んだ領域で遠い側が中心へ吸い寄せられて潰れるので採らない。
+ *
+ * 巻き方は面ごとインセットと同じ (a, b, inner(b), inner(a))。
+ *
+ * 縁が無いとき（閉じた形を全部選んだとき）は、縮める先が無いので理由を出して断る。
+ *
+ * @param {number} amount 0..1。重心へ寄せる割合
+ */
+export function insetRegion(em, amount = 0.2) {
+  const t = Math.max(0.001, Math.min(0.95, amount));
+  const sel = [];
+  for (let f = 0; f < em.nf; f++) if (em.faceAlive[f] && em.selFace[f]) sel.push(f);
+  if (sel.length === 0) return { faces: 0, verts: 0, band: 0, reason: '面が選択されていません' };
+  const selSet = new Set(sel);
+  const { cid, cvert, find } = cornerGroups(em, sel, selSet);
+
+  const rim = regionRim(em, sel, selSet);
+  if (rim.length === 0) {
+    return {
+      faces: 0, verts: 0, band: 0,
+      reason: '選択領域に縁がありません（閉じた形を全部選ぶと内側へ寄せる先がありません）。'
+        + '一部だけ選んでから実行してください',
+    };
+  }
+  // 縁に触っているまとまりだけが新頂点を持つ。内側の頂点は動かさない
+  const needs = new Set();
+  for (const [, ia, ib] of rim) { needs.add(find(cid[ia])); needs.add(find(cid[ib])); }
+
+  // まとまりごとに「触っている選択面の重心の平均」を出す
+  const acc = new Map();
+  const c = new Float64Array(3);
+  for (const f of sel) {
+    em.faceCenter(f, c);
+    for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) {
+      const r = find(cid[i]);
+      if (!needs.has(r)) continue;
+      let a = acc.get(r);
+      if (!a) { a = [0, 0, 0, 0]; acc.set(r, a); }
+      a[0] += c[0]; a[1] += c[1]; a[2] += c[2]; a[3]++;
+    }
+  }
+  const P = Array.from(em.positions);
+  let nv = em.nv;
+  const inner = new Map();          // まとまりの代表 → 内側の新頂点
+  for (const [r, a] of acc) {
+    const i3 = cvert[r] * 3;
+    const inv = 1 / a[3];
+    const ox = em.positions[i3], oy = em.positions[i3 + 1], oz = em.positions[i3 + 2];
+    P.push(ox + (a[0] * inv - ox) * t, oy + (a[1] * inv - oy) * t, oz + (a[2] * inv - oz) * t);
+    inner.set(r, nv++);
+  }
+
+  const add = [];
+  for (const f of sel) {
+    const loop = [];
+    for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) {
+      const w = inner.get(find(cid[i]));
+      loop.push(w === undefined ? em.faceVerts[i] : w);
+    }
+    add.push(loop);
+  }
+  for (const [, ia, ib] of rim) {
+    add.push([em.faceVerts[ia], em.faceVerts[ib], inner.get(find(cid[ib])), inner.get(find(cid[ia]))]);
+  }
+
+  // _replaceFaces は「生き残り → add」の順に並べるので、縮めた面は先頭 sel.length 枚
+  let survivors = 0;
+  for (let f = 0; f < em.nf; f++) if (em.faceAlive[f] && !selSet.has(f)) survivors++;
+
+  em.positions = new Float32Array(P);
+  em.nv = nv;
+  em.selVert = new Uint8Array(nv);
+  em._replaceFaces(sel, add);
+  em.rebuild();
+  // 縮めた領域を選択にしておく（続けて押し出せば凹みになる）
+  em.clearSelection();
+  for (let i = 0; i < sel.length; i++) {
+    const f = survivors + i;
+    if (f < em.nf && em.faceAlive[f]) em.selFace[f] = 1;
+  }
+  em.syncSelection('face');
+  em.version++; em.topoVersion++;
+  return { faces: sel.length, verts: inner.size, band: rim.length, reason: '' };
 }
 
 /**
@@ -828,4 +953,196 @@ export function bevelSelectedEdges(em, amount = 0.2) {
   em.syncSelection('face');
   em.version++; em.topoVersion++;
   return { edges: bev.length, verts: newVerts, faces: bands, corners, refused, reason: '' };
+}
+
+// ---------------------------------------------------------------------------
+// ブリッジ（Bridge Edge Loops）
+//
+// **穴の縁（境界のループ）2 つ**を四角の帯で繋ぐ。面を消して開けた 2 つの穴を
+// 繋いで筒にする、離れた 2 つの形を繋ぐ、という使い方をする。
+//
+// 面の上を通る（境界でない）エッジループ同士のブリッジは扱わない。その場合は
+// 間の面をどう捨てるかを決める必要があり、選び方で結果が変わって黙って壊れやすい。
+// 「面を削除して穴を開けてからブリッジ」の手順なら、何が起きるか目で見て分かる。
+// ---------------------------------------------------------------------------
+
+/**
+ * 選択された境界辺を、頂点で繋いで閉じたループに分ける。
+ * どの頂点にもちょうど 2 本集まっていることを要求する（枝分かれは扱えない）。
+ */
+function selectedBoundaryLoops(em) {
+  const sel = [];
+  let interior = 0;
+  for (let e = 0; e < em.ne; e++) {
+    if (!em.selEdge[e]) continue;
+    if (em.edgeFace[e * 2 + 1] >= 0) { interior++; continue; }
+    sel.push(e);
+  }
+  if (sel.length === 0) return { loops: [], interior, reason: '' };
+
+  const at = new Map();
+  for (const e of sel) {
+    for (const v of [em.edgeA[e], em.edgeB[e]]) {
+      let a = at.get(v);
+      if (!a) { a = []; at.set(v, a); }
+      a.push(e);
+    }
+  }
+  for (const [v, a] of at) {
+    if (a.length !== 2) {
+      return {
+        loops: [], interior,
+        reason: `頂点 ${v} に選択された境界辺が ${a.length} 本集まっています`
+          + '（ループは 1 頂点につき 2 本でないと辿れません）',
+      };
+    }
+  }
+
+  const used = new Set();
+  const loops = [];
+  for (const e0 of sel) {
+    if (used.has(e0)) continue;
+    const verts = [];
+    let e = e0, v = em.edgeA[e0];
+    for (let guard = 0; guard <= sel.length; guard++) {
+      verts.push(v);
+      used.add(e);
+      const w = em.edgeA[e] === v ? em.edgeB[e] : em.edgeA[e];
+      const pair = at.get(w);
+      const nxt = pair[0] === e ? pair[1] : pair[0];
+      if (nxt === e0) break;          // 一周した
+      e = nxt; v = w;
+    }
+    if (verts.length >= 3) loops.push(verts);
+  }
+  return { loops, interior, reason: '' };
+}
+
+/**
+ * ループの並び順を「隣の面が辺を辿る向きと逆」に揃える。
+ *
+ * 辺を共有する 2 面は、その辺を必ず逆向きに辿る。だからループ側を隣の面と逆向きに
+ * 並べておけば、そのまま (a_i, a_i+1, ...) と書いた四角が隣の面と噛み合う。
+ * 巻き方が揃ったメッシュなら 1 本調べれば全体で成り立つ。
+ */
+function orientBoundaryLoop(em, verts) {
+  const e = edgeOf(em, verts[0], verts[1]);
+  if (e < 0) return verts;
+  const f = em.edgeFace[e * 2];
+  const s = em.faceStart[f], n = em.faceSize(f);
+  for (let k = 0; k < n; k++) {
+    if (em.faceVerts[s + k] === verts[0] && em.faceVerts[s + (k + 1) % n] === verts[1]) {
+      verts.reverse();                // 面と同じ向きだったので逆にする
+      break;
+    }
+  }
+  return verts;
+}
+
+/**
+ * 選択した 2 つの穴の縁を四角の帯で繋ぐ（Blender の Bridge Edge Loops）。
+ *
+ * 頂点数が同じ 2 つの閉じた境界ループを要求する。数が違うループを繋ぐには
+ * 三角で辻褄を合わせる必要があり、どこに寄せるかで結果が変わるので断る。
+ *
+ * 対応の付け方:
+ *   * 向きは巻き方から決める。両方のループを「隣の面と逆向き」に揃えたうえで、
+ *     B は A と**逆に**辿る。こうすると帯の四角が両側の面と噛み合う
+ *     （A 側の辺を A の並び順で、B 側の辺を B の並び順で辿ることになる）。
+ *   * 回転のずれ（どの頂点同士を繋ぐか）は距離で決める。捻れた帯にならないように
+ *     全対応の距離和が最小になるずれを選ぶ。ループが大きいときは総当りが重いので
+ *     a_0 に一番近い頂点を選ぶだけにする。
+ *
+ * 繋ぐと桁（縦の辺）が新しくできるが、そこに**既に 2 面が付いた辺がある**場合は
+ * 非多様体になるので断る（立方体の向かい合う 2 面を消して繋ぐと、側面の辺が
+ * ちょうどそれに当たる）。
+ */
+export function bridgeEdgeLoops(em) {
+  const { loops, interior, reason } = selectedBoundaryLoops(em);
+  if (reason) return { loops: 0, faces: 0, reason };
+  if (loops.length !== 2) {
+    return {
+      loops: loops.length, faces: 0,
+      reason: loops.length === 0
+        ? '穴の縁（境界の辺）が選択されていません。'
+          + (interior > 0
+            ? `選択されている ${interior} 本はどれも面に挟まれた辺です。`
+              + '〔面を削除〕で穴を開けてから、その縁を選んでください'
+            : '〔面を削除〕で穴を開けてから、その縁を選んでください')
+        : `境界のループが ${loops.length} 個あります。ブリッジは 2 個で使います`,
+    };
+  }
+  const [A, B] = loops;
+  const n = A.length;
+  if (B.length !== n) {
+    return {
+      loops: 2, faces: 0,
+      reason: `2 つのループの頂点数が違います（${n} と ${B.length}）。`
+        + '同じ数にしてから実行してください（ループカットや細分化で数を合わせられます）',
+    };
+  }
+  const shared = new Set(A);
+  for (const v of B) {
+    if (shared.has(v)) {
+      return { loops: 2, faces: 0, reason: `2 つのループが頂点 ${v} を共有しています。離れた縁同士で使います` };
+    }
+  }
+  orientBoundaryLoop(em, A);
+  orientBoundaryLoop(em, B);
+
+  // B は A と逆向きに辿る。partner(A[i]) = B[(s - i) mod n]
+  const p = em.positions;
+  const d2 = (a, b) => {
+    const i = a * 3, j = b * 3;
+    const dx = p[i] - p[j], dy = p[i + 1] - p[j + 1], dz = p[i + 2] - p[j + 2];
+    return dx * dx + dy * dy + dz * dz;
+  };
+  const mod = (x) => ((x % n) + n) % n;
+  let best = 0;
+  if (n <= 256) {
+    let bestSum = Infinity;
+    for (let s = 0; s < n; s++) {
+      let sum = 0;
+      for (let i = 0; i < n; i++) sum += d2(A[i], B[mod(s - i)]);
+      if (sum < bestSum) { bestSum = sum; best = s; }
+    }
+  } else {
+    let bestD = Infinity;
+    for (let j = 0; j < n; j++) {
+      const d = d2(A[0], B[j]);
+      if (d < bestD) { bestD = d; best = j; }
+    }
+  }
+
+  // 桁になる辺が既に埋まっていないか先に見る
+  for (let i = 0; i < n; i++) {
+    const e = edgeOf(em, A[i], B[mod(best - i)]);
+    if (e >= 0 && em.edgeFace[e * 2 + 1] >= 0) {
+      return {
+        loops: 2, faces: 0,
+        reason: `頂点 ${A[i]} と ${B[mod(best - i)]} の間には既に 2 面が付いた辺があります。`
+          + 'ここを繋ぐと非多様体になるので断ります（向かい合う 2 面を消した立方体などが'
+          + 'これに当たります。間に段を入れるか、離れた穴同士で使ってください）',
+      };
+    }
+  }
+
+  const add = [];
+  for (let i = 0; i < n; i++) {
+    add.push([A[i], A[(i + 1) % n], B[mod(best - i - 1)], B[mod(best - i)]]);
+  }
+  let survivors = 0;
+  for (let f = 0; f < em.nf; f++) if (em.faceAlive[f]) survivors++;
+
+  em._replaceFaces([], add);
+  em.rebuild();
+  // 張った帯を選択にしておく
+  em.clearSelection();
+  for (let i = 0; i < add.length; i++) {
+    const f = survivors + i;
+    if (f < em.nf && em.faceAlive[f]) em.selFace[f] = 1;
+  }
+  em.syncSelection('face');
+  em.version++; em.topoVersion++;
+  return { loops: 2, faces: add.length, verts: n, reason: '' };
 }
