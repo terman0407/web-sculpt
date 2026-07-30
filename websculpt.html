@@ -176,7 +176,45 @@ html, body {
 }
 
 /* ---------- 右パネル ---------- */
-.panel { padding: 4px 0 40px; }
+.panel { padding: 0 0 40px; }
+
+/* 右パネルのタブ。節が 20 以上あるので役割で分ける。
+   スクロールしても選んでいるタブが見えるように上に貼り付ける */
+.tabbar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 1px;
+  padding: 0;
+  background: var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.tab {
+  padding: 9px 2px;
+  background: var(--panel-2);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tab:hover { background: #1e222a; color: var(--text); }
+.tab.on {
+  background: var(--panel);
+  border-bottom-color: var(--accent);
+  color: var(--text);
+  font-weight: 600;
+}
+.tabpage { display: none; }
+.tabpage.show { display: block; }
+
 .section { border-bottom: 1px solid var(--line); }
 .sec-head {
   width: 100%;
@@ -984,6 +1022,37 @@ kbd {
   pointer-events: none;
   z-index: 12;
 }
+
+/* モーダル変形（G / R / S）中の表示。Blender のヘッダ行に相当する。
+   ビューポートの上端に出す（下端はブラシ情報とぶつかる） */
+.modalhud {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: #0b0e14e8;
+  box-shadow: 0 4px 18px #0009;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 14;
+}
+.modalhud.show { display: flex; }
+.modalhud .mh-axis { color: var(--accent-2); }
+.modalhud .mh-val {
+  font-variant-numeric: tabular-nums;
+  min-width: 5.5em;
+  text-align: right;
+  color: var(--accent);
+}
+.modalhud .mh-hint { color: var(--text-dim); font-size: 10.5px; }
 </style>
 </head>
 <body>
@@ -1029,6 +1098,8 @@ kbd {
       <!-- 編集モードの矩形選択。オーバーレイ線のバッファは編集メッシュの
            ワイヤ表示に使っているので、矩形は DOM で描く -->
       <div id="editbox" class="editbox"></div>
+      <!-- モーダル変形（G / R / S）中の表示。いまの操作・軸・量と操作方法を出す -->
+      <div id="modalhud" class="modalhud"></div>
       <div id="rpv" class="rpv">
         <div class="rpv-card">
           <div class="rpv-head">
@@ -12334,6 +12405,11 @@ function sections(shortcuts) {
         + '<b>Tab</b> で行き来し、<b>キー操作とマウスの割り当てもモードで変わります</b>'
         + '（キーの一覧は〔キー操作〕にモードごとに出ています）。',
         'インストールも保存先の指定も要りません。触った形はブラウザの中に自動保存されます。',
+        '右のパネルは<b>タブ</b>で分かれています。'
+        + '〔彫る〕ブラシとマスク / 〔トポロジ〕ポリゴンを増やす・作り直す / '
+        + '〔モデル〕ポリゴンモデリング / 〔ツール〕デフォームやレイヤーなど / '
+        + '〔表示〕マテリアルと視点 / 〔保存〕ブラウザ内保存。'
+        + 'モードを切り替えると、そのモードでよく使うタブへ自動で移ります。',
       ],
       steps: [
         '右のパネルの〔メッシュ〕で土台の形（球・箱・円柱など）を選びます。',
@@ -12521,7 +12597,9 @@ function sections(shortcuts) {
         'ビューポートを<b>クリック</b>で選択、<b>ドラッグ</b>で矩形選択。Shift で追加します。'
         + '<b>Alt+クリック</b>でエッジループになります。',
         '<b>E</b> 押し出し、<b>I</b> インセット、<b>Ctrl+B</b> ベベル、<b>Ctrl+R</b> ループカットで面を増やします。',
-        '<b>G</b> 移動 / <b>R</b> 回転 / <b>S</b> 拡大縮小でギズモを立てて、ハンドルを掴んで動かします。',
+        '<b>G</b> 移動 / <b>R</b> 回転 / <b>S</b> 拡大縮小。'
+        + '押した瞬間から<b>ボタンを押さずにマウスを動かすだけ</b>で変形します。'
+        + 'クリックか Enter で確定、Esc か右クリックで取り消しです。',
         '<b>Tab</b> でスカルプトへ戻ると、三角形化して彫刻メッシュへ書き戻します。',
       ],
       items: [
@@ -12557,10 +12635,16 @@ function sections(shortcuts) {
         + '（ZBrush の ZModeler と DynaMesh の関係と同じです）。',
         'モデリングモードとトランスポーズ・平面カットは同時に使えません（どれも左ドラッグを使うので）。'
         + 'モデリングへ入るとどちらも切れます。',
-        'ギズモは <b>G</b> 移動 / <b>R</b> 回転 / <b>S</b> 拡大縮小で、'
-        + '<b>そのキーのハンドルだけ</b>が出ます（Blender の G / R / S に当たります）。'
-        + 'ただし Blender のような「キーを押してマウスを動かすとすぐ動く」ではなく、'
-        + 'ハンドルを掴んでドラッグします。3 種類まとめて出すには <b>Shift+G</b> です。',
+        '<b>G</b> / <b>R</b> / <b>S</b> は Blender と同じ「押した瞬間から動く」方式です。'
+        + 'ボタンは押さなくてよく、マウスを動かすだけで移動 / 回転 / 拡大縮小します。'
+        + '画面の上に出る帯に、いまの操作・固定した軸・動いた量が出ます。'
+        + '<b>X</b> / <b>Y</b> / <b>Z</b> でその軸に固定（同じキーをもう一度で自由に戻る）、'
+        + '<b>Ctrl</b> を押している間はきりの良い値に刻み、'
+        + '変形中に <b>G</b> / <b>R</b> / <b>S</b> を押すと操作を乗り換えられます。'
+        + '<b>クリック</b>か <b>Enter</b> で確定、<b>Esc</b> か<b>右クリック</b>で取り消すと'
+        + '<b>1 ビットも違わない元の座標へ戻ります</b>。',
+        'ハンドルを掴んで軸をきっちり指定したいときは <b>Shift+G</b>（またはパネルの'
+        + '〔移動のギズモ〕など）でギズモを立てます。ZBrush のトランスポーズと同じ方式です。',
         '選択している辺は橙、形の縁（穴の境界）は赤で出ます。'
         + '赤が出ていたら閉じていない場所があるという意味です。',
         'ループカットは<b>1 回に 1 リングまで</b>です。直交する 2 リングは同じ四角を共有するので、'
@@ -12930,7 +13014,7 @@ function buildHelp(root, opt = {}) {
 
 /* ===== ui.js ===== */
 __M['ui.js'] = (function () {
-// ---------------------------------------------------------------------------
+﻿// ---------------------------------------------------------------------------
 // ui.js - DOM パネルの構築。state を直接読み書きし、必要な時だけ app にコールバック。
 // ---------------------------------------------------------------------------
 
@@ -13159,6 +13243,47 @@ function buildUI(app) {
   const statsEl = document.getElementById('stats');
   const toastEl = document.getElementById('toast');
 
+  // --- 右パネルをタブに分ける ---------------------------------------------
+  //
+  // 節が 20 以上あって縦一列だと、目的の項目までスクロールが遠い。役割ごとに
+  // 分けて、いっぺんに見えるのは 4〜6 節までに抑える。
+  //
+  // タブを跨いだ節も DOM には残す（display: none で隠すだけ）。作り直す方式にすると
+  // 節ごとに持っている参照（スライダーやリスト）を張り替える必要があって、
+  // syncFromState / refreshXxx が全部壊れる。
+  //
+  // モードを切り替えたときは、そのモードでいちばん使うタブへ自動で移る
+  // （スカルプト → 〔彫る〕、モデリング → 〔モデリング〕）。
+  const TABS = [
+    { id: 'sculpt', label: '彫る', title: 'ブラシ・アルファ・シンメトリ・マスク' },
+    { id: 'topo', label: 'トポロジ', title: '動的トポロジ・分割・ダイナメッシュ・リメッシュ' },
+    { id: 'model', label: 'モデル', title: 'ポリゴンモデリング（モデリングモード）' },
+    { id: 'tools', label: 'ツール', title: 'デフォーム・レイヤー・グループ・サブツールなど' },
+    { id: 'view', label: '表示', title: 'マテリアル・面の陰影・視点・レンダリング' },
+    { id: 'file', label: '保存', title: 'ブラウザ内保存' },
+  ];
+  const tabBar = el('div', 'tabbar', right);
+  const P = {};                       // タブ id → 節を入れる箱
+  const tabBtns = {};
+  let curTab = 'sculpt';
+  for (const t of TABS) {
+    const b = el('button', 'tab', tabBar);
+    b.textContent = t.label;
+    b.title = t.title;
+    b.onclick = () => setTab(t.id);
+    tabBtns[t.id] = b;
+    P[t.id] = el('div', 'tabpage', right);
+  }
+  function setTab(id) {
+    if (!P[id]) return;
+    curTab = id;
+    for (const t of TABS) {
+      tabBtns[t.id].classList.toggle('on', t.id === id);
+      P[t.id].classList.toggle('show', t.id === id);
+    }
+    right.scrollTop = 0;
+  }
+
   // --- 追加ツールのパネル用に持ち回る参照 --------------------------------
   // section() を作る順で参照が必要になるので、先に宣言しておく。
   let deformAxisSeg = null;
@@ -13305,7 +13430,7 @@ function buildUI(app) {
   ]);
 
   // --- 右：ブラシ設定 ---------------------------------------------------
-  const bs = section(right, 'ブラシ');
+  const bs = section(P.sculpt, 'ブラシ');
   const sRadius = slider(bs, {
     label: '半径 (画面px)', min: 6, max: 400, step: 1, value: state.radiusPx,
     fmt: v => v.toFixed(0), title: '[ / ] キーで変更',
@@ -13420,7 +13545,7 @@ function buildUI(app) {
   }
 
   // --- シンメトリ -------------------------------------------------------
-  const sy = section(right, 'シンメトリ');
+  const sy = section(P.sculpt, 'シンメトリ');
   const symRow = el('div', 'btnrow', sy);
   const symBtns = {};
   for (const ax of ['x', 'y', 'z']) {
@@ -13435,7 +13560,7 @@ function buildUI(app) {
   }
 
   // --- トポロジ ---------------------------------------------------------
-  const tp = section(right, '動的トポロジ');
+  const tp = section(P.topo, '動的トポロジ');
   const tDyn = toggle(tp, {
     label: 'ダイナミックトポロジ', value: state.dynTopo,
     title: 'ストローク中に自動で再分割する（G キー）',
@@ -13464,7 +13589,7 @@ function buildUI(app) {
   ]);
 
   // --- 分割レベル（SDiv） -----------------------------------------------
-  const sd = section(right, '分割レベル');
+  const sd = section(P.topo, '分割レベル');
   const lvlLabel = el('div', 'lvl', sd);
   btnRow(sd, [
     { label: '◀ 下げる', title: 'PageDown', onClick: () => app.levelDown() },
@@ -13490,7 +13615,7 @@ function buildUI(app) {
   }
 
   // --- ダイナメッシュ ---------------------------------------------------
-  const dm = section(right, 'ダイナメッシュ');
+  const dm = section(P.topo, 'ダイナメッシュ');
   const sDynaRes = slider(dm, {
     label: '解像度', min: 24, max: 320, step: 4, value: state.dynaResolution,
     fmt: v => v.toFixed(0),
@@ -13518,7 +13643,7 @@ function buildUI(app) {
     + 'ラフに形を出す → ダイナメッシュ → 彫り込む、を繰り返すのが基本の流れです。';
 
   // --- マスク -----------------------------------------------------------
-  const mk = section(right, 'マスク');
+  const mk = section(P.sculpt, 'マスク');
   btnRow(mk, [
     { label: 'クリア', onClick: () => app.clearMask() },
     { label: '反転', onClick: () => app.invertMask() },
@@ -13528,7 +13653,7 @@ function buildUI(app) {
   // --- サブツール ---------------------------------------------------------
   // ZBrush の SubTool 相当。1 つのシーンに独立したメッシュを複数置き、
   // 編集できるのはアクティブな 1 つだけ。
-  const su = section(right, 'サブツール');
+  const su = section(P.tools, 'サブツール');
   {
     subtoolList = listBox(su, {
       empty: '（サブツールなし）',
@@ -13575,7 +13700,7 @@ function buildUI(app) {
 
   // --- アルファ / ストローク ---------------------------------------------
   // ZBrush の Alpha パレットと Stroke パレット相当。
-  const al = section(right, 'アルファ / ストローク', true);
+  const al = section(P.sculpt, 'アルファ / ストローク', true);
   {
     el('div', 'subhead', al).textContent = 'ブラシアルファ（断面形状）';
     const grid = el('div', 'alphagrid', al);
@@ -13654,7 +13779,7 @@ function buildUI(app) {
   // ZBrush の Deformation パレット相当。スライダーは値を決めるだけで、
   // 「適用」を押した瞬間に 1 回だけ効く破壊的操作（Undo で戻す）。
   // onInput で毎回掛けるとドラッグ中に何十回も適用されてしまう。
-  const df = section(right, 'デフォーム', true);
+  const df = section(P.tools, 'デフォーム', true);
   {
     const axisRow = el('div', null, df);
     el('div', 'subhead', axisRow).textContent = '軸';
@@ -13688,7 +13813,7 @@ function buildUI(app) {
   }
 
   // --- マスクツール -----------------------------------------------------
-  const mkt = section(right, 'マスクツール', true);
+  const mkt = section(P.tools, 'マスクツール', true);
   {
     el('div', 'subhead', mkt).textContent = '合成方法';
     segmented(mkt, [
@@ -13735,7 +13860,7 @@ function buildUI(app) {
   }
 
   // --- スカルプトレイヤー -----------------------------------------------
-  const ly = section(right, 'スカルプトレイヤー', true);
+  const ly = section(P.tools, 'スカルプトレイヤー', true);
   {
     layerList = listBox(ly, {
       empty: '（レイヤーなし。「＋」で追加）',
@@ -13762,7 +13887,7 @@ function buildUI(app) {
   }
 
   // --- ポリグループ / 部分表示 ------------------------------------------
-  const pg = section(right, 'ポリグループ', true);
+  const pg = section(P.tools, 'ポリグループ', true);
   {
     el('div', 'subhead', pg).textContent = 'グループを作る';
     btnRow(pg, GROUP_METHODS.map((g) => ({
@@ -13804,7 +13929,7 @@ function buildUI(app) {
   }
 
   // --- モーフターゲット --------------------------------------------------
-  const mo = section(right, 'モーフターゲット', true);
+  const mo = section(P.tools, 'モーフターゲット', true);
   {
     btnRow(mo, [
       { label: '記憶', cls: 'primary', title: 'いまの形をモーフターゲットとして記憶する', onClick: () => app.tools.morphStore() },
@@ -13829,7 +13954,7 @@ function buildUI(app) {
   }
 
   // --- リメッシュ（ZRemesher 相当） ---------------------------------------
-  const rm = section(right, 'リメッシュ', true);
+  const rm = section(P.topo, 'リメッシュ');
   {
     remeshTrisSlider = slider(rm, {
       label: '目標ポリゴン数', min: 500, max: 300000, step: 500, value: state.remeshTris,
@@ -13889,7 +14014,7 @@ function buildUI(app) {
   // --- ポリゴンモデリング（モデリングモード）--------------------------------
   let modeSeg = null, editModeSeg = null, editInfoEl = null;
   {
-    const ed = section(right, 'ポリゴンモデリング', true);
+    const ed = section(P.model, 'ポリゴンモデリング');
     el('p', 'note', ed).textContent =
       'モードを切り替えると、キー操作とマウスの割り当ても変わります。'
       + 'スカルプトは ZBrush、モデリングは Blender に寄せてあります（Tab で行き来）。'
@@ -14012,20 +14137,24 @@ function buildUI(app) {
       + '離れた穴どうしを繋ぐと筒になり、同じ形の上の 2 つを繋ぐと取っ手になります。'
       + '頂点数が同じ縁どうしでだけ通ります。';
 
-    el('div', 'subhead', ed).textContent = '選択を動かす（G / R / S）';
-    el('p', 'note', ed).textContent =
-      '選択した頂点を動かすには、〔トランスポーズ〕ではなくこちらを使います。'
-      + 'キーで呼ぶと、そのキーのハンドルだけが出ます（Blender の G / R / S）。';
+    el('div', 'subhead', ed).textContent = '選択を動かす';
+    el('p', 'note', ed).innerHTML =
+      '<b>G</b> 移動 / <b>R</b> 回転 / <b>S</b> 拡大縮小を押すと、'
+      + 'ボタンを押さずに<b>マウスを動かすだけ</b>で変形します（Blender と同じ）。'
+      + 'クリックか Enter で確定、Esc か右クリックで取り消し、'
+      + '<b>X</b> / <b>Y</b> / <b>Z</b> で軸に固定、Ctrl できりの良い値に刻みます。';
     btnRow(ed, [
-      { label: '移動', title: '移動の矢印だけを出します（G）', onClick: () => app.editGizmo('move') },
-      { label: '回転', title: '回転のリングだけを出します（R）', onClick: () => app.editGizmo('rotate') },
-      { label: '拡大縮小', title: '拡大縮小のハンドルだけを出します（S）', onClick: () => app.editGizmo('scale') },
+      { label: '移動のギズモ', title: '移動の矢印だけを出します', onClick: () => app.editGizmo('move') },
+      { label: '回転のギズモ', title: '回転のリングだけを出します', onClick: () => app.editGizmo('rotate') },
     ]);
     btnRow(ed, [
-      { label: 'ギズモ（全部のハンドル）', cls: 'wide primary',
-        title: '移動・回転・拡大縮小のハンドルをまとめて出します（Shift+G。ZBrush のトランスポーズと同じ）',
+      { label: '拡縮のギズモ', title: '拡大縮小のハンドルだけを出します', onClick: () => app.editGizmo('scale') },
+      { label: '全部のハンドル', title: '移動・回転・拡大縮小のハンドルをまとめて出します（Shift+G）',
         onClick: () => app.editGizmo(null) },
     ]);
+    el('p', 'note', ed).textContent =
+      'ギズモはハンドルを掴んでドラッグする方式です（ZBrush のトランスポーズと同じ）。'
+      + '軸をきっちり指定したいときはこちらが向いています。';
   }
 
   // --- 仕上げレンダリング（BPR 相当）------------------------------------
@@ -14079,7 +14208,7 @@ function buildUI(app) {
   rpv.addEventListener('pointerdown', (e) => { if (e.target === rpv) rpvClose(); });
 
   {
-    const rd = section(right, 'レンダリング', true);
+    const rd = section(P.view, 'レンダリング', true);
     el('p', 'note', rd).textContent =
       '影・高品質 AO・輪郭線を入れて解像度を上げ、静止画として PNG に書き出します。'
       + 'ビューポートの表示は変わりません（押したときだけ別に描きます）。';
@@ -14168,7 +14297,7 @@ function buildUI(app) {
   }
 
   // --- クリップ / トリム -------------------------------------------------
-  const cl = section(right, 'クリップ / トリム', true);
+  const cl = section(P.tools, 'クリップ / トリム', true);
   {
     el('div', 'subhead', cl).textContent = 'ドラッグで切る';
     clipModeSeg = segmented(cl, [
@@ -14202,7 +14331,7 @@ function buildUI(app) {
   }
 
   // --- トランスポーズ ----------------------------------------------------
-  const tr = section(right, 'トランスポーズ', true);
+  const tr = section(P.tools, 'トランスポーズ', true);
   {
     transposeToggle = toggle(tr, {
       label: 'トランスポーズ（W キー）', value: false,
@@ -14221,7 +14350,7 @@ function buildUI(app) {
   }
 
   // --- マテリアル -------------------------------------------------------
-  const mt = section(right, 'マテリアル');
+  const mt = section(P.view, 'マテリアル');
   const matGrid = el('div', 'matgrid', mt);
   const matBtns = [];
   MATERIALS.forEach((m, i) => {
@@ -14260,7 +14389,7 @@ function buildUI(app) {
     '頂点を割らずに描画側で法線を切り替えるので、切り替えても形もポリゴン数も変わりません。';
 
   // --- ブラウザ内保存 ---------------------------------------------------
-  const sv = section(right, '保存（ブラウザ内）');
+  const sv = section(P.file, '保存（ブラウザ内）');
   const nameInput = el('input', 'text', sv);
   nameInput.type = 'text';
   nameInput.placeholder = 'スロット名（例: head-01）';
@@ -14325,7 +14454,7 @@ function buildUI(app) {
   }
 
   // --- 表示 -------------------------------------------------------------
-  const dp = section(right, '表示', true);
+  const dp = section(P.view, '表示');
   const tWire = toggle(dp, {
     label: 'ワイヤフレーム', value: state.wireframe, title: 'W キー',
     onChange: v => { state.wireframe = v; },
@@ -14383,31 +14512,8 @@ function buildUI(app) {
     { label: 'AO のみ', value: 1, title: 'SSAO の結果だけを表示' },
   ], state.debugView, (v) => { state.debugView = v; });
 
-  // --- ヘルプ -----------------------------------------------------------
-  const hp = section(right, '操作方法', true);
-  hp.innerHTML = `
-    <table class="keys">
-      <tr><td>左ドラッグ（モデル上）</td><td>彫刻</td></tr>
-      <tr><td>左ドラッグ（背景）/ 右ドラッグ</td><td>回転</td></tr>
-      <tr><td>中ドラッグ / Space+左</td><td>平行移動</td></tr>
-      <tr><td>ホイール</td><td>ズーム</td></tr>
-      <tr><td>Shift+ドラッグ</td><td>スムーズ</td></tr>
-      <tr><td>Alt+ドラッグ</td><td>ブラシ反転（掘る）</td></tr>
-      <tr><td>Ctrl+ドラッグ</td><td>マスクを塗る</td></tr>
-      <tr><td>Ctrl+Alt+ドラッグ</td><td>マスクを消す</td></tr>
-      <tr><td>1 … 0</td><td>ブラシ切り替え</td></tr>
-      <tr><td>[ ]</td><td>ブラシ半径</td></tr>
-      <tr><td>, .</td><td>ブラシ強さ</td></tr>
-      <tr><td>X / G / W / A / M</td><td>Xミラー / 動的トポロジ / ワイヤ / AO / マテリアル</td></tr>
-      <tr><td>D</td><td>ダイナメッシュ実行</td></tr>
-      <tr><td>L / B / H</td><td>レイジーマウス / バックフェイスマスク / グリッド</td></tr>
-      <tr><td>PageUp / PageDown</td><td>分割レベルを上げる / 下げる</td></tr>
-      <tr><td>F</td><td>モデル全体を表示</td></tr>
-      <tr><td>Ctrl+Z / Ctrl+Shift+Z</td><td>元に戻す / やり直し</td></tr>
-    </table>`;
-
   // --- 視点プリセット ----------------------------------------------------
-  const vw = section(right, '視点', true);
+  const vw = section(P.view, '視点');
   btnRow(vw, [
     { label: '正面', onClick: () => app.setView('front') },
     { label: '背面', onClick: () => app.setView('back') },
@@ -14418,6 +14524,13 @@ function buildUI(app) {
     { label: '上', onClick: () => app.setView('top') },
     { label: '下', onClick: () => app.setView('bottom') },
     { label: '全体表示 (F)', onClick: () => app.frameCamera() },
+  ]);
+  el('p', 'note', vw).textContent =
+    'テンキーでも切り替えられます（1 正面 / 3 右 / 7 上、Ctrl を足すと反対側）。'
+    + '4 / 6 / 8 / 2 で 15° ずつ回り、. で選択部分に寄ります。';
+  btnRow(vw, [
+    { label: '? 使い方を開く (F1)', cls: 'wide',
+      title: 'キー操作の一覧はこちら（モードごとに出ます）', onClick: () => help.toggle() },
   ]);
   btnRow(vw, [
     { label: '設定を初期化', title: '保存された UI 設定を消す', onClick: () => app.resetSettings() },
@@ -14478,7 +14591,23 @@ function buildUI(app) {
     if (h !== statHtml) { statsEl.innerHTML = h; statHtml = h; }
   }
 
+  // 節を作る順は「参照が要る順」で決まるので、見せたい順に並べ直す。
+  // appendChild はノードを動かすので、書いた順にそのまま並ぶ
+  const reorder = (page, titles) => {
+    for (const t of titles) {
+      const sec = [...page.children].find((c) => {
+        const h = c.querySelector('.sec-head');
+        return h && h.textContent.includes(t);
+      });
+      if (sec) page.appendChild(sec);
+    }
+  };
+  reorder(P.view, ['マテリアル', '表示', '視点', 'レンダリング']);
+  reorder(P.tools, ['サブツール', 'デフォーム', 'トランスポーズ', 'クリップ / トリム',
+    'マスクツール', 'スカルプトレイヤー', 'ポリグループ', 'モーフターゲット']);
+
   // 初回描画
+  setTab(state.mode === 'model' ? 'model' : 'sculpt');
   refreshLayers();
   refreshGroups();
   refreshMorph();
@@ -14493,6 +14622,9 @@ function buildUI(app) {
     closeHelp() { help.close(); },
     toggleHelp() { help.toggle(); },
     helpIsOpen() { return help.isOpen(); },
+    /** 右パネルのタブを切り替える */
+    setTab(id) { setTab(id); },
+    currentTab() { return curTab; },
     /** モードの表示を state / 編集メッシュに合わせる */
     refreshEdit() {
       if (modeSeg) modeSeg.set(state.mode);
@@ -15850,6 +15982,16 @@ const { RING_STRIDE, DIRTY_SHIFT } = __M['mesh.js'];
 const AXIS_COLOR = [[0.94, 0.29, 0.31], [0.44, 0.82, 0.27], [0.31, 0.53, 0.97]];
 const CENTER_COLOR = [0.87, 0.88, 0.92];
 
+/**
+ * ドラッグできる種別。
+ *
+ * ハンドルとして**線を描くのは前の 4 つだけ**で、うしろの 2 つは画面に対して
+ * 自由に動かすためのもの（Blender の G / R をキーだけで始めるモーダル変形に使う）。
+ * どちらもドラッグ開始時の視線で平面を固定する（毎フレーム取り直すと透視投影で
+ * 平面がわずかに傾き、量がふらつく）。
+ */
+const DRAG_KINDS = new Set(['move', 'rotate', 'scale', 'uniform', 'moveView', 'rotateView']);
+
 const RING_SEGS = 48;        // 回転リングの描画分割数
 const HIT_RING_SEGS = 32;    // ヒットテスト用の分割数。弦と弧のずれは半径の 0.5% で
                              // 許容距離よりずっと小さいので描画より粗くてよい
@@ -16009,8 +16151,11 @@ class Transpose {
     this._axis = -1;
     this._dragPivot = new Float32Array(3);   // 開始時のピボット（変換の中心）
     this._dragBasis = new Float32Array(9);   // 開始時の基底（変換の軸）
-    this._planeN = new Float32Array(3);      // uniform の参照平面法線（視線で固定）
+    this._planeN = new Float32Array(3);      // uniform / moveView / rotateView の参照平面法線（視線で固定）
     this._refDir = new Float32Array(3);      // uniform の参照方向（符号付き半径用）
+    this._moveRef = new Float32Array(3);     // moveView の掴んだ点（ピボット基準）
+    this._planeU = new Float32Array(3);      // rotateView の平面内基底（u × v = n）
+    this._planeV = new Float32Array(3);
     this._planeScratch = new Float64Array(3);
     this._s0 = 0;         // move: 軸上の開始位置
     this._sCur = 0;       // move: 直近の軸上位置（退化フレームで前値を保つ）
@@ -16437,7 +16582,7 @@ class Transpose {
     if (!this._active || !hit || this._count === 0) return false;
     if (!this.validate(mesh)) return false;
     const kind = hit.kind;
-    if (kind !== 'move' && kind !== 'rotate' && kind !== 'scale' && kind !== 'uniform') return false;
+    if (!DRAG_KINDS.has(kind)) return false;
     let dx = rayDir[0], dy = rayDir[1], dz = rayDir[2];
     const dl = Math.hypot(dx, dy, dz);
     if (dl < 1e-20) return false;
@@ -16456,7 +16601,9 @@ class Transpose {
     this._buildNormalSet(mesh);
 
     this._kind = kind;
-    this._axis = kind === 'uniform' ? -1 : (hit.axis | 0);
+    // 画面基準の 3 種は軸を持たない（-1）。軸ありのハンドルだけ hit.axis を使う
+    this._axis = (kind === 'uniform' || kind === 'moveView' || kind === 'rotateView')
+      ? -1 : (hit.axis | 0);
     this._dragPivot.set(this._pivot);
     this._dragBasis.set(this._basis);
     this._factor = 1;
@@ -16493,6 +16640,19 @@ class Transpose {
           this._u0 = cu / r; this._v0 = cv / r; this._r0 = r; this._refOk = true;
         }
       }
+    } else if (kind === 'moveView') {
+      // 画面に平行な平面上で自由に動かす。掴んだ点を控えて差分で動かす
+      this._planeN[0] = -dx; this._planeN[1] = -dy; this._planeN[2] = -dz;
+      const q = this._planeHit(ox, oy, oz, dx, dy, dz,
+        this._planeN[0], this._planeN[1], this._planeN[2]);
+      if (q) { this._moveRef.set(q); this._refOk = true; }
+    } else if (kind === 'rotateView') {
+      // 視線を回転軸にする。平面内の基底は u × v = n になるように作る
+      // （そうすると測った角がロドリゲス回転の符号とそのまま一致する）
+      this._planeN[0] = -dx; this._planeN[1] = -dy; this._planeN[2] = -dz;
+      this._makePlaneBasis();
+      const a = this._viewAngle(ox, oy, oz, dx, dy, dz);
+      if (Number.isFinite(a)) { this._angPrev = a; this._refOk = true; }
     } else {
       // uniform: 視線に垂直な平面を開始時の向きで固定する。毎フレーム視線から
       // 取り直すと透視投影では法線がわずかに変わり、倍率がふらつく。
@@ -16508,6 +16668,37 @@ class Transpose {
       }
     }
     return true;
+  }
+
+  /** _planeN を法線とする平面の基底 (u, v) を作る。u × v = n になる向きに揃える */
+  _makePlaneBasis() {
+    const n = this._planeN;
+    const ax = Math.abs(n[0]), ay = Math.abs(n[1]), az = Math.abs(n[2]);
+    // n といちばん平行でない軸から作る（外積が潰れないように）
+    let tx = 0, ty = 0, tz = 0;
+    if (ax <= ay && ax <= az) tx = 1; else if (ay <= az) ty = 1; else tz = 1;
+    // u = normalize(t × n)、v = n × u  →  u × v = n
+    let ux = ty * n[2] - tz * n[1];
+    let uy = tz * n[0] - tx * n[2];
+    let uz = tx * n[1] - ty * n[0];
+    const ul = Math.hypot(ux, uy, uz) || 1;
+    ux /= ul; uy /= ul; uz /= ul;
+    this._planeU[0] = ux; this._planeU[1] = uy; this._planeU[2] = uz;
+    this._planeV[0] = n[1] * uz - n[2] * uy;
+    this._planeV[1] = n[2] * ux - n[0] * uz;
+    this._planeV[2] = n[0] * uy - n[1] * ux;
+  }
+
+  /** 視線を法線とする平面上での角度（rotateView 用） */
+  _viewAngle(ox, oy, oz, dx, dy, dz) {
+    const n = this._planeN;
+    const q = this._planeHit(ox, oy, oz, dx, dy, dz, n[0], n[1], n[2]);
+    if (!q) return NaN;
+    const U = this._planeU, V = this._planeV;
+    const cu = q[0] * U[0] + q[1] * U[1] + q[2] * U[2];
+    const cv = q[0] * V[0] + q[1] * V[1] + q[2] * V[2];
+    if (Math.abs(cu) + Math.abs(cv) < 1e-12) return NaN;
+    return Math.atan2(cv, cu);
   }
 
   /**
@@ -16555,8 +16746,33 @@ class Transpose {
       this._pivot[1] = py + ay * off;
       this._pivot[2] = pz + az * off;
       res.offset = off;
-    } else if (this._kind === 'rotate') {
-      const a = this._planeAngle(ox, oy, oz, dx, dy, dz, this._axis);
+    } else if (this._kind === 'moveView') {
+      const n = this._planeN;
+      let offx = 0, offy = 0, offz = 0;
+      if (this._refOk) {
+        const q = this._planeHit(ox, oy, oz, dx, dy, dz, n[0], n[1], n[2]);
+        if (q) {
+          offx = q[0] - this._moveRef[0];
+          offy = q[1] - this._moveRef[1];
+          offz = q[2] - this._moveRef[2];
+        }
+      }
+      if (snap) {
+        const step = Math.max(1e-9, this._lastScale * SNAP_MOVE_FRAC);
+        offx = Math.round(offx / step) * step;
+        offy = Math.round(offy / step) * step;
+        offz = Math.round(offz / step) * step;
+      }
+      changed = this._applyTranslate(mesh, offx, offy, offz);
+      this._pivot[0] = px + offx;
+      this._pivot[1] = py + offy;
+      this._pivot[2] = pz + offz;
+      res.offset = Math.hypot(offx, offy, offz);
+    } else if (this._kind === 'rotate' || this._kind === 'rotateView') {
+      const view = this._kind === 'rotateView';
+      const a = view
+        ? this._viewAngle(ox, oy, oz, dx, dy, dz)
+        : this._planeAngle(ox, oy, oz, dx, dy, dz, this._axis);
       if (Number.isFinite(a)) {
         if (!this._refOk) { this._angPrev = a; this._refOk = true; }
         // 差分を -π..π に畳んで足すことで、1 回転を超えても連続に増える
@@ -16568,7 +16784,12 @@ class Transpose {
       }
       let ang = this._angAcc;
       if (snap) ang = Math.round(ang / SNAP_ANGLE) * SNAP_ANGLE;
-      this._rotationDelta(B[i3], B[i3 + 1], B[i3 + 2], ang);
+      if (view) {
+        const n = this._planeN;
+        this._rotationDelta(n[0], n[1], n[2], ang);
+      } else {
+        this._rotationDelta(B[i3], B[i3 + 1], B[i3 + 2], ang);
+      }
       changed = this._applyLinear(mesh);
       this._rotateBasis();
       res.degrees = ang * 180 / Math.PI;
@@ -22221,6 +22442,31 @@ const app = {
   fillColor() { sculptor.fillColor(state.paintColor); ui.toast('全体を塗りました'); },
   setRenderScale(v) { renderer.setRenderScale(v); },
   setView(name) { camera.setView(name); ui.toast('視点: ' + name); },
+  /**
+   * 選択している部分に寄る（Blender のテンキー「.」= View Selected）。
+   * モデリングモードで選択があるときだけ選択の範囲に寄り、それ以外は全体表示。
+   */
+  frameSelection() {
+    const em = state.mode === 'model' ? tools.edit : null;
+    if (!em || em.selectionCount().verts === 0) { frameCamera(); ui.toast('全体表示'); return; }
+    let lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    let n = 0;
+    for (let v = 0; v < em.nv; v++) {
+      if (!em.selVert[v]) continue;
+      n++;
+      for (let e = 0; e < 3; e++) {
+        const p = em.positions[v * 3 + e];
+        if (p < lo[e]) lo[e] = p;
+        if (p > hi[e]) hi[e] = p;
+      }
+    }
+    if (n === 0) { frameCamera(); return; }
+    const r = Math.max(1e-3, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 0.5);
+    V3.set(camera.target, (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2);
+    // 画角に収まる距離。少し余白を持たせる
+    camera.distance = r / Math.tan(camera.fov * 0.5) * 1.6;
+    ui.toast(`選択 ${n.toLocaleString()} 頂点に寄りました`);
+  },
 
   // --- 分割レベル（SDiv） ----------------------------------------------
   divide() {
@@ -22397,6 +22643,8 @@ const app = {
     if (busy) return;
     const want = mode === 'model' ? 'model' : 'sculpt';
     if (want === state.mode) return;
+    // 変形を掴んだままモードを跨がせない（確定しておく）
+    if (modal.on) modalConfirm();
     if (want === 'model') {
       // モデリングとトランスポーズ / 平面カットは同時に使えない（どれも
       // 左ドラッグを取り合う）
@@ -22412,6 +22660,8 @@ const app = {
     }
     ui.syncFromState();
     if (ui.refreshEdit) ui.refreshEdit();
+    // そのモードでいちばん使うタブへ移す（探し回らずに済むように）
+    if (ui.setTab) ui.setTab(state.mode === 'model' ? 'model' : 'sculpt');
     ui.toast(state.mode === 'model'
       ? 'モデリングモード（Blender 準拠のキー操作）— Tab でスカルプトへ戻ります'
       : 'スカルプトモード（ZBrush 準拠のキー操作）— Tab でモデリングへ', 3200);
@@ -22881,6 +23131,184 @@ function updateGizmoHover(cssX, cssY) {
   tools.gizmoDrawHandles(gizmoScale, gizmoHover);
 }
 
+// ---------------------------------------------------------------------------
+// モーダル変形（Blender の G / R / S）
+//
+// キーを押した瞬間に始まり、**ボタンを押さずにマウスを動かすだけ**で変形して、
+// クリックか Enter で確定、Esc か右クリックで取り消す。Blender の触り方そのまま。
+//
+// 中身はトランスポーズのギズモをハンドル無しで掴んでいるだけ。ギズモは
+// 「開始時の座標からの絶対変換」で書く作りなので、毎フレーム同じ計算をしても
+// 誤差が溜まらないし、取り消しはビット単位で元へ戻る。
+//
+// X / Y / Z で軸に固定できる。同じキーをもう一度押すと自由に戻る。
+// 軸を変えるときは cancelDrag で元へ戻してから、いまのカーソル位置で掴み直す
+// （そうしないと「前の軸で動かしたぶん」が残って二重に効く）。
+// ---------------------------------------------------------------------------
+const modal = {
+  on: false,
+  op: 'move',       // 'move' | 'rotate' | 'scale'
+  axis: -1,         // -1 自由 / 0 X / 1 Y / 2 Z
+  hudEl: null,
+};
+
+/** op と軸から、ギズモのドラッグ種別を決める */
+function modalKind(op, axis) {
+  if (axis < 0) return op === 'move' ? 'moveView' : (op === 'rotate' ? 'rotateView' : 'uniform');
+  return op;                          // 'move' | 'rotate' | 'scale' は軸ありの種別
+}
+
+function modalHud() {
+  if (!modal.hudEl) modal.hudEl = document.getElementById('modalhud');
+  return modal.hudEl;
+}
+
+const AXIS_JP = ['X', 'Y', 'Z'];
+const MODAL_JP = { move: '移動', rotate: '回転', scale: '拡大縮小' };
+
+function modalShowHud(res) {
+  const el = modalHud();
+  if (!el) return;
+  const axis = modal.axis < 0 ? '自由' : `${AXIS_JP[modal.axis]} 軸`;
+  let amount = '';
+  if (res) {
+    if (modal.op === 'move') amount = `${res.offset >= 0 ? '' : '-'}${Math.abs(res.offset).toFixed(3)}`;
+    else if (modal.op === 'rotate') amount = `${res.degrees.toFixed(1)}°`;
+    else amount = `×${res.factor.toFixed(3)}`;
+  }
+  el.innerHTML = `<b>${MODAL_JP[modal.op]}</b><span class="mh-axis">${axis}</span>`
+    + `<span class="mh-val">${amount}</span>`
+    + '<span class="mh-hint">X/Y/Z 軸固定・Ctrl 刻み・クリック/Enter 確定・Esc 取り消し</span>';
+  el.classList.add('show');
+}
+
+function modalHideHud() {
+  const el = modalHud();
+  if (el) el.classList.remove('show');
+}
+
+/** いまのカーソル位置で掴み直す。軸を変えたときにも使う */
+function modalGrab() {
+  screenRay(ptr.x, ptr.y);
+  return tools.gizmo.beginDrag(mesh, { kind: modalKind(modal.op, modal.axis), axis: modal.axis },
+    rayO, rayD);
+}
+
+/**
+ * モーダル変形を始める。選択が無いときや掴めないときは何もしない。
+ * @param {'move'|'rotate'|'scale'} op
+ */
+function modalBegin(op) {
+  if (busy || state.mode !== 'model' || !tools.edit) { ui.toast('先にモデリングモードへ入ります'); return; }
+  if (modal.on) modalCancel();
+  const em = tools.edit;
+  const sel = em.selectionCount();
+  if (sel.verts === 0) { ui.toast('頂点が選択されていません'); return; }
+  if (mesh.nv !== em.nv) tools.editRefreshDisplay();
+  // 選択をマスクへ写してギズモの領域にする（ギズモは mask 0 の頂点を動かす規約）
+  for (let v = 0; v < mesh.nv; v++) mesh.mask[v] = em.selVert[v] ? 0 : 1;
+  mesh.markAllDirty();
+  if (!tools.gizmoActivate()) { ui.toast('動かせる頂点がありません'); return; }
+  // ハンドルは描かない（Blender の G / R / S は線を出さない）。
+  // オーバーレイ線は編集メッシュのワイヤに使うので、こちらを描き直しておく
+  tools.editSyncOverlay();
+  modal.op = op;
+  modal.axis = -1;
+  modal.ctrl = false;
+  if (!modalGrab()) { ui.toast('掴めませんでした'); return; }
+  tools.gizmoBeginRecord();
+  modal.on = true;
+  modalShowHud(null);
+}
+
+/** 軸固定を切り替える。同じ軸をもう一度なら自由に戻す */
+function modalSetAxis(axis) {
+  if (!modal.on) return;
+  const next = modal.axis === axis ? -1 : axis;
+  // いまの変形を取り消してから掴み直す（前の軸のぶんを残さない）
+  tools.gizmo.cancelDrag(mesh);
+  modal.axis = next;
+  if (!modalGrab()) { modalCancel(); return; }
+  modalApply();
+}
+
+/** カーソルの位置で変形を作り直す */
+function modalApply() {
+  if (!modal.on) return;
+  screenRay(ptr.x, ptr.y);
+  const res = tools.gizmo.updateDrag(mesh, rayO, rayD, { snap: modal.ctrl, normals: true });
+  modalWriteBack();
+  modalShowHud(res);
+}
+
+/** 動かした結果を編集メッシュへ写す（頂点番号は 1:1） */
+function modalWriteBack() {
+  if (tools.edit && tools.edit.nv === mesh.nv) {
+    tools.edit.positions.set(mesh.positions.subarray(0, mesh.nv * 3));
+    tools.edit.version++;
+    tools.editSyncOverlay();
+  }
+}
+
+function modalFinish(commit) {
+  if (!modal.on) return;
+  modal.on = false;
+  modalHideHud();
+  const r = commit ? tools.gizmo.endDrag(mesh) : tools.gizmo.cancelDrag(mesh);
+  tools.gizmoEndRecord();
+  modalWriteBack();
+  if (commit && r.changed > 0) {
+    sculptor.hoverSeed = -1;
+    sculptor.dropPendingCurvature();
+    mesh.computeAllCurvature();
+    sculptor.history.commit(mesh);
+    scheduleAutosave();
+    ui.toast(`${MODAL_JP[modal.op]}: ${r.changed.toLocaleString()} 頂点`);
+  } else if (!commit) {
+    ui.toast(`${MODAL_JP[modal.op]}を取り消しました`);
+  }
+  tools.gizmoDeactivate();
+  // gizmoDeactivate はオーバーレイ線を消すので、編集メッシュのワイヤを描き直す
+  tools.editSyncOverlay();
+  if (ui.refreshEdit) ui.refreshEdit();
+}
+
+const modalConfirm = () => modalFinish(true);
+const modalCancel = () => modalFinish(false);
+
+/**
+ * モーダル変形中のキー。掴んでいる間はここが全部のキーを受け取る
+ * （変形中に D でダイナメッシュが走ったりしないように）。
+ * @returns {boolean} 受け取ったか
+ */
+function modalKey(e) {
+  if (!modal.on) return false;
+  modal.ctrl = e.ctrlKey || e.metaKey;
+  const c = e.code;
+  if (c === 'Escape') { modalCancel(); return true; }
+  if (c === 'Enter' || c === 'NumpadEnter' || c === 'Space') { modalConfirm(); return true; }
+  if (c === 'KeyX') { modalSetAxis(0); return true; }
+  if (c === 'KeyY') { modalSetAxis(1); return true; }
+  if (c === 'KeyZ') { modalSetAxis(2); return true; }
+  // G / R / S で種類を乗り換える（Blender と同じで、押し直すと切り替わる）
+  if (c === 'KeyG' || c === 'KeyR' || c === 'KeyS') {
+    const op = c === 'KeyG' ? 'move' : (c === 'KeyR' ? 'rotate' : 'scale');
+    if (op !== modal.op) {
+      tools.gizmo.cancelDrag(mesh);
+      modal.op = op;
+      modal.axis = -1;
+      if (!modalGrab()) { modalCancel(); return true; }
+      modalApply();
+    }
+    return true;
+  }
+  if (c === 'ControlLeft' || c === 'ControlRight' || c === 'MetaLeft' || c === 'MetaRight') {
+    modalApply();
+    return true;
+  }
+  return true;         // 変形中は他のキーを通さない
+}
+
 // --- 平面カット（クリップ / トリム / スライス） -----------------------------
 // ドラッグの始点と終点をワールドへ落とし、その 2 点と視線方向で平面を作る。
 // ZBrush の ClipCurve と同じ操作感で、線の表側が残る。
@@ -23073,16 +23501,27 @@ const SHORTCUTS = [
   { keys: 'Ctrl+Minus', hidden: true, modes: ['model'], code: 'Minus', ctrl: true, prevent: true,
     run: () => tools.editSelect('shrink') },
 
-  // --- ギズモ（モデリング）---
-  // Blender の G / R / S。ギズモは移動・回転・拡縮のハンドルを一度に出すので、
-  // どのキーで呼んだかで出すハンドルを絞る（そうしないと 3 つのキーが同じ意味になる）。
-  { group: 'ギズモ', modes: ['model'], keys: 'G', jp: '選択を移動（ギズモ）', code: 'KeyG',
-    run: () => app.editGizmo('move') },
-  { group: 'ギズモ', modes: ['model'], keys: 'R', jp: '選択を回転（ギズモ）', code: 'KeyR',
-    run: () => app.editGizmo('rotate') },
-  { group: 'ギズモ', modes: ['model'], keys: 'S', jp: '選択を拡大縮小（ギズモ）', code: 'KeyS',
-    run: () => app.editGizmo('scale') },
-  { group: 'ギズモ', modes: ['model'], keys: 'Shift+G', jp: 'ハンドルを全部出す（ZBrush と同じ）',
+  // --- 変形（モデリング）---
+  // Blender の G / R / S。押した瞬間から**ボタンを押さずにマウスで動く**。
+  // クリックか Enter で確定、Esc か右クリックで取り消し、X / Y / Z で軸固定。
+  { group: '変形', modes: ['model'], keys: 'G', jp: '選択を動かす（マウスで自由に）', code: 'KeyG',
+    run: () => modalBegin('move') },
+  { group: '変形', modes: ['model'], keys: 'R', jp: '選択を回す', code: 'KeyR',
+    run: () => modalBegin('rotate') },
+  { group: '変形', modes: ['model'], keys: 'S', jp: '選択を拡大縮小', code: 'KeyS',
+    run: () => modalBegin('scale') },
+  // 変形中のキーは modalKey が先に受け取るので、ここは表に出すためだけの項目
+  { group: '変形', modes: ['model'], keys: 'X / Y / Z', displayOnly: true,
+    jp: '（変形中）その軸に固定する。もう一度押すと自由に戻る' },
+  { group: '変形', modes: ['model'], keys: 'クリック / Enter', displayOnly: true,
+    jp: '（変形中）確定する' },
+  { group: '変形', modes: ['model'], keys: 'Esc / 右クリック', displayOnly: true,
+    jp: '（変形中）取り消して元に戻す' },
+  { group: '変形', modes: ['model'], keys: 'Ctrl', displayOnly: true,
+    jp: '（変形中）押している間はきりの良い値に刻む' },
+  { group: '変形', modes: ['model'], keys: 'G / R / S', displayOnly: true,
+    jp: '（変形中）移動 / 回転 / 拡大縮小へ乗り換える' },
+  { group: '変形', modes: ['model'], keys: 'Shift+G', jp: 'ギズモを立てる（ハンドルを掴んで動かす）',
     code: 'KeyG', shift: true, run: () => app.editGizmo(null) },
 
   // --- 面を作る（モデリング）---
@@ -23122,6 +23561,32 @@ const SHORTCUTS = [
     run: () => { state.wireframe = !state.wireframe; ui.syncFromState(); } },
   { group: '表示', keys: 'H', jp: '床のグリッド', code: 'KeyH',
     run: () => { state.grid = !state.grid; ui.syncFromState(); ui.toast('フロアグリッド: ' + (state.grid ? 'ON' : 'OFF')); } },
+
+  // --- 視点（共通。Blender のテンキーに合わせる）---
+  { group: '視点', keys: 'テンキー 1 / 3 / 7', jp: '正面 / 右 / 上（Ctrl を足すと反対側）',
+    match: (e) => !e.shiftKey && !e.altKey && /^Numpad[137]$/.test(e.code),
+    prevent: true,
+    run: (e) => {
+      const back = e.ctrlKey || e.metaKey;
+      const at = { Numpad1: back ? 'back' : 'front', Numpad3: back ? 'left' : 'right',
+        Numpad7: back ? 'bottom' : 'top' }[e.code];
+      camera.setView(at);
+      ui.toast('視点: ' + { front: '正面', back: '背面', right: '右', left: '左', top: '上', bottom: '下' }[at]);
+    } },
+  { group: '視点', keys: 'テンキー 4 / 6 / 8 / 2', jp: '15° ずつ回す',
+    match: (e) => !e.ctrlKey && !e.metaKey && !e.altKey && /^Numpad[4682]$/.test(e.code),
+    prevent: true,
+    run: (e) => {
+      // orbit は画面 px で受けるので、15° 相当の px に換算して渡す（0.0075 rad/px）
+      const step = (15 * Math.PI / 180) / 0.0075;
+      const d = { Numpad4: [-step, 0], Numpad6: [step, 0], Numpad8: [0, -step], Numpad2: [0, step] }[e.code];
+      camera.invertOrbitY = state.invertOrbitY;
+      camera.orbit(d[0], d[1]);
+    } },
+  { group: '視点', keys: 'テンキー .', jp: '選択部分に寄る（モデリング）/ 全体表示',
+    code: 'NumpadDecimal', prevent: true, run: () => app.frameSelection() },
+  { group: '視点', keys: 'Home', jp: '全体が入るように視点を戻す', code: 'Home', prevent: true,
+    run: () => { frameCamera(); ui.toast('全体表示'); } },
 
   // --- ヘルプ（共通）---
   { group: 'ヘルプ', keys: 'F1 または ?', jp: '使い方を開く / 閉じる', code: 'F1', prevent: true,
@@ -23237,6 +23702,13 @@ function bindInput() {
     // 彫り始められる。その状態で結果を setGeometry すると、進行中のストロークが
     // 別のトポロジを掴んだままになる。
     if (busy) { e.preventDefault(); return; }
+    // モーダル変形中はクリックで確定 / 右クリックで取り消し（Blender と同じ）。
+    // 選択やブラシへは流さない
+    if (modal.on) {
+      e.preventDefault();
+      if (e.button === 2) modalCancel(); else modalConfirm();
+      return;
+    }
     canvas.setPointerCapture(e.pointerId);
     const r = canvas.getBoundingClientRect();
     ptr.x = e.clientX - r.left; ptr.y = e.clientY - r.top;
@@ -23306,6 +23778,12 @@ function bindInput() {
     if (e.pointerType === 'pen') {
       ptr.isPen = true;
       ptr.pressure = e.pressure || ptr.pressure;
+    }
+    if (modal.on) {
+      // ボタンを押していなくても動く（Blender の G / R / S と同じ）
+      modal.ctrl = e.ctrlKey || e.metaKey;
+      modalApply();
+      return;
     }
     if (ptr.mode === 'gizmo') {
       screenRay(ptr.x, ptr.y);
@@ -23378,11 +23856,16 @@ function bindInput() {
     // 以前は tagName が INPUT なら一律で弾いていて、スライダーを 1 回触ると
     // フォーカスが残り、そのあと Ctrl+Z が効かなくなっていた。
     if (isTypingTarget(e.target, e.ctrlKey || e.metaKey)) return;
+    // モーダル変形中は、そのキーだけを見る（変形中に D でダイナメッシュが
+    // 走ったりしないように、他のショートカットへは流さない）
+    if (modalKey(e)) { e.preventDefault(); return; }
     // 使い方ページを開いている間は、閉じるキーだけ通す。オーバーレイの裏で
     // D（ダイナメッシュ）などが走ると、読んでいるうちに形が変わってしまう。
     const helpOpen = ui && ui.helpIsOpen && ui.helpIsOpen();
     const ctrl = e.ctrlKey || e.metaKey;
     for (const s of SHORTCUTS) {
+      // 表に出すためだけの項目（変形中のキーなど。実際の処理は modalKey が持つ）
+      if (s.displayOnly) continue;
       if (helpOpen && s.group !== 'ヘルプ' && !s.help) continue;
       // モードで意味が変わるキーは、いまのモードの項目だけを見る
       if (s.modes && !s.modes.includes(state.mode)) continue;
@@ -23399,9 +23882,19 @@ function bindInput() {
 
   window.addEventListener('keyup', (e) => {
     if (e.code === 'Space') spaceDown = false;
+    // Ctrl を離したら刻みを外してその場で作り直す
+    if (modal.on && (e.code === 'ControlLeft' || e.code === 'ControlRight'
+      || e.code === 'MetaLeft' || e.code === 'MetaRight')) {
+      modal.ctrl = false;
+      modalApply();
+    }
   });
 
-  window.addEventListener('blur', () => { spaceDown = false; });
+  window.addEventListener('blur', () => {
+    spaceDown = false;
+    // 画面から離れたら変形を確定しておく（掴んだままになるのを防ぐ）
+    if (modal.on) modalConfirm();
+  });
   window.addEventListener('resize', () => renderer.resize());
 }
 
@@ -23636,6 +24129,8 @@ window.WebSculpt = {
   get mesh() { return mesh; },
   get subtools() { return subtools; },
   pointer: ptr,
+  // モーダル変形の状態（テストと診断用）
+  modal,
   get renderer() { return renderer; },
   get sculptor() { return sculptor; },
   get ui() { return ui; },
