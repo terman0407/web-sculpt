@@ -192,49 +192,187 @@ try {
   ok(afterBevel.errs.length === 0, `Ctrl+B のあと構造が壊れない (${afterBevel.errs.join(' / ')})`);
   ok(afterBevel.nonManifold === 0, `Ctrl+B のあと非多様体辺が無い (${afterBevel.nonManifold})`);
 
-  // --- G / R / S でハンドルを絞る -------------------------------------------
-  head('G / R / S でギズモのハンドルを絞る');
+  // --- G / R / S のモーダル変形（Blender 式）--------------------------------
+  head('G / R / S でマウスで自由に動かす');
+  // 面を選び直してから。以降はカーソルを中央に置いた状態で始める
   await run(`const W = window.WebSculpt;
+    W.app.setMode('sculpt');
+    W.app.newMesh('cube');
+    W.app.setMode('model');
     W.app.editSetSelectMode('face');
     W.tools.editSelect('all');
     return 1;`);
-  for (const [code, keyName, want] of [
-    ['KeyG', 'g', 'move'], ['KeyR', 'r', 'rotate'], ['KeyS', 's', 'scale'],
-  ]) {
-    await key(code, keyName);
+  await frames(4);
+  await mouse('mouseMoved', cx, cy);
+  await frames(2);
+
+  /** 選択頂点の座標をまとめて拾う（比較用） */
+  const snap = () => run(`const W = window.WebSculpt;
+    const p = W.mesh.positions;
+    return { p: [p[0], p[1], p[2], p[30], p[31], p[32]], nv: W.mesh.nv };`);
+
+  // G: 掴んで動かして確定する
+  {
+    const before = await snap();
+    await key('KeyG', 'g');
+    r = await run(`const W = window.WebSculpt;
+      return { on: W.modal.on, op: W.modal.op, axis: W.modal.axis,
+        hud: document.getElementById('modalhud').classList.contains('show') };`);
+    ok(r.on === true && r.op === 'move', `G でモーダル移動に入る (${r.op} / on=${r.on})`);
+    ok(r.hud === true, '変形中の表示（HUD）が出る');
+    // ボタンを押さずにカーソルを動かすだけで動く
+    for (let k = 1; k <= 6; k++) {
+      await mouse('mouseMoved', cx + k * 18, cy + k * 6);
+      await frames(1);
+    }
+    const during = await snap();
+    let moved = 0;
+    for (let i = 0; i < 6; i++) if (Math.abs(during.p[i] - before.p[i]) > 1e-6) moved++;
+    ok(moved > 0, `ボタンを押さずにカーソルだけで動く (${moved}/6 成分)`);
+    r = await run(`return { hud: document.getElementById('modalhud').textContent };`);
+    ok(/移動/.test(r.hud) && /自由/.test(r.hud), `HUD に操作と軸が出る (${r.hud.slice(0, 20)})`);
+    // クリックで確定
+    await mouse('mousePressed', cx + 108, cy + 36);
+    await mouse('mouseReleased', cx + 108, cy + 36);
     await frames(3);
-    r = await run(`const W = window.WebSculpt, g = W.tools.gizmo;
-      const kinds = [...new Set(g.handles(1).map(x => x.kind))].sort();
-      return { active: g.active, only: g.only, kinds, transpose: W.state.transposeMode };`);
-    ok(r.active === true && r.transpose === true, `${keyName.toUpperCase()} でギズモが立つ`);
-    ok(r.only === want, `${keyName.toUpperCase()} は only='${want}' になる (${r.only})`);
-    const expect = want === 'scale' ? ['scale', 'uniform'] : [want];
-    ok(JSON.stringify(r.kinds) === JSON.stringify(expect),
-      `${keyName.toUpperCase()} は ${expect.join('/')} のハンドルだけ出す (${r.kinds.join(',')})`);
+    r = await run(`const W = window.WebSculpt;
+      return { on: W.modal.on, hud: document.getElementById('modalhud').classList.contains('show'),
+        canUndo: W.sculptor.history.canUndo(), errs: W.tools.edit.validate(),
+        editMatches: W.tools.edit.positions[0] === W.mesh.positions[0] };`);
+    ok(r.on === false, 'クリックで確定して抜ける');
+    ok(r.hud === false, '確定したら HUD が消える');
+    ok(r.canUndo === true, '確定が履歴に入る');
+    ok(r.errs.length === 0, `確定後に構造が壊れていない (${r.errs.join(' / ')})`);
+    ok(r.editMatches, '編集メッシュへ書き戻されている');
+    const after = await snap();
+    let kept = 0;
+    for (let i = 0; i < 6; i++) if (Math.abs(after.p[i] - before.p[i]) > 1e-6) kept++;
+    ok(kept > 0, `確定した動きが残る (${kept}/6 成分)`);
   }
+
+  // Esc で取り消すと**ビット単位で**元に戻る
+  {
+    const before = await snap();
+    await mouse('mouseMoved', cx, cy);
+    await key('KeyG', 'g');
+    for (let k = 1; k <= 5; k++) {
+      await mouse('mouseMoved', cx - k * 20, cy - k * 12);
+      await frames(1);
+    }
+    const during = await snap();
+    let moved = 0;
+    for (let i = 0; i < 6; i++) if (during.p[i] !== before.p[i]) moved++;
+    ok(moved > 0, `取り消す前に動いている (${moved}/6 成分)`);
+    await key('Escape', 'Escape');
+    await frames(3);
+    const after = await snap();
+    let same = 0;
+    for (let i = 0; i < 6; i++) if (after.p[i] === before.p[i]) same++;
+    r = await run(`return { on: window.WebSculpt.modal.on };`);
+    ok(r.on === false, 'Esc で抜ける');
+    ok(same === 6, `Esc で元の座標へ完全に戻る (${same}/6 成分が一致)`);
+  }
+
+  // 右クリックでも取り消せる
+  {
+    const before = await snap();
+    await mouse('mouseMoved', cx, cy);
+    await key('KeyG', 'g');
+    await mouse('mouseMoved', cx + 60, cy + 40);
+    await frames(2);
+    await mouse('mousePressed', cx + 60, cy + 40, { button: 'right', buttons: 2 });
+    await mouse('mouseReleased', cx + 60, cy + 40, { button: 'right', buttons: 0 });
+    await frames(3);
+    const after = await snap();
+    let same = 0;
+    for (let i = 0; i < 6; i++) if (after.p[i] === before.p[i]) same++;
+    r = await run(`return { on: window.WebSculpt.modal.on };`);
+    ok(r.on === false && same === 6, `右クリックで取り消せる (on=${r.on} / 一致 ${same}/6)`);
+  }
+
+  // X / Y / Z で軸に固定できる（その軸しか動かない）
+  {
+    await mouse('mouseMoved', cx, cy);
+    const before = await snap();
+    await key('KeyG', 'g');
+    await key('KeyX', 'x');
+    r = await run(`const W = window.WebSculpt;
+      return { axis: W.modal.axis, hud: document.getElementById('modalhud').textContent };`);
+    ok(r.axis === 0, `X で X 軸固定になる (${r.axis})`);
+    ok(/X 軸/.test(r.hud), `HUD に軸が出る (${r.hud.slice(0, 24)})`);
+    for (let k = 1; k <= 6; k++) {
+      await mouse('mouseMoved', cx + k * 22, cy + k * 14);
+      await frames(1);
+    }
+    const during = await snap();
+    const dx = Math.abs(during.p[0] - before.p[0]);
+    const dy = Math.abs(during.p[1] - before.p[1]);
+    const dz = Math.abs(during.p[2] - before.p[2]);
+    ok(dx > 1e-5, `X 軸固定で X は動く (${dx.toExponential(2)})`);
+    ok(dy < 1e-6 && dz < 1e-6,
+      `X 軸固定で Y / Z は動かない (${dy.toExponential(2)} / ${dz.toExponential(2)})`);
+    // 同じキーをもう一度で自由に戻る
+    await key('KeyX', 'x');
+    r = await run(`return { axis: window.WebSculpt.modal.axis };`);
+    ok(r.axis === -1, `X をもう一度押すと自由に戻る (${r.axis})`);
+    await key('Escape', 'Escape');
+    await frames(2);
+  }
+
+  // R / S も動く。変形中に押し替えられる
+  {
+    await mouse('mouseMoved', cx + 40, cy + 40);
+    const before = await snap();
+    await key('KeyR', 'r');
+    r = await run(`return { on: window.WebSculpt.modal.on, op: window.WebSculpt.modal.op };`);
+    ok(r.on && r.op === 'rotate', `R で回転に入る (${r.op})`);
+    for (let k = 1; k <= 6; k++) {
+      await mouse('mouseMoved', cx + 40 + k * 16, cy + 40 - k * 10);
+      await frames(1);
+    }
+    let during = await snap();
+    let moved = 0;
+    for (let i = 0; i < 6; i++) if (Math.abs(during.p[i] - before.p[i]) > 1e-6) moved++;
+    ok(moved > 0, `回転で座標が動く (${moved}/6 成分)`);
+    // 変形中に S へ乗り換える
+    await key('KeyS', 's');
+    r = await run(`return { op: window.WebSculpt.modal.op, axis: window.WebSculpt.modal.axis };`);
+    ok(r.op === 'scale' && r.axis === -1, `変形中に S で拡大縮小へ乗り換える (${r.op})`);
+    for (let k = 1; k <= 4; k++) {
+      await mouse('mouseMoved', cx + 40 + k * 24, cy + 40);
+      await frames(1);
+    }
+    during = await snap();
+    r = await run(`return { hud: document.getElementById('modalhud').textContent };`);
+    ok(/拡大縮小/.test(r.hud), `HUD が乗り換えに追従する (${r.hud.slice(0, 16)})`);
+    await key('Escape', 'Escape');
+    await frames(2);
+    const after = await snap();
+    let same = 0;
+    for (let i = 0; i < 6; i++) if (after.p[i] === before.p[i]) same++;
+    ok(same === 6, `乗り換えたあとの Esc でも最初の座標へ戻る (${same}/6)`);
+  }
+
+  // 選択が空なら何も始まらない
+  {
+    await run(`window.WebSculpt.tools.editSelect('none'); return 1;`);
+    await key('KeyG', 'g');
+    r = await run(`return { on: window.WebSculpt.modal.on };`);
+    ok(r.on === false, '選択が無いときは変形に入らない');
+    await run(`window.WebSculpt.tools.editSelect('all'); return 1;`);
+  }
+
+  // Shift+G は従来のギズモ（ハンドルを掴む方式）
   await key('KeyG', 'G', MOD.shift);
   await frames(3);
   r = await run(`const W = window.WebSculpt, g = W.tools.gizmo;
-    return { only: g.only, kinds: [...new Set(g.handles(1).map(x => x.kind))].sort() };`);
-  ok(r.only === null, `Shift+G は絞り込みを外す (${r.only})`);
+    return { only: g.only, active: g.active, transpose: W.state.transposeMode,
+      kinds: [...new Set(g.handles(1).map(x => x.kind))].sort(), modal: W.modal.on };`);
+  ok(r.active === true && r.transpose === true, 'Shift+G でギズモが立つ');
+  ok(r.modal === false, 'Shift+G はモーダル変形ではない');
   ok(r.kinds.length >= 4, `Shift+G は全部のハンドルを出す (${r.kinds.join(',')})`);
-
-  // 絞っているハンドル以外は掴めない（見えないものが当たらない）
-  await key('KeyG', 'g');
-  await frames(3);
-  r = await run(`const W = window.WebSculpt, g = W.tools.gizmo;
-    // ピボットから離れた所を狙って、回転リングだけに近いレイを作る意味はないので、
-    // 「only を切り替えると hitTest の答えが変わる」ことだけを見る
-    const O = new Float32Array([0, 0, 6]), D = new Float32Array([0, 0, -1]);
-    const withMove = g.hitTest(O, D, 0.05, 1);
-    g.only = 'rotate';
-    const withRot = g.hitTest(O, D, 0.05, 1);
-    g.only = 'move';
-    return { withMove: withMove && withMove.kind, withRot: withRot && withRot.kind };`);
-  ok(r.withMove === null || r.withMove === 'move',
-    `only='move' では move しか当たらない (${r.withMove})`);
-  ok(r.withRot === null || r.withRot === 'rotate',
-    `only='rotate' では rotate しか当たらない (${r.withRot})`);
+  await run(`window.WebSculpt.app.setTranspose(false); return 1;`);
+  await frames(2);
 
   // --- マウスの割り当てがモードで変わる ------------------------------------
   head('マウスの割り当て');

@@ -25,6 +25,16 @@ import { RING_STRIDE, DIRTY_SHIFT } from './mesh.js';
 const AXIS_COLOR = [[0.94, 0.29, 0.31], [0.44, 0.82, 0.27], [0.31, 0.53, 0.97]];
 const CENTER_COLOR = [0.87, 0.88, 0.92];
 
+/**
+ * ドラッグできる種別。
+ *
+ * ハンドルとして**線を描くのは前の 4 つだけ**で、うしろの 2 つは画面に対して
+ * 自由に動かすためのもの（Blender の G / R をキーだけで始めるモーダル変形に使う）。
+ * どちらもドラッグ開始時の視線で平面を固定する（毎フレーム取り直すと透視投影で
+ * 平面がわずかに傾き、量がふらつく）。
+ */
+const DRAG_KINDS = new Set(['move', 'rotate', 'scale', 'uniform', 'moveView', 'rotateView']);
+
 const RING_SEGS = 48;        // 回転リングの描画分割数
 const HIT_RING_SEGS = 32;    // ヒットテスト用の分割数。弦と弧のずれは半径の 0.5% で
                              // 許容距離よりずっと小さいので描画より粗くてよい
@@ -184,8 +194,11 @@ export class Transpose {
     this._axis = -1;
     this._dragPivot = new Float32Array(3);   // 開始時のピボット（変換の中心）
     this._dragBasis = new Float32Array(9);   // 開始時の基底（変換の軸）
-    this._planeN = new Float32Array(3);      // uniform の参照平面法線（視線で固定）
+    this._planeN = new Float32Array(3);      // uniform / moveView / rotateView の参照平面法線（視線で固定）
     this._refDir = new Float32Array(3);      // uniform の参照方向（符号付き半径用）
+    this._moveRef = new Float32Array(3);     // moveView の掴んだ点（ピボット基準）
+    this._planeU = new Float32Array(3);      // rotateView の平面内基底（u × v = n）
+    this._planeV = new Float32Array(3);
     this._planeScratch = new Float64Array(3);
     this._s0 = 0;         // move: 軸上の開始位置
     this._sCur = 0;       // move: 直近の軸上位置（退化フレームで前値を保つ）
@@ -612,7 +625,7 @@ export class Transpose {
     if (!this._active || !hit || this._count === 0) return false;
     if (!this.validate(mesh)) return false;
     const kind = hit.kind;
-    if (kind !== 'move' && kind !== 'rotate' && kind !== 'scale' && kind !== 'uniform') return false;
+    if (!DRAG_KINDS.has(kind)) return false;
     let dx = rayDir[0], dy = rayDir[1], dz = rayDir[2];
     const dl = Math.hypot(dx, dy, dz);
     if (dl < 1e-20) return false;
@@ -631,7 +644,9 @@ export class Transpose {
     this._buildNormalSet(mesh);
 
     this._kind = kind;
-    this._axis = kind === 'uniform' ? -1 : (hit.axis | 0);
+    // 画面基準の 3 種は軸を持たない（-1）。軸ありのハンドルだけ hit.axis を使う
+    this._axis = (kind === 'uniform' || kind === 'moveView' || kind === 'rotateView')
+      ? -1 : (hit.axis | 0);
     this._dragPivot.set(this._pivot);
     this._dragBasis.set(this._basis);
     this._factor = 1;
@@ -668,6 +683,19 @@ export class Transpose {
           this._u0 = cu / r; this._v0 = cv / r; this._r0 = r; this._refOk = true;
         }
       }
+    } else if (kind === 'moveView') {
+      // 画面に平行な平面上で自由に動かす。掴んだ点を控えて差分で動かす
+      this._planeN[0] = -dx; this._planeN[1] = -dy; this._planeN[2] = -dz;
+      const q = this._planeHit(ox, oy, oz, dx, dy, dz,
+        this._planeN[0], this._planeN[1], this._planeN[2]);
+      if (q) { this._moveRef.set(q); this._refOk = true; }
+    } else if (kind === 'rotateView') {
+      // 視線を回転軸にする。平面内の基底は u × v = n になるように作る
+      // （そうすると測った角がロドリゲス回転の符号とそのまま一致する）
+      this._planeN[0] = -dx; this._planeN[1] = -dy; this._planeN[2] = -dz;
+      this._makePlaneBasis();
+      const a = this._viewAngle(ox, oy, oz, dx, dy, dz);
+      if (Number.isFinite(a)) { this._angPrev = a; this._refOk = true; }
     } else {
       // uniform: 視線に垂直な平面を開始時の向きで固定する。毎フレーム視線から
       // 取り直すと透視投影では法線がわずかに変わり、倍率がふらつく。
@@ -683,6 +711,37 @@ export class Transpose {
       }
     }
     return true;
+  }
+
+  /** _planeN を法線とする平面の基底 (u, v) を作る。u × v = n になる向きに揃える */
+  _makePlaneBasis() {
+    const n = this._planeN;
+    const ax = Math.abs(n[0]), ay = Math.abs(n[1]), az = Math.abs(n[2]);
+    // n といちばん平行でない軸から作る（外積が潰れないように）
+    let tx = 0, ty = 0, tz = 0;
+    if (ax <= ay && ax <= az) tx = 1; else if (ay <= az) ty = 1; else tz = 1;
+    // u = normalize(t × n)、v = n × u  →  u × v = n
+    let ux = ty * n[2] - tz * n[1];
+    let uy = tz * n[0] - tx * n[2];
+    let uz = tx * n[1] - ty * n[0];
+    const ul = Math.hypot(ux, uy, uz) || 1;
+    ux /= ul; uy /= ul; uz /= ul;
+    this._planeU[0] = ux; this._planeU[1] = uy; this._planeU[2] = uz;
+    this._planeV[0] = n[1] * uz - n[2] * uy;
+    this._planeV[1] = n[2] * ux - n[0] * uz;
+    this._planeV[2] = n[0] * uy - n[1] * ux;
+  }
+
+  /** 視線を法線とする平面上での角度（rotateView 用） */
+  _viewAngle(ox, oy, oz, dx, dy, dz) {
+    const n = this._planeN;
+    const q = this._planeHit(ox, oy, oz, dx, dy, dz, n[0], n[1], n[2]);
+    if (!q) return NaN;
+    const U = this._planeU, V = this._planeV;
+    const cu = q[0] * U[0] + q[1] * U[1] + q[2] * U[2];
+    const cv = q[0] * V[0] + q[1] * V[1] + q[2] * V[2];
+    if (Math.abs(cu) + Math.abs(cv) < 1e-12) return NaN;
+    return Math.atan2(cv, cu);
   }
 
   /**
@@ -730,8 +789,33 @@ export class Transpose {
       this._pivot[1] = py + ay * off;
       this._pivot[2] = pz + az * off;
       res.offset = off;
-    } else if (this._kind === 'rotate') {
-      const a = this._planeAngle(ox, oy, oz, dx, dy, dz, this._axis);
+    } else if (this._kind === 'moveView') {
+      const n = this._planeN;
+      let offx = 0, offy = 0, offz = 0;
+      if (this._refOk) {
+        const q = this._planeHit(ox, oy, oz, dx, dy, dz, n[0], n[1], n[2]);
+        if (q) {
+          offx = q[0] - this._moveRef[0];
+          offy = q[1] - this._moveRef[1];
+          offz = q[2] - this._moveRef[2];
+        }
+      }
+      if (snap) {
+        const step = Math.max(1e-9, this._lastScale * SNAP_MOVE_FRAC);
+        offx = Math.round(offx / step) * step;
+        offy = Math.round(offy / step) * step;
+        offz = Math.round(offz / step) * step;
+      }
+      changed = this._applyTranslate(mesh, offx, offy, offz);
+      this._pivot[0] = px + offx;
+      this._pivot[1] = py + offy;
+      this._pivot[2] = pz + offz;
+      res.offset = Math.hypot(offx, offy, offz);
+    } else if (this._kind === 'rotate' || this._kind === 'rotateView') {
+      const view = this._kind === 'rotateView';
+      const a = view
+        ? this._viewAngle(ox, oy, oz, dx, dy, dz)
+        : this._planeAngle(ox, oy, oz, dx, dy, dz, this._axis);
       if (Number.isFinite(a)) {
         if (!this._refOk) { this._angPrev = a; this._refOk = true; }
         // 差分を -π..π に畳んで足すことで、1 回転を超えても連続に増える
@@ -743,7 +827,12 @@ export class Transpose {
       }
       let ang = this._angAcc;
       if (snap) ang = Math.round(ang / SNAP_ANGLE) * SNAP_ANGLE;
-      this._rotationDelta(B[i3], B[i3 + 1], B[i3 + 2], ang);
+      if (view) {
+        const n = this._planeN;
+        this._rotationDelta(n[0], n[1], n[2], ang);
+      } else {
+        this._rotationDelta(B[i3], B[i3 + 1], B[i3 + 2], ang);
+      }
       changed = this._applyLinear(mesh);
       this._rotateBasis();
       res.degrees = ang * 180 / Math.PI;

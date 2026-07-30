@@ -424,6 +424,8 @@ const app = {
     if (busy) return;
     const want = mode === 'model' ? 'model' : 'sculpt';
     if (want === state.mode) return;
+    // 変形を掴んだままモードを跨がせない（確定しておく）
+    if (modal.on) modalConfirm();
     if (want === 'model') {
       // モデリングとトランスポーズ / 平面カットは同時に使えない（どれも
       // 左ドラッグを取り合う）
@@ -908,6 +910,184 @@ function updateGizmoHover(cssX, cssY) {
   tools.gizmoDrawHandles(gizmoScale, gizmoHover);
 }
 
+// ---------------------------------------------------------------------------
+// モーダル変形（Blender の G / R / S）
+//
+// キーを押した瞬間に始まり、**ボタンを押さずにマウスを動かすだけ**で変形して、
+// クリックか Enter で確定、Esc か右クリックで取り消す。Blender の触り方そのまま。
+//
+// 中身はトランスポーズのギズモをハンドル無しで掴んでいるだけ。ギズモは
+// 「開始時の座標からの絶対変換」で書く作りなので、毎フレーム同じ計算をしても
+// 誤差が溜まらないし、取り消しはビット単位で元へ戻る。
+//
+// X / Y / Z で軸に固定できる。同じキーをもう一度押すと自由に戻る。
+// 軸を変えるときは cancelDrag で元へ戻してから、いまのカーソル位置で掴み直す
+// （そうしないと「前の軸で動かしたぶん」が残って二重に効く）。
+// ---------------------------------------------------------------------------
+const modal = {
+  on: false,
+  op: 'move',       // 'move' | 'rotate' | 'scale'
+  axis: -1,         // -1 自由 / 0 X / 1 Y / 2 Z
+  hudEl: null,
+};
+
+/** op と軸から、ギズモのドラッグ種別を決める */
+function modalKind(op, axis) {
+  if (axis < 0) return op === 'move' ? 'moveView' : (op === 'rotate' ? 'rotateView' : 'uniform');
+  return op;                          // 'move' | 'rotate' | 'scale' は軸ありの種別
+}
+
+function modalHud() {
+  if (!modal.hudEl) modal.hudEl = document.getElementById('modalhud');
+  return modal.hudEl;
+}
+
+const AXIS_JP = ['X', 'Y', 'Z'];
+const MODAL_JP = { move: '移動', rotate: '回転', scale: '拡大縮小' };
+
+function modalShowHud(res) {
+  const el = modalHud();
+  if (!el) return;
+  const axis = modal.axis < 0 ? '自由' : `${AXIS_JP[modal.axis]} 軸`;
+  let amount = '';
+  if (res) {
+    if (modal.op === 'move') amount = `${res.offset >= 0 ? '' : '-'}${Math.abs(res.offset).toFixed(3)}`;
+    else if (modal.op === 'rotate') amount = `${res.degrees.toFixed(1)}°`;
+    else amount = `×${res.factor.toFixed(3)}`;
+  }
+  el.innerHTML = `<b>${MODAL_JP[modal.op]}</b><span class="mh-axis">${axis}</span>`
+    + `<span class="mh-val">${amount}</span>`
+    + '<span class="mh-hint">X/Y/Z 軸固定・Ctrl 刻み・クリック/Enter 確定・Esc 取り消し</span>';
+  el.classList.add('show');
+}
+
+function modalHideHud() {
+  const el = modalHud();
+  if (el) el.classList.remove('show');
+}
+
+/** いまのカーソル位置で掴み直す。軸を変えたときにも使う */
+function modalGrab() {
+  screenRay(ptr.x, ptr.y);
+  return tools.gizmo.beginDrag(mesh, { kind: modalKind(modal.op, modal.axis), axis: modal.axis },
+    rayO, rayD);
+}
+
+/**
+ * モーダル変形を始める。選択が無いときや掴めないときは何もしない。
+ * @param {'move'|'rotate'|'scale'} op
+ */
+function modalBegin(op) {
+  if (busy || state.mode !== 'model' || !tools.edit) { ui.toast('先にモデリングモードへ入ります'); return; }
+  if (modal.on) modalCancel();
+  const em = tools.edit;
+  const sel = em.selectionCount();
+  if (sel.verts === 0) { ui.toast('頂点が選択されていません'); return; }
+  if (mesh.nv !== em.nv) tools.editRefreshDisplay();
+  // 選択をマスクへ写してギズモの領域にする（ギズモは mask 0 の頂点を動かす規約）
+  for (let v = 0; v < mesh.nv; v++) mesh.mask[v] = em.selVert[v] ? 0 : 1;
+  mesh.markAllDirty();
+  if (!tools.gizmoActivate()) { ui.toast('動かせる頂点がありません'); return; }
+  // ハンドルは描かない（Blender の G / R / S は線を出さない）。
+  // オーバーレイ線は編集メッシュのワイヤに使うので、こちらを描き直しておく
+  tools.editSyncOverlay();
+  modal.op = op;
+  modal.axis = -1;
+  modal.ctrl = false;
+  if (!modalGrab()) { ui.toast('掴めませんでした'); return; }
+  tools.gizmoBeginRecord();
+  modal.on = true;
+  modalShowHud(null);
+}
+
+/** 軸固定を切り替える。同じ軸をもう一度なら自由に戻す */
+function modalSetAxis(axis) {
+  if (!modal.on) return;
+  const next = modal.axis === axis ? -1 : axis;
+  // いまの変形を取り消してから掴み直す（前の軸のぶんを残さない）
+  tools.gizmo.cancelDrag(mesh);
+  modal.axis = next;
+  if (!modalGrab()) { modalCancel(); return; }
+  modalApply();
+}
+
+/** カーソルの位置で変形を作り直す */
+function modalApply() {
+  if (!modal.on) return;
+  screenRay(ptr.x, ptr.y);
+  const res = tools.gizmo.updateDrag(mesh, rayO, rayD, { snap: modal.ctrl, normals: true });
+  modalWriteBack();
+  modalShowHud(res);
+}
+
+/** 動かした結果を編集メッシュへ写す（頂点番号は 1:1） */
+function modalWriteBack() {
+  if (tools.edit && tools.edit.nv === mesh.nv) {
+    tools.edit.positions.set(mesh.positions.subarray(0, mesh.nv * 3));
+    tools.edit.version++;
+    tools.editSyncOverlay();
+  }
+}
+
+function modalFinish(commit) {
+  if (!modal.on) return;
+  modal.on = false;
+  modalHideHud();
+  const r = commit ? tools.gizmo.endDrag(mesh) : tools.gizmo.cancelDrag(mesh);
+  tools.gizmoEndRecord();
+  modalWriteBack();
+  if (commit && r.changed > 0) {
+    sculptor.hoverSeed = -1;
+    sculptor.dropPendingCurvature();
+    mesh.computeAllCurvature();
+    sculptor.history.commit(mesh);
+    scheduleAutosave();
+    ui.toast(`${MODAL_JP[modal.op]}: ${r.changed.toLocaleString()} 頂点`);
+  } else if (!commit) {
+    ui.toast(`${MODAL_JP[modal.op]}を取り消しました`);
+  }
+  tools.gizmoDeactivate();
+  // gizmoDeactivate はオーバーレイ線を消すので、編集メッシュのワイヤを描き直す
+  tools.editSyncOverlay();
+  if (ui.refreshEdit) ui.refreshEdit();
+}
+
+const modalConfirm = () => modalFinish(true);
+const modalCancel = () => modalFinish(false);
+
+/**
+ * モーダル変形中のキー。掴んでいる間はここが全部のキーを受け取る
+ * （変形中に D でダイナメッシュが走ったりしないように）。
+ * @returns {boolean} 受け取ったか
+ */
+function modalKey(e) {
+  if (!modal.on) return false;
+  modal.ctrl = e.ctrlKey || e.metaKey;
+  const c = e.code;
+  if (c === 'Escape') { modalCancel(); return true; }
+  if (c === 'Enter' || c === 'NumpadEnter' || c === 'Space') { modalConfirm(); return true; }
+  if (c === 'KeyX') { modalSetAxis(0); return true; }
+  if (c === 'KeyY') { modalSetAxis(1); return true; }
+  if (c === 'KeyZ') { modalSetAxis(2); return true; }
+  // G / R / S で種類を乗り換える（Blender と同じで、押し直すと切り替わる）
+  if (c === 'KeyG' || c === 'KeyR' || c === 'KeyS') {
+    const op = c === 'KeyG' ? 'move' : (c === 'KeyR' ? 'rotate' : 'scale');
+    if (op !== modal.op) {
+      tools.gizmo.cancelDrag(mesh);
+      modal.op = op;
+      modal.axis = -1;
+      if (!modalGrab()) { modalCancel(); return true; }
+      modalApply();
+    }
+    return true;
+  }
+  if (c === 'ControlLeft' || c === 'ControlRight' || c === 'MetaLeft' || c === 'MetaRight') {
+    modalApply();
+    return true;
+  }
+  return true;         // 変形中は他のキーを通さない
+}
+
 // --- 平面カット（クリップ / トリム / スライス） -----------------------------
 // ドラッグの始点と終点をワールドへ落とし、その 2 点と視線方向で平面を作る。
 // ZBrush の ClipCurve と同じ操作感で、線の表側が残る。
@@ -1100,16 +1280,27 @@ const SHORTCUTS = [
   { keys: 'Ctrl+Minus', hidden: true, modes: ['model'], code: 'Minus', ctrl: true, prevent: true,
     run: () => tools.editSelect('shrink') },
 
-  // --- ギズモ（モデリング）---
-  // Blender の G / R / S。ギズモは移動・回転・拡縮のハンドルを一度に出すので、
-  // どのキーで呼んだかで出すハンドルを絞る（そうしないと 3 つのキーが同じ意味になる）。
-  { group: 'ギズモ', modes: ['model'], keys: 'G', jp: '選択を移動（ギズモ）', code: 'KeyG',
-    run: () => app.editGizmo('move') },
-  { group: 'ギズモ', modes: ['model'], keys: 'R', jp: '選択を回転（ギズモ）', code: 'KeyR',
-    run: () => app.editGizmo('rotate') },
-  { group: 'ギズモ', modes: ['model'], keys: 'S', jp: '選択を拡大縮小（ギズモ）', code: 'KeyS',
-    run: () => app.editGizmo('scale') },
-  { group: 'ギズモ', modes: ['model'], keys: 'Shift+G', jp: 'ハンドルを全部出す（ZBrush と同じ）',
+  // --- 変形（モデリング）---
+  // Blender の G / R / S。押した瞬間から**ボタンを押さずにマウスで動く**。
+  // クリックか Enter で確定、Esc か右クリックで取り消し、X / Y / Z で軸固定。
+  { group: '変形', modes: ['model'], keys: 'G', jp: '選択を動かす（マウスで自由に）', code: 'KeyG',
+    run: () => modalBegin('move') },
+  { group: '変形', modes: ['model'], keys: 'R', jp: '選択を回す', code: 'KeyR',
+    run: () => modalBegin('rotate') },
+  { group: '変形', modes: ['model'], keys: 'S', jp: '選択を拡大縮小', code: 'KeyS',
+    run: () => modalBegin('scale') },
+  // 変形中のキーは modalKey が先に受け取るので、ここは表に出すためだけの項目
+  { group: '変形', modes: ['model'], keys: 'X / Y / Z', displayOnly: true,
+    jp: '（変形中）その軸に固定する。もう一度押すと自由に戻る' },
+  { group: '変形', modes: ['model'], keys: 'クリック / Enter', displayOnly: true,
+    jp: '（変形中）確定する' },
+  { group: '変形', modes: ['model'], keys: 'Esc / 右クリック', displayOnly: true,
+    jp: '（変形中）取り消して元に戻す' },
+  { group: '変形', modes: ['model'], keys: 'Ctrl', displayOnly: true,
+    jp: '（変形中）押している間はきりの良い値に刻む' },
+  { group: '変形', modes: ['model'], keys: 'G / R / S', displayOnly: true,
+    jp: '（変形中）移動 / 回転 / 拡大縮小へ乗り換える' },
+  { group: '変形', modes: ['model'], keys: 'Shift+G', jp: 'ギズモを立てる（ハンドルを掴んで動かす）',
     code: 'KeyG', shift: true, run: () => app.editGizmo(null) },
 
   // --- 面を作る（モデリング）---
@@ -1264,6 +1455,13 @@ function bindInput() {
     // 彫り始められる。その状態で結果を setGeometry すると、進行中のストロークが
     // 別のトポロジを掴んだままになる。
     if (busy) { e.preventDefault(); return; }
+    // モーダル変形中はクリックで確定 / 右クリックで取り消し（Blender と同じ）。
+    // 選択やブラシへは流さない
+    if (modal.on) {
+      e.preventDefault();
+      if (e.button === 2) modalCancel(); else modalConfirm();
+      return;
+    }
     canvas.setPointerCapture(e.pointerId);
     const r = canvas.getBoundingClientRect();
     ptr.x = e.clientX - r.left; ptr.y = e.clientY - r.top;
@@ -1333,6 +1531,12 @@ function bindInput() {
     if (e.pointerType === 'pen') {
       ptr.isPen = true;
       ptr.pressure = e.pressure || ptr.pressure;
+    }
+    if (modal.on) {
+      // ボタンを押していなくても動く（Blender の G / R / S と同じ）
+      modal.ctrl = e.ctrlKey || e.metaKey;
+      modalApply();
+      return;
     }
     if (ptr.mode === 'gizmo') {
       screenRay(ptr.x, ptr.y);
@@ -1405,11 +1609,16 @@ function bindInput() {
     // 以前は tagName が INPUT なら一律で弾いていて、スライダーを 1 回触ると
     // フォーカスが残り、そのあと Ctrl+Z が効かなくなっていた。
     if (isTypingTarget(e.target, e.ctrlKey || e.metaKey)) return;
+    // モーダル変形中は、そのキーだけを見る（変形中に D でダイナメッシュが
+    // 走ったりしないように、他のショートカットへは流さない）
+    if (modalKey(e)) { e.preventDefault(); return; }
     // 使い方ページを開いている間は、閉じるキーだけ通す。オーバーレイの裏で
     // D（ダイナメッシュ）などが走ると、読んでいるうちに形が変わってしまう。
     const helpOpen = ui && ui.helpIsOpen && ui.helpIsOpen();
     const ctrl = e.ctrlKey || e.metaKey;
     for (const s of SHORTCUTS) {
+      // 表に出すためだけの項目（変形中のキーなど。実際の処理は modalKey が持つ）
+      if (s.displayOnly) continue;
       if (helpOpen && s.group !== 'ヘルプ' && !s.help) continue;
       // モードで意味が変わるキーは、いまのモードの項目だけを見る
       if (s.modes && !s.modes.includes(state.mode)) continue;
@@ -1426,9 +1635,19 @@ function bindInput() {
 
   window.addEventListener('keyup', (e) => {
     if (e.code === 'Space') spaceDown = false;
+    // Ctrl を離したら刻みを外してその場で作り直す
+    if (modal.on && (e.code === 'ControlLeft' || e.code === 'ControlRight'
+      || e.code === 'MetaLeft' || e.code === 'MetaRight')) {
+      modal.ctrl = false;
+      modalApply();
+    }
   });
 
-  window.addEventListener('blur', () => { spaceDown = false; });
+  window.addEventListener('blur', () => {
+    spaceDown = false;
+    // 画面から離れたら変形を確定しておく（掴んだままになるのを防ぐ）
+    if (modal.on) modalConfirm();
+  });
   window.addEventListener('resize', () => renderer.resize());
 }
 
@@ -1668,6 +1887,8 @@ window.WebSculpt = {
   get mesh() { return mesh; },
   get subtools() { return subtools; },
   pointer: ptr,
+  // モーダル変形の状態（テストと診断用）
+  modal,
   get renderer() { return renderer; },
   get sculptor() { return sculptor; },
   get ui() { return ui; },

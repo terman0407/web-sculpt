@@ -1080,20 +1080,24 @@ export function buildUI(app) {
       + '離れた穴どうしを繋ぐと筒になり、同じ形の上の 2 つを繋ぐと取っ手になります。'
       + '頂点数が同じ縁どうしでだけ通ります。';
 
-    el('div', 'subhead', ed).textContent = '選択を動かす（G / R / S）';
-    el('p', 'note', ed).textContent =
-      '選択した頂点を動かすには、〔トランスポーズ〕ではなくこちらを使います。'
-      + 'キーで呼ぶと、そのキーのハンドルだけが出ます（Blender の G / R / S）。';
+    el('div', 'subhead', ed).textContent = '選択を動かす';
+    el('p', 'note', ed).innerHTML =
+      '<b>G</b> 移動 / <b>R</b> 回転 / <b>S</b> 拡大縮小を押すと、'
+      + 'ボタンを押さずに<b>マウスを動かすだけ</b>で変形します（Blender と同じ）。'
+      + 'クリックか Enter で確定、Esc か右クリックで取り消し、'
+      + '<b>X</b> / <b>Y</b> / <b>Z</b> で軸に固定、Ctrl できりの良い値に刻みます。';
     btnRow(ed, [
-      { label: '移動', title: '移動の矢印だけを出します（G）', onClick: () => app.editGizmo('move') },
-      { label: '回転', title: '回転のリングだけを出します（R）', onClick: () => app.editGizmo('rotate') },
-      { label: '拡大縮小', title: '拡大縮小のハンドルだけを出します（S）', onClick: () => app.editGizmo('scale') },
+      { label: '移動のギズモ', title: '移動の矢印だけを出します', onClick: () => app.editGizmo('move') },
+      { label: '回転のギズモ', title: '回転のリングだけを出します', onClick: () => app.editGizmo('rotate') },
     ]);
     btnRow(ed, [
-      { label: 'ギズモ（全部のハンドル）', cls: 'wide primary',
-        title: '移動・回転・拡大縮小のハンドルをまとめて出します（Shift+G。ZBrush のトランスポーズと同じ）',
+      { label: '拡縮のギズモ', title: '拡大縮小のハンドルだけを出します', onClick: () => app.editGizmo('scale') },
+      { label: '全部のハンドル', title: '移動・回転・拡大縮小のハンドルをまとめて出します（Shift+G）',
         onClick: () => app.editGizmo(null) },
     ]);
+    el('p', 'note', ed).textContent =
+      'ギズモはハンドルを掴んでドラッグする方式です（ZBrush のトランスポーズと同じ）。'
+      + '軸をきっちり指定したいときはこちらが向いています。';
   }
 
   // --- 仕上げレンダリング（BPR 相当）------------------------------------

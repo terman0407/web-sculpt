@@ -974,3 +974,34 @@ kbd {
   pointer-events: none;
   z-index: 12;
 }
+
+/* モーダル変形（G / R / S）中の表示。Blender のヘッダ行に相当する。
+   ビューポートの上端に出す（下端はブラシ情報とぶつかる） */
+.modalhud {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: #0b0e14e8;
+  box-shadow: 0 4px 18px #0009;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 14;
+}
+.modalhud.show { display: flex; }
+.modalhud .mh-axis { color: var(--accent-2); }
+.modalhud .mh-val {
+  font-variant-numeric: tabular-nums;
+  min-width: 5.5em;
+  text-align: right;
+  color: var(--accent);
+}
+.modalhud .mh-hint { color: var(--text-dim); font-size: 10.5px; }
