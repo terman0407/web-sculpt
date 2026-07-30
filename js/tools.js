@@ -1,4 +1,4 @@
-// ---------------------------------------------------------------------------
+﻿// ---------------------------------------------------------------------------
 // tools.js
 // 各機能モジュール（デフォーム / マスクツール / スカルプトレイヤー / ポリグループ /
 // トランスポーズ / クリップ / モーフ）をアプリへ束ねる層。
@@ -641,7 +641,7 @@ export class Tools {
       return false;
     }
     this.edit = em;
-    this.editMode = 'face';
+    this.selectUnit = 'face';
     // 表示用に三角形化して彫刻メッシュへ入れる。編集中の見た目はこれ。
     editMeshToSculpt(em, this.mesh);
     this.afterTopologyChange();
@@ -678,7 +678,7 @@ export class Tools {
     if (!this.edit) return null;
     const st = this.edit.faceStats();
     return {
-      mode: this.editMode,
+      selectUnit: this.selectUnit,
       verts: this.edit.nv, edges: this.edit.ne,
       faces: st.faces, quad: st.quad, tri: st.tri, ngon: st.ngon,
       quadRatio: st.quadRatio,
@@ -687,11 +687,12 @@ export class Tools {
     };
   }
 
-  editSetMode(mode) {
+  /** 選択の単位を変える。unit は 'vert' | 'edge' | 'face' */
+  editSetSelectUnit(unit) {
     if (!this.edit) return;
-    this.editMode = mode;
-    // 選択を新しいモードの主体へ持ち替える（Blender と同じ引き継ぎ）
-    this.edit.syncSelection(mode);
+    this.selectUnit = unit;
+    // 選択を新しい単位の主体へ持ち替える（Blender と同じ引き継ぎ）
+    this.edit.syncSelection(unit);
     this.editSyncOverlay();
     if (this.ui && this.ui.refreshEdit) this.ui.refreshEdit();
   }
@@ -734,7 +735,7 @@ export class Tools {
     }
     // 選択した頂点は小さな十字で示す（頂点モードで見えるように）
     let extra = null;
-    if (this.editMode === 'vert') {
+    if (this.selectUnit === 'vert') {
       const sel = [];
       for (let v = 0; v < em.nv; v++) if (em.selVert[v]) sel.push(v);
       const cap = Math.min(sel.length, 20000);
@@ -776,7 +777,7 @@ export class Tools {
   /** 選択操作。op は 'all' | 'none' | 'invert' | 'grow' | 'shrink' | 'linked' */
   editSelect(op) {
     if (!this.edit) return;
-    const em = this.edit, mode = this.editMode;
+    const em = this.edit, mode = this.selectUnit;
     if (op === 'all') em.selectAll(mode);
     else if (op === 'none') em.clearSelection();
     else if (op === 'invert') em.invertSelection(mode);
@@ -795,7 +796,7 @@ export class Tools {
    */
   editPick(p, add = false) {
     if (!this.edit) return null;
-    const em = this.edit, mode = this.editMode;
+    const em = this.edit, mode = this.selectUnit;
     // 拾う範囲はモデルの大きさに対する相対値。画面の px では測れない
     // （ピッキングは表面のワールド座標を返すので、そこからの距離で決める）
     const tol = em.bounds().radius * 0.12;
@@ -821,7 +822,7 @@ export class Tools {
   /** 矩形選択。project はワールド → 画面 */
   editBoxSelect(project, rect, add = false) {
     if (!this.edit) return null;
-    const r = boxSelect(this.edit, project, rect, this.editMode, add);
+    const r = boxSelect(this.edit, project, rect, this.selectUnit, add);
     this.editSyncOverlay();
     this.redraw();
     if (this.ui && this.ui.refreshEdit) this.ui.refreshEdit();

@@ -1,4 +1,4 @@
-// ---------------------------------------------------------------------------
+﻿// ---------------------------------------------------------------------------
 // ポリゴンモデリング（編集モード）の E2E テスト（実ブラウザ）。
 //   node test/edit-e2e.mjs           モジュール版
 //   node test/edit-e2e.mjs --file    単一ファイル版
@@ -51,11 +51,11 @@ try {
     W.state.dynTopo = false;
     W.app.newMesh('cube');
     const beforeTris = W.mesh.liveTris;
-    W.app.setEditMode(true);
+    W.app.setMode('model');
     const i = W.tools.editInfo();
-    return { on: W.state.editMode, beforeTris, info: i,
+    return { on: W.state.mode === 'model', beforeTris, info: i,
       meshNv: W.mesh.nv, meshTris: W.mesh.liveTris };`);
-  ok(r.on === true, '編集モードに入れる');
+  ok(r.on === true, 'モデリングモードに入れる');
   ok(r.info && r.info.faces > 0, '編集メッシュができている');
   ok(r.info.quad > 0 && r.info.quadRatio > 0.9,
     `四角化されている (四角 ${r.info.quad} / 率 ${(r.info.quadRatio * 100).toFixed(0)}%)`);
@@ -193,9 +193,9 @@ try {
   // --- モデリング操作（段 2 / 段 3）の配線 --------------------------------
   r = await runA(`const W = window.WebSculpt, T = W.tools;
     // 立方体からやり直す（前の編集で形が変わっているので）
-    W.app.setEditMode(false);
+    W.app.setMode('sculpt');
     W.app.newMesh('cube');
-    W.app.setEditMode(true);
+    W.app.setMode('model');
     W.app.editSetSelectMode('edge');
     const before = T.editInfo();
 
@@ -478,10 +478,10 @@ try {
     let want = 0;
     for (let f = 0; f < em.nf; f++) if (em.faceAlive[f]) want += em.faceSize(f) - 2;
     const nv = em.nv;
-    W.app.setEditMode(false);
-    return { on: W.state.editMode, edit: !!W.tools.edit,
+    W.app.setMode('sculpt');
+    return { on: W.state.mode === 'model', edit: !!W.tools.edit,
       want, nv, tris: W.mesh.liveTris, verts: W.mesh.liveVerts };`);
-  ok(r.on === false && r.edit === false, '編集モードを出られる');
+  ok(r.on === false && r.edit === false, 'スカルプトモードへ戻れる');
   ok(r.tris === r.want, `三角形化して書き戻せている (${r.tris} / ${r.want})`);
   ok(r.verts === r.nv, `頂点数が保たれる (${r.verts} / ${r.nv})`);
 
@@ -514,10 +514,10 @@ try {
     let moved = 0;
     for (let i = 0; i < before.length; i++) if (Math.abs(W.mesh.positions[i] - before[i]) > 1e-5) moved++;
     return { moved, v0, radius: W.state.worldRadius, nv: W.mesh.nv,
-      mask0: W.mesh.mask[v0], transpose: W.state.transposeMode, editMode: W.state.editMode };`);
-  ok(r.moved > 0, `編集モードを出たあと彫刻できる (${r.moved} 成分が動いた`
+      mask0: W.mesh.mask[v0], transpose: W.state.transposeMode, mode: W.state.mode };`);
+  ok(r.moved > 0, `スカルプトへ戻ったあと彫刻できる (${r.moved} 成分が動いた`
     + ` / 頂点 ${r.v0} / 半径 ${r.radius.toFixed(3)} / マスク ${r.mask0}`
-    + ` / transpose ${r.transpose} / editMode ${r.editMode})`);
+    + ` / transpose ${r.transpose} / mode ${r.mode})`);
 
   const errs = await cdp.eval('JSON.stringify(window.__errs || [])');
   ok(errs === '[]', 'ページ例外なし ' + errs);

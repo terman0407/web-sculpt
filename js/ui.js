@@ -954,29 +954,31 @@ export function buildUI(app) {
       + 'レイヤー・モーフは破棄されます。';
   }
 
-  // --- ポリゴンモデリング（編集モード）------------------------------------
-  let editToggle = null, editModeSeg = null, editInfoEl = null;
+  // --- ポリゴンモデリング（モデリングモード）--------------------------------
+  let modeSeg = null, editModeSeg = null, editInfoEl = null;
   {
     const ed = section(right, 'ポリゴンモデリング', true);
     el('p', 'note', ed).textContent =
-      '彫刻メッシュを四角化して、頂点 / 辺 / 面を選んで編集します。'
-      + '入るときに四角化し、出るときに三角形化して戻します。'
-      + '四角は彫刻すると消えるので「編集モードで組む → 彫刻へ移る」の順で使います。';
-    editToggle = toggle(ed, {
-      label: '編集モード', value: state.editMode,
-      title: '四角化して編集モードに入ります（トランスポーズ / 平面カットとは同時に使えません）',
-      onChange: (on) => app.setEditMode(on),
-    });
+      'モードを切り替えると、キー操作とマウスの割り当ても変わります。'
+      + 'スカルプトは ZBrush、モデリングは Blender に寄せてあります（Tab で行き来）。'
+      + '彫刻メッシュはモデリングへ入るときに四角化し、出るときに三角形化して戻します。'
+      + '四角は彫刻すると消えるので「モデリングで組む → スカルプトへ移る」の順で使います。';
+    modeSeg = segmented(ed, [
+      { label: 'スカルプト', value: 'sculpt', title: 'ZBrush 準拠。左ドラッグで彫刻します' },
+      { label: 'モデリング', value: 'model', title: 'Blender 準拠。左ドラッグで選択します'
+        + '（トランスポーズ / 平面カットとは同時に使えません）' },
+    ], state.mode, (v) => app.setMode(v));
     editInfoEl = el('p', 'note', ed);
 
-    el('div', 'subhead', ed).textContent = '選択の単位';
+    el('div', 'subhead', ed).textContent = '選択の単位（1 / 2 / 3）';
     editModeSeg = segmented(ed, [
-      { label: '頂点', value: 'vert', title: '頂点を選ぶ' },
-      { label: '辺', value: 'edge', title: '辺を選ぶ' },
-      { label: '面', value: 'face', title: '面を選ぶ' },
+      { label: '頂点', value: 'vert', title: '頂点を選ぶ（1）' },
+      { label: '辺', value: 'edge', title: '辺を選ぶ（2）' },
+      { label: '面', value: 'face', title: '面を選ぶ（3）' },
     ], state.editSelect, (v) => app.editSetSelectMode(v));
     el('p', 'note', ed).textContent =
-      'ビューポートをクリックで選択、ドラッグで矩形選択。Shift で追加選択します。';
+      'ビューポートをクリックで選択、ドラッグで矩形選択。Shift で追加選択します。'
+      + 'Alt+クリックでエッジループ、Ctrl+Alt+クリックでエッジリングになります。';
 
     el('div', 'subhead', ed).textContent = '選択';
     btnRow(ed, [
@@ -1077,12 +1079,20 @@ export function buildUI(app) {
       '〔面を削除〕で穴を 2 つ開け、辺モードでその縁を両方選んでから押します。'
       + '離れた穴どうしを繋ぐと筒になり、同じ形の上の 2 つを繋ぐと取っ手になります。'
       + '頂点数が同じ縁どうしでだけ通ります。';
+
+    el('div', 'subhead', ed).textContent = '選択を動かす（G / R / S）';
     el('p', 'note', ed).textContent =
-      '選択した頂点を動かすには、〔トランスポーズ〕ではなくこの下の〔選択を動かす〕を使います。';
+      '選択した頂点を動かすには、〔トランスポーズ〕ではなくこちらを使います。'
+      + 'キーで呼ぶと、そのキーのハンドルだけが出ます（Blender の G / R / S）。';
     btnRow(ed, [
-      { label: '選択を動かす（ギズモ）', cls: 'wide primary',
-        title: '選択した頂点にギズモを立てて、移動・回転・拡大縮小します',
-        onClick: () => app.editGizmo() },
+      { label: '移動', title: '移動の矢印だけを出します（G）', onClick: () => app.editGizmo('move') },
+      { label: '回転', title: '回転のリングだけを出します（R）', onClick: () => app.editGizmo('rotate') },
+      { label: '拡大縮小', title: '拡大縮小のハンドルだけを出します（S）', onClick: () => app.editGizmo('scale') },
+    ]);
+    btnRow(ed, [
+      { label: 'ギズモ（全部のハンドル）', cls: 'wide primary',
+        title: '移動・回転・拡大縮小のハンドルをまとめて出します（Shift+G。ZBrush のトランスポーズと同じ）',
+        onClick: () => app.editGizmo(null) },
     ]);
   }
 
@@ -1529,13 +1539,13 @@ export function buildUI(app) {
     closeHelp() { help.close(); },
     toggleHelp() { help.toggle(); },
     helpIsOpen() { return help.isOpen(); },
-    /** 編集モードの表示を state / 編集メッシュに合わせる */
+    /** モードの表示を state / 編集メッシュに合わせる */
     refreshEdit() {
-      if (editToggle) editToggle.set(state.editMode);
+      if (modeSeg) modeSeg.set(state.mode);
       if (editModeSeg) editModeSeg.set(state.editSelect);
       if (!editInfoEl) return;
       const i = app.tools ? app.tools.editInfo() : null;
-      if (!i) { editInfoEl.textContent = '編集モードに入っていません。'; return; }
+      if (!i) { editInfoEl.textContent = 'スカルプトモードです（Tab でモデリングへ）。'; return; }
       const n = (x) => x.toLocaleString();
       editInfoEl.textContent =
         `頂点 ${n(i.verts)} / 辺 ${n(i.edges)} / 面 ${n(i.faces)}`

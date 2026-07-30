@@ -41,7 +41,13 @@ function sections(shortcuts) {
     {
       id: 'start', title: 'はじめに',
       intro: [
-        'ブラウザだけで動く 3D スカルプトツールです。粘土のかたまりを削ったり盛ったりして形を作ります。ZBrush の操作と考え方に寄せてあります。',
+        'ブラウザだけで動く 3D スカルプト / ポリゴンモデリングツールです。'
+        + '粘土のかたまりを削ったり盛ったりして形を作ります。',
+        '<b>モードが 2 つあります。</b>'
+        + '<b>スカルプトモード</b>は ZBrush の操作と考え方に寄せてあります。'
+        + '<b>モデリングモード</b>は頂点・辺・面を直接編集するモードで、Blender の操作に寄せてあります。'
+        + '<b>Tab</b> で行き来し、<b>キー操作とマウスの割り当てもモードで変わります</b>'
+        + '（キーの一覧は〔キー操作〕にモードごとに出ています）。',
         'インストールも保存先の指定も要りません。触った形はブラウザの中に自動保存されます。',
       ],
       steps: [
@@ -50,14 +56,23 @@ function sections(shortcuts) {
         '細かく彫りたくなったら <b>G</b> で〔動的トポロジ〕を入れます。ポリゴンが自動で増えます。',
         '<b>X</b> を押すと左右対称になります。顔や生き物はこれを入れてから始めると早いです。',
         '形が崩れてきたら <b>D</b> で〔ダイナメッシュ〕。伸びきったポリゴンが作り直されます。',
+        '面を直接組みたくなったら <b>Tab</b> でモデリングモードへ。'
+        + '押し出しやループカットで土台を作ってから、<b>Tab</b> で戻って彫ります。',
       ],
       notes: [
         '失敗しても <b>Ctrl+Z</b> で戻せます（24 回ぶん）。',
         '視点を見失ったら <b>F</b> で全体が入る位置に戻ります。',
+        '上の手順のキー（G・X・D）は<b>スカルプトモードのもの</b>です。'
+        + 'モデリングモードでは同じキーが別の操作になります（G はギズモ、X は面の削除）。',
       ],
     },
     {
       id: 'view', title: '視点とマウス操作',
+      intro: [
+        '下は<b>スカルプトモード</b>の割り当てです。'
+        + 'モデリングモードでは左ドラッグが選択、中ドラッグが視点回転（Blender と同じ）になります。'
+        + '両モードの一覧は〔キー操作〕にあります。',
+      ],
       items: [
         { name: '左ドラッグ', desc: '彫る（選んでいるブラシを使う）' },
         { name: '右ドラッグ', desc: '視点を回す' },
@@ -71,6 +86,8 @@ function sections(shortcuts) {
       notes: [
         'ペンタブレットの筆圧に対応しています。〔筆圧〕を入れると強さと大きさに効きます。',
         '線が震えるときは <b>L</b> で〔レイジーマウス〕。カーソルを紐で引っぱるように追従して、なめらかな線になります。',
+        '<b>Space+ドラッグ</b>の平行移動はどちらのモードでも効きます。'
+        + 'モデリングモードで中ドラッグの意味が変わっても、これは変わりません。',
       ],
     },
     {
@@ -202,18 +219,24 @@ function sections(shortcuts) {
       ],
     },
     {
-      id: 'polymodel', title: 'ポリゴンモデリング（編集モード）',
+      id: 'polymodel', title: 'ポリゴンモデリング（モデリングモード）',
       intro: [
         '頂点・辺・面を直接選んで編集します。Blender の編集モードに相当します。',
-        '入るときに<b>四角化</b>し、出るときに三角形化して戻します。'
+        '<b>Tab</b> でスカルプトモードと行き来します。'
+        + 'モードを切り替えると<b>キー操作とマウスの割り当ても変わります</b>'
+        + '（スカルプトは ZBrush、モデリングは Blender に寄せてあります）。'
+        + 'キーの一覧は〔キー操作〕にモードごとに出ています。',
+        'モデリングへ入るときに<b>四角化</b>し、出るときに三角形化して戻します。'
         + '立方体・円柱・トーラスは 100% 四角、球は 90% ほどが四角になります。',
       ],
       steps: [
-        '〔ポリゴンモデリング〕→〔編集モード〕を入れます。ワイヤフレームが出ます。',
-        '選択の単位（頂点 / 辺 / 面）を選びます。',
-        'ビューポートを<b>クリック</b>で選択、<b>ドラッグ</b>で矩形選択。Shift で追加します。',
-        '〔選択を動かす（ギズモ）〕でハンドルを掴んで移動・回転・拡大縮小します。',
-        '終わったら〔編集モード〕を切ると、三角形化して彫刻メッシュへ戻ります。',
+        '<b>Tab</b> を押します（または〔ポリゴンモデリング〕でモードを切り替えます）。ワイヤフレームが出ます。',
+        '選択の単位を <b>1</b> 頂点 / <b>2</b> 辺 / <b>3</b> 面 で選びます。',
+        'ビューポートを<b>クリック</b>で選択、<b>ドラッグ</b>で矩形選択。Shift で追加します。'
+        + '<b>Alt+クリック</b>でエッジループになります。',
+        '<b>E</b> 押し出し、<b>I</b> インセット、<b>Ctrl+B</b> ベベル、<b>Ctrl+R</b> ループカットで面を増やします。',
+        '<b>G</b> 移動 / <b>R</b> 回転 / <b>S</b> 拡大縮小でギズモを立てて、ハンドルを掴んで動かします。',
+        '<b>Tab</b> でスカルプトへ戻ると、三角形化して彫刻メッシュへ書き戻します。',
       ],
       items: [
         { name: 'すべて / 解除 / 反転', desc: '選択の基本操作' },
@@ -244,9 +267,14 @@ function sections(shortcuts) {
         '押し出しとインセットのあとは<b>新しくできた面が選択されたまま</b>なので、続けて押せます。'
         + '「インセット → 内側へ押し出し」で凹み、「押し出しを繰り返す」で腕や角が伸びます。',
         '<b>四角は彫刻すると消えます。</b>動的トポロジもダイナメッシュもリメッシュも三角形化するので、'
-        + '「編集モードで土台を組む → 彫刻へ移る」の順で使ってください'
+        + '「モデリングで土台を組む → スカルプトへ移る」の順で使ってください'
         + '（ZBrush の ZModeler と DynaMesh の関係と同じです）。',
-        '編集モードとトランスポーズ・平面カットは同時に使えません（どれも左ドラッグを使うので）。',
+        'モデリングモードとトランスポーズ・平面カットは同時に使えません（どれも左ドラッグを使うので）。'
+        + 'モデリングへ入るとどちらも切れます。',
+        'ギズモは <b>G</b> 移動 / <b>R</b> 回転 / <b>S</b> 拡大縮小で、'
+        + '<b>そのキーのハンドルだけ</b>が出ます（Blender の G / R / S に当たります）。'
+        + 'ただし Blender のような「キーを押してマウスを動かすとすぐ動く」ではなく、'
+        + 'ハンドルを掴んでドラッグします。3 種類まとめて出すには <b>Shift+G</b> です。',
         '選択している辺は橙、形の縁（穴の境界）は赤で出ます。'
         + '赤が出ていたら閉じていない場所があるという意味です。',
         'ループカットは<b>1 回に 1 リングまで</b>です。直交する 2 リングは同じ四角を共有するので、'
@@ -339,26 +367,55 @@ function fromTable(list) {
   }));
 }
 
-function shortcutRows(shortcuts) {
-  const groups = new Map();
+/**
+ * キー一覧をモードごとに分ける。
+ *
+ * SHORTCUTS の modes を読む（無い項目は両モードで効くので「共通」）。
+ * マウスの割り当てはキー表に無いので、モードごとに手で足す。
+ * 1 / 2 / 3・A・G・X・E・I・R のようにモードで意味が変わるキーは、
+ * こうして分けないと同じキーが 2 行並んで読めなくなる。
+ */
+function shortcutModes(shortcuts) {
+  const bucket = (s) => {
+    if (!s.modes) return 'common';
+    if (s.modes.includes('sculpt') && s.modes.includes('model')) return 'common';
+    return s.modes.includes('model') ? 'model' : 'sculpt';
+  };
+  const groups = { common: new Map(), sculpt: new Map(), model: new Map() };
   for (const s of shortcuts || []) {
     if (s.hidden || !s.group) continue;
-    if (!groups.has(s.group)) groups.set(s.group, []);
-    groups.get(s.group).push({ keys: s.keys, jp: s.jp });
+    const g = groups[bucket(s)];
+    if (!g.has(s.group)) g.set(s.group, []);
+    g.get(s.group).push({ keys: s.keys, jp: s.jp });
   }
   // 表に無いがマウス側で処理しているもの。ここだけは手で足す
-  groups.set('視点', [
+  groups.common.set('視点', [
     { keys: '右ドラッグ', jp: '視点を回す' },
     { keys: 'ホイール', jp: '寄る / 引く' },
-    { keys: '中ドラッグ / Space+ドラッグ', jp: '平行移動' },
-    ...(groups.get('視点') || []).filter(r => !/Space/.test(r.keys)),
+    { keys: 'Space+ドラッグ', jp: '平行移動（どちらのモードでも）' },
+    ...(groups.common.get('視点') || []).filter(r => !/Space/.test(r.keys)),
   ]);
-  groups.set('押している間だけ', [
-    { keys: 'Shift+ドラッグ', jp: 'スムーズ' },
-    { keys: 'Ctrl+ドラッグ', jp: 'マスクを塗る' },
-    { keys: 'Alt+ドラッグ', jp: 'ブラシの向きを反転' },
+  groups.sculpt.set('マウス', [
+    { keys: '左ドラッグ', jp: 'モデルの上なら彫る / 背景なら視点を回す' },
+    { keys: '中ドラッグ', jp: '平行移動' },
+    { keys: 'Shift+ドラッグ', jp: 'スムーズ（押している間だけ）' },
+    { keys: 'Ctrl+ドラッグ', jp: 'マスクを塗る（押している間だけ）' },
+    { keys: 'Alt+ドラッグ', jp: 'ブラシの向きを反転（押している間だけ）' },
   ]);
-  return [...groups.entries()].map(([name, rows]) => ({ name, rows }));
+  groups.model.set('マウス', [
+    { keys: '左クリック', jp: '選ぶ（Shift で追加、何も無い所で解除）' },
+    { keys: '左ドラッグ', jp: '矩形選択' },
+    { keys: 'Alt+クリック', jp: 'エッジループを選ぶ' },
+    { keys: 'Ctrl+Alt+クリック', jp: 'エッジリングを選ぶ' },
+    { keys: '中ドラッグ', jp: '視点を回す（Blender と同じ）' },
+    { keys: 'Shift+中ドラッグ', jp: '平行移動' },
+  ]);
+  const toList = (m) => [...m.entries()].map(([name, rows]) => ({ name, rows }));
+  return [
+    { mode: '共通（どちらのモードでも）', groups: toList(groups.common) },
+    { mode: 'スカルプトモード（ZBrush 準拠）', groups: toList(groups.sculpt) },
+    { mode: 'モデリングモード（Blender 準拠）', groups: toList(groups.model) },
+  ];
 }
 
 const TABLES = {
@@ -415,17 +472,21 @@ function renderTable(parent, t) {
 }
 
 function renderShortcuts(parent, shortcuts) {
-  for (const g of shortcutRows(shortcuts)) {
-    el('h3', null, parent).textContent = g.name;
-    const wrap = el('div', 'help-tablewrap', parent);
-    const tb = el('table', 'help-table keys', wrap);
-    const body = el('tbody', null, tb);
-    for (const r of g.rows) {
-      const row = el('tr', null, body);
-      row.dataset.search = `${r.keys} ${r.jp}`.toLowerCase();
-      el('td', 'kcell', row).innerHTML = r.keys.split(' / ')
-        .map(k => `<kbd>${k}</kbd>`).join(' / ');
-      el('td', null, row).textContent = r.jp;
+  for (const m of shortcutModes(shortcuts)) {
+    if (!m.groups.length) continue;
+    el('h3', 'help-mode', parent).textContent = m.mode;
+    for (const g of m.groups) {
+      el('div', 'subhead', parent).textContent = g.name;
+      const wrap = el('div', 'help-tablewrap', parent);
+      const tb = el('table', 'help-table keys', wrap);
+      const body = el('tbody', null, tb);
+      for (const r of g.rows) {
+        const row = el('tr', null, body);
+        row.dataset.search = `${m.mode} ${g.name} ${r.keys} ${r.jp}`.toLowerCase();
+        el('td', 'kcell', row).innerHTML = r.keys.split(' / ')
+          .map(k => `<kbd>${k}</kbd>`).join(' / ');
+        el('td', null, row).textContent = r.jp;
+      }
     }
   }
 }

@@ -1,4 +1,4 @@
-// ---------------------------------------------------------------------------
+﻿// ---------------------------------------------------------------------------
 // main.js - アプリ本体（状態 / 入力 / メインループ）
 // ---------------------------------------------------------------------------
 
@@ -103,8 +103,12 @@ const state = {
   bprLightEl: 45,          // 光の高度角（度）
   bprTransparent: false,   // 背景を透明にして書き出す
   bprGrid: false,          // 床グリッドを入れる
-  // ポリゴンモデリング（編集モード）
-  editMode: false,        // 編集モードに入っているか
+  // --- モード -------------------------------------------------------------
+  // 'sculpt' = スカルプト（ZBrush の操作を踏襲）
+  // 'model'  = ポリゴンモデリング（Blender の操作を踏襲）
+  // ショートカットもマウスの割り当てもこれで切り替わる。Tab で行き来する。
+  mode: 'sculpt',
+  // ポリゴンモデリング（モデリングモードの設定）
   editSelect: 'face',     // 'vert' | 'edge' | 'face'
   editCuts: 1,            // ループカットの本数
   editExtrude: 0.25,      // 押し出し量（モデル半径に対する割合）
@@ -405,26 +409,39 @@ const app = {
       busy = false;
     }
   },
-  // --- ポリゴンモデリング（編集モード）------------------------------------
-  setEditMode(on) {
+  // --- モードの切り替え ----------------------------------------------------
+  /**
+   * スカルプト（ZBrush 準拠）とモデリング（Blender 準拠）を行き来する。
+   *
+   * モデリングへ入るときに四角化し、出るときに三角形化して戻す。
+   * ショートカットとマウスの割り当ても切り替わる（SHORTCUTS の modes と
+   * pointerdown の分岐が state.mode を見ている）。
+   */
+  setMode(mode) {
     if (busy) return;
-    if (on === state.editMode) return;
-    if (on) {
-      // 編集モードとトランスポーズ / 平面カットは同時に使えない（どれも
+    const want = mode === 'model' ? 'model' : 'sculpt';
+    if (want === state.mode) return;
+    if (want === 'model') {
+      // モデリングとトランスポーズ / 平面カットは同時に使えない（どれも
       // 左ドラッグを取り合う）
       applyTransposeMode(false);
       state.clipMode = 'off';
       if (!tools.editEnter()) return;
-      state.editMode = true;
-      tools.editSetMode(state.editSelect);
+      state.mode = 'model';
+      tools.editSetSelectUnit(state.editSelect);
     } else {
+      applyTransposeMode(false);
       tools.editExit(true);
-      state.editMode = false;
+      state.mode = 'sculpt';
     }
     ui.syncFromState();
     if (ui.refreshEdit) ui.refreshEdit();
+    ui.toast(state.mode === 'model'
+      ? 'モデリングモード（Blender 準拠のキー操作）— Tab でスカルプトへ戻ります'
+      : 'スカルプトモード（ZBrush 準拠のキー操作）— Tab でモデリングへ', 3200);
   },
-  toggleEditMode() { app.setEditMode(!state.editMode); },
+  toggleMode() { app.setMode(state.mode === 'model' ? 'sculpt' : 'model'); },
+  isModel: () => state.mode === 'model',
   /**
    * 選択した頂点にギズモを立てる。
    *
@@ -432,9 +449,12 @@ const app = {
    * 頂点番号が 1:1** なので（triangulate は positions をそのまま渡し、setGeometry は
    * 並べ替えない）、選択をマスクへ写せば既存のギズモがそのまま効く。
    * ギズモは「マスクされていない頂点」を動かす規約なので、選択を 0、非選択を 1 にする。
+   *
+   * @param {'move'|'rotate'|'scale'|null} only 出すハンドルを絞る。Blender の
+   *   G / R / S に対応させるため。null なら全部（ZBrush のトランスポーズと同じ）
    */
-  editGizmo() {
-    if (!state.editMode || !tools.edit) { ui.toast('先に編集モードに入ります'); return; }
+  editGizmo(only = null) {
+    if (state.mode !== 'model' || !tools.edit) { ui.toast('先にモデリングモードへ入ります'); return; }
     const em = tools.edit;
     const sel = em.selectionCount();
     if (sel.verts === 0) { ui.toast('頂点が選択されていません'); return; }
@@ -445,13 +465,16 @@ const app = {
     }
     for (let v = 0; v < mesh.nv; v++) mesh.mask[v] = em.selVert[v] ? 0 : 1;
     mesh.markAllDirty();
+    tools.gizmo.only = only;
     if (!tools.gizmoActivate()) return;
     applyTransposeMode(true);
-    ui.toast(`${sel.verts.toLocaleString()} 頂点にギズモを立てました（ハンドルを掴んで動かします）`, 4000);
+    const jp = { move: '移動', rotate: '回転', scale: '拡大縮小' };
+    ui.toast(`${sel.verts.toLocaleString()} 頂点にギズモを立てました`
+      + `${only ? `（${jp[only]}のハンドルだけ）` : '（ハンドルを掴んで動かします）'}`, 4000);
   },
   editSetSelectMode(mode) {
     state.editSelect = mode;
-    if (state.editMode) tools.editSetMode(mode);
+    if (state.mode === 'model') tools.editSetSelectUnit(mode);
     ui.syncFromState();
   },
   setTranspose(on) { applyTransposeMode(on); },
@@ -867,6 +890,8 @@ function applyTransposeMode(on) {
     state.transposeMode = false;
     tools.gizmoDeactivate();
     gizmoHover = null;
+    // ハンドルの絞り込み（Blender の G / R / S）は次に立てるまで持ち越さない
+    tools.gizmo.only = null;
   }
   if (ui) ui.syncTranspose(state.transposeMode);
 }
@@ -971,8 +996,25 @@ function isTypingTarget(t, ctrl) {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// ショートカット
+//
+// **modes でモードを絞る。** 無ければ両モードで効く。
+//   modes: ['sculpt'] … スカルプトモードだけ（ZBrush の割り当て）
+//   modes: ['model']  … モデリングモードだけ（Blender の割り当て）
+// 1 / 2 / 3・A・G・X・E・I・R は**モードで意味が変わる**ので、同じキーの項目が
+// 2 つ並ぶ。keydown は先に一致したものを実行するが、いま使えないモードの項目は
+// 飛ばすので衝突しない。
+//
+// 使い方ページ（help.js）もこの modes を読んでモードごとの表を作る。
+// キーを増やすときはここだけ触れば表にも出る。
+// ---------------------------------------------------------------------------
 const SHORTCUTS = [
-  // --- 編集 ---
+  // --- モード（共通。いちばん上に置く）---
+  { group: 'モード', keys: 'Tab', jp: 'スカルプト ⇄ モデリングを切り替える', code: 'Tab', prevent: true,
+    run: () => app.toggleMode() },
+
+  // --- 編集（共通）---
   { group: '編集', keys: 'Ctrl+Z', jp: '元に戻す', code: 'KeyZ', ctrl: true, prevent: true,
     run: () => app.undo() },
   { group: '編集', keys: 'Ctrl+Shift+Z', jp: 'やり直す', code: 'KeyZ', ctrl: true, shift: true, prevent: true,
@@ -980,48 +1022,48 @@ const SHORTCUTS = [
   { group: '編集', keys: 'Ctrl+Y', jp: 'やり直す（別のキー）', code: 'KeyY', ctrl: true, prevent: true,
     run: () => app.redo() },
 
-  // --- ブラシ ---
-  { group: 'ブラシ', keys: '1 〜 9, 0', jp: 'ブラシを選ぶ（左の並び順）',
-    match: (e) => !e.ctrlKey && !e.metaKey && /^Digit\d$/.test(e.code),
+  // --- ブラシ（スカルプト）---
+  { group: 'ブラシ', modes: ['sculpt'], keys: '1 〜 9, 0', jp: 'ブラシを選ぶ（左の並び順）',
+    match: (e) => !e.ctrlKey && !e.metaKey && !e.altKey && /^Digit\d$/.test(e.code),
     run: (e) => {
       const idx = (parseInt(e.code.slice(5), 10) + 9) % 10;   // 1→0, 0→9
       if (idx < BRUSH_IDS.length) ui.setBrush(BRUSH_IDS[idx]);
     } },
-  { group: 'ブラシ', keys: '[ / ]', jp: 'ブラシの大きさ', code: 'BracketLeft',
+  { group: 'ブラシ', modes: ['sculpt'], keys: '[ / ]', jp: 'ブラシの大きさ', code: 'BracketLeft',
     run: () => { state.radiusPx = clamp(state.radiusPx * 0.88, 6, 400); ui.syncFromState(); } },
-  { keys: ']', hidden: true, code: 'BracketRight',
+  { keys: ']', hidden: true, modes: ['sculpt'], code: 'BracketRight',
     run: () => { state.radiusPx = clamp(state.radiusPx * 1.14, 6, 400); ui.syncFromState(); } },
-  { group: 'ブラシ', keys: ', / .', jp: 'ブラシの強さ', code: 'Comma',
+  { group: 'ブラシ', modes: ['sculpt'], keys: ', / .', jp: 'ブラシの強さ', code: 'Comma',
     run: () => { state.strength = clamp(state.strength - 0.05, 0.01, 1); ui.syncFromState(); } },
-  { keys: '.', hidden: true, code: 'Period',
+  { keys: '.', hidden: true, modes: ['sculpt'], code: 'Period',
     run: () => { state.strength = clamp(state.strength + 0.05, 0.01, 1); ui.syncFromState(); } },
-  { group: 'ブラシ', keys: 'B', jp: 'バックフェイスマスク（裏側を彫らない）', code: 'KeyB',
+  { group: 'ブラシ', modes: ['sculpt'], keys: 'B', jp: 'バックフェイスマスク（裏側を彫らない）', code: 'KeyB',
     run: () => {
       state.backfaceMask = !state.backfaceMask; ui.syncFromState();
       ui.toast('バックフェイスマスク: ' + (state.backfaceMask ? 'ON' : 'OFF'));
     } },
-  { group: 'ブラシ', keys: 'L', jp: 'レイジーマウス（線を滑らかにする）', code: 'KeyL',
+  { group: 'ブラシ', modes: ['sculpt'], keys: 'L', jp: 'レイジーマウス（線を滑らかにする）', code: 'KeyL',
     run: () => {
       state.lazyRadius = state.lazyRadius > 0.5 ? 0 : 24; ui.syncFromState();
       ui.toast('レイジーマウス: ' + (state.lazyRadius > 0.5 ? `ON (${state.lazyRadius}px)` : 'OFF'));
     } },
 
-  // --- 形を変える ---
-  { group: '形を変える', keys: 'X', jp: 'X ミラー（左右対称）', code: 'KeyX',
+  // --- 形を変える（スカルプト）---
+  { group: '形を変える', modes: ['sculpt'], keys: 'X', jp: 'X ミラー（左右対称）', code: 'KeyX',
     run: () => {
       state.symmetry.x = !state.symmetry.x; ui.syncFromState();
       ui.toast('X ミラー: ' + (state.symmetry.x ? 'ON' : 'OFF'));
     } },
-  { group: '形を変える', keys: 'G', jp: '動的トポロジ（彫りながら細かくする）', code: 'KeyG',
+  { group: '形を変える', modes: ['sculpt'], keys: 'G', jp: '動的トポロジ（彫りながら細かくする）', code: 'KeyG',
     run: () => {
       state.dynTopo = !state.dynTopo; ui.syncFromState();
       ui.toast('動的トポロジ: ' + (state.dynTopo ? 'ON' : 'OFF'));
     } },
-  { group: '形を変える', keys: 'D', jp: 'ダイナメッシュ（形を作り直す）', code: 'KeyD',
+  { group: '形を変える', modes: ['sculpt'], keys: 'D', jp: 'ダイナメッシュ（形を作り直す）', code: 'KeyD',
     run: () => app.dynamesh() },
-  { group: '形を変える', keys: 'W', jp: 'トランスポーズ（掴んで動かす）', code: 'KeyW',
+  { group: '形を変える', modes: ['sculpt'], keys: 'W', jp: 'トランスポーズ（掴んで動かす）', code: 'KeyW',
     run: () => app.toggleTranspose() },
-  { group: '形を変える', keys: 'C', jp: '平面カットの切り替え（オフ→クリップ→トリム→スライス）', code: 'KeyC',
+  { group: '形を変える', modes: ['sculpt'], keys: 'C', jp: '平面カットの切り替え（オフ→クリップ→トリム→スライス）', code: 'KeyC',
     run: () => {
       const order = ['off', 'clip', 'trim', 'slice'];
       state.clipMode = order[(order.indexOf(state.clipMode) + 1) % order.length];
@@ -1029,24 +1071,83 @@ const SHORTCUTS = [
       const jp = { off: 'オフ', clip: 'クリップ', trim: 'トリム', slice: 'スライス' };
       ui.toast('平面カット: ' + jp[state.clipMode]);
     } },
-  { group: '形を変える', keys: 'PageUp / PageDown', jp: '分割レベルを上げる / 下げる', code: 'PageUp', prevent: true,
-    run: () => app.levelUp() },
-  { keys: 'PageDown', hidden: true, code: 'PageDown', prevent: true,
+  { group: '形を変える', modes: ['sculpt'], keys: 'PageUp / PageDown', jp: '分割レベルを上げる / 下げる',
+    code: 'PageUp', prevent: true, run: () => app.levelUp() },
+  { keys: 'PageDown', hidden: true, modes: ['sculpt'], code: 'PageDown', prevent: true,
     run: () => app.levelDown() },
 
-  // --- 表示 ---
+  // --- 選択（モデリング）---
+  { group: '選択', modes: ['model'], keys: '1 / 2 / 3', jp: '選択の単位を 頂点 / 辺 / 面 に変える',
+    match: (e) => !e.ctrlKey && !e.metaKey && !e.altKey && /^Digit[123]$/.test(e.code),
+    run: (e) => {
+      const kind = ['vert', 'edge', 'face'][parseInt(e.code.slice(5), 10) - 1];
+      app.editSetSelectMode(kind);
+      ui.toast('選択の単位: ' + { vert: '頂点', edge: '辺', face: '面' }[kind]);
+    } },
+  { group: '選択', modes: ['model'], keys: 'A', jp: 'すべて選ぶ', code: 'KeyA',
+    run: () => tools.editSelect('all') },
+  { group: '選択', modes: ['model'], keys: 'Alt+A', jp: '選択を解除する', code: 'KeyA', alt: true, prevent: true,
+    run: () => tools.editSelect('none') },
+  { group: '選択', modes: ['model'], keys: 'Ctrl+I', jp: '選択を反転する', code: 'KeyI', ctrl: true, prevent: true,
+    run: () => tools.editSelect('invert') },
+  { group: '選択', modes: ['model'], keys: 'Ctrl+L', jp: '繋がっている塊を全部選ぶ', code: 'KeyL', ctrl: true, prevent: true,
+    run: () => tools.editSelect('linked') },
+  { group: '選択', modes: ['model'], keys: 'Ctrl+Plus / Ctrl+Minus', jp: '選択を広げる / 縮める',
+    code: 'Equal', ctrl: true, prevent: true, run: () => tools.editSelect('grow') },
+  { keys: 'Ctrl+Minus', hidden: true, modes: ['model'], code: 'Minus', ctrl: true, prevent: true,
+    run: () => tools.editSelect('shrink') },
+
+  // --- ギズモ（モデリング）---
+  // Blender の G / R / S。ギズモは移動・回転・拡縮のハンドルを一度に出すので、
+  // どのキーで呼んだかで出すハンドルを絞る（そうしないと 3 つのキーが同じ意味になる）。
+  { group: 'ギズモ', modes: ['model'], keys: 'G', jp: '選択を移動（ギズモ）', code: 'KeyG',
+    run: () => app.editGizmo('move') },
+  { group: 'ギズモ', modes: ['model'], keys: 'R', jp: '選択を回転（ギズモ）', code: 'KeyR',
+    run: () => app.editGizmo('rotate') },
+  { group: 'ギズモ', modes: ['model'], keys: 'S', jp: '選択を拡大縮小（ギズモ）', code: 'KeyS',
+    run: () => app.editGizmo('scale') },
+  { group: 'ギズモ', modes: ['model'], keys: 'Shift+G', jp: 'ハンドルを全部出す（ZBrush と同じ）',
+    code: 'KeyG', shift: true, run: () => app.editGizmo(null) },
+
+  // --- 面を作る（モデリング）---
+  { group: '面を作る', modes: ['model'], keys: 'E', jp: '押し出し', code: 'KeyE',
+    run: () => tools.editModel('extrude') },
+  { group: '面を作る', modes: ['model'], keys: 'I', jp: 'インセット（領域）', code: 'KeyI',
+    run: () => tools.editModel('inset') },
+  { group: '面を作る', modes: ['model'], keys: 'Shift+I', jp: 'インセット（面ごと）', code: 'KeyI', shift: true,
+    run: () => tools.editModel('insetFaces') },
+  { group: '面を作る', modes: ['model'], keys: 'Ctrl+B', jp: 'ベベル（面取り）', code: 'KeyB', ctrl: true, prevent: true,
+    run: () => tools.editModel('bevel') },
+  { group: '面を作る', modes: ['model'], keys: 'Ctrl+R', jp: 'ループカット', code: 'KeyR', ctrl: true, prevent: true,
+    run: () => tools.editModel('loopCut') },
+  { group: '面を作る', modes: ['model'], keys: 'Ctrl+F', jp: '選択した面を細分化', code: 'KeyF', ctrl: true, prevent: true,
+    run: () => tools.editModel('subdivide') },
+  { group: '面を作る', modes: ['model'], keys: 'Ctrl+Alt+B', jp: 'ブリッジ（2 つの穴の縁を繋ぐ）',
+    code: 'KeyB', ctrl: true, alt: true, prevent: true, run: () => tools.editModel('bridge') },
+
+  // --- 減らす / 直す（モデリング）---
+  { group: '減らす / 直す', modes: ['model'], keys: 'X', jp: '選択した面を削除', code: 'KeyX',
+    run: () => tools.editApply('delete') },
+  { group: '減らす / 直す', modes: ['model'], keys: 'Ctrl+X', jp: '選択した辺を溶解', code: 'KeyX', ctrl: true, prevent: true,
+    run: () => tools.editApply('dissolve') },
+  { group: '減らす / 直す', modes: ['model'], keys: 'Shift+N', jp: '面の向きを反転', code: 'KeyN', shift: true,
+    run: () => tools.editApply('flip') },
+
+  // --- 表示（共通。A だけはモデリングで「すべて選ぶ」に譲る）---
   { group: '表示', keys: 'F', jp: '全体が入るように視点を戻す', code: 'KeyF',
     run: () => { frameCamera(); ui.toast('全体表示'); } },
   { group: '表示', keys: 'M', jp: 'マテリアル（MatCap）を次へ', code: 'KeyM',
     run: () => ui.setMaterial((state.material + 1) % renderer.matcapCount) },
-  { group: '表示', keys: 'A', jp: '陰影（AO）', code: 'KeyA',
+  { group: '表示', modes: ['sculpt'], keys: 'A', jp: '陰影（AO）', code: 'KeyA',
+    run: () => { state.ao = !state.ao; ui.syncFromState(); ui.toast('AO: ' + (state.ao ? 'ON' : 'OFF')); } },
+  { group: '表示', keys: 'Shift+A', jp: '陰影（AO）', code: 'KeyA', shift: true,
     run: () => { state.ao = !state.ao; ui.syncFromState(); ui.toast('AO: ' + (state.ao ? 'ON' : 'OFF')); } },
   { group: '表示', keys: 'Shift+W', jp: 'ワイヤフレーム', code: 'KeyW', shift: true,
     run: () => { state.wireframe = !state.wireframe; ui.syncFromState(); } },
   { group: '表示', keys: 'H', jp: '床のグリッド', code: 'KeyH',
     run: () => { state.grid = !state.grid; ui.syncFromState(); ui.toast('フロアグリッド: ' + (state.grid ? 'ON' : 'OFF')); } },
 
-  // --- ヘルプ ---
+  // --- ヘルプ（共通）---
   { group: 'ヘルプ', keys: 'F1 または ?', jp: '使い方を開く / 閉じる', code: 'F1', prevent: true,
     run: () => ui.toggleHelp() },
   // help: true は「使い方ページを開いている間も通すキー」の印
@@ -1067,17 +1168,22 @@ const SHORTCUTS = [
 // 矩形は DOM の div で描く。オーバーレイ線のバッファは編集メッシュのワイヤ表示に
 // 使っていて 1 本しかないので、そこへ混ぜると毎フレーム作り直しになる。
 // ---------------------------------------------------------------------------
-const editBox = { on: false, x0: 0, y0: 0, x1: 0, y1: 0, add: false, el: null };
+const editBox = {
+  on: false, x0: 0, y0: 0, x1: 0, y1: 0, add: false, loop: false, ring: false, el: null,
+};
 
 function editBoxEl() {
   if (!editBox.el) editBox.el = document.getElementById('editbox');
   return editBox.el;
 }
 
-function editDragBegin(x, y, add) {
+function editDragBegin(x, y, add, alt, ctrl) {
   editBox.on = true;
   editBox.x0 = x; editBox.y0 = y; editBox.x1 = x; editBox.y1 = y;
   editBox.add = !!add;
+  // Alt+クリック = エッジループ、Ctrl+Alt+クリック = エッジリング
+  editBox.loop = !!alt && !ctrl;
+  editBox.ring = !!alt && !!ctrl;
   const el = editBoxEl();
   if (el) { el.style.display = 'none'; }
 }
@@ -1117,8 +1223,24 @@ function editDragEnd() {
   const w = Math.abs(editBox.x1 - editBox.x0), h = Math.abs(editBox.y1 - editBox.y0);
   if (w < 4 && h < 4) {
     // クリック扱い。カーソル下の表面のワールド座標から一番近いものを拾う
-    if (renderer.pick.ok) tools.editPick(renderer.pick.point, editBox.add);
-    else if (!editBox.add) tools.editSelect('none');
+    if (renderer.pick.ok) {
+      // Alt+クリックは「拾った辺からループ / リングへ伸ばす」。辺モードでないと
+      // 意味がないので、そのときだけ一時的に辺で拾う（Blender と同じ感覚にする）
+      if (editBox.loop || editBox.ring) {
+        const back = state.editSelect;
+        if (back !== 'edge') tools.editSetSelectUnit('edge');
+        tools.editPick(renderer.pick.point, editBox.add);
+        tools.editModel(editBox.ring ? 'ringSelect' : 'loopSelect');
+        if (back !== 'edge') {
+          // 選んだ辺のループを、元の単位へ引き継ぐ（辺 → 面なら囲まれた面が選ばれる）
+          tools.editSetSelectUnit(back);
+        }
+      } else {
+        tools.editPick(renderer.pick.point, editBox.add);
+      }
+    } else if (!editBox.add) {
+      tools.editSelect('none');
+    }
     return;
   }
   const r = tools.editBoxSelect(makeProjector(),
@@ -1150,7 +1272,14 @@ function bindInput() {
     // ストローク開始時はリードを掴んでいる点に合わせる（初動が遅れないように）
     ptr.lazyX = ptr.x; ptr.lazyY = ptr.y; ptr.lazyInit = true;
 
-    if (e.button === 1 || (e.button === 0 && spaceDown)) {
+    // マウスの割り当てはモードで変わる。
+    //   スカルプト（ZBrush）: 中ドラッグ = 平行移動
+    //   モデリング（Blender）: 中ドラッグ = 視点回転 / Shift+中ドラッグ = 平行移動
+    // Space+ドラッグの平行移動はどちらでも効く（見失ったときの共通の逃げ道）。
+    const model = state.mode === 'model';
+    if (e.button === 1) {
+      ptr.mode = (model && !e.shiftKey) ? 'orbit' : 'pan';
+    } else if (e.button === 0 && spaceDown) {
       ptr.mode = 'pan';
     } else if (e.button === 2) {
       ptr.mode = 'orbit';
@@ -1166,9 +1295,10 @@ function bindInput() {
       } else {
         ptr.mode = 'orbit';
       }
-    } else if (e.button === 0 && state.editMode) {
-      // 編集モードでは彫らない。クリックで拾い、ドラッグで矩形選択する
-      editDragBegin(ptr.x, ptr.y, e.shiftKey);
+    } else if (e.button === 0 && model) {
+      // モデリングモードでは彫らない。クリックで拾い、ドラッグで矩形選択する。
+      // Alt+クリックでエッジループ、Ctrl+Alt+クリックでエッジリング（Blender と同じ）
+      editDragBegin(ptr.x, ptr.y, e.shiftKey, e.altKey, e.ctrlKey || e.metaKey);
       ptr.mode = 'editbox';
     } else if (e.button === 0 && state.clipMode !== 'off') {
       ptr.mode = clipDragBegin(ptr.x, ptr.y) ? 'clip' : 'orbit';
@@ -1228,7 +1358,7 @@ function bindInput() {
       }
       // 編集モード中は、動かした結果を編集メッシュへ書き戻す。
       // 頂点番号は 1:1 なのでそのまま写せる。
-      if (state.editMode && tools.edit && tools.edit.nv === mesh.nv) {
+      if (state.mode === 'model' && tools.edit && tools.edit.nv === mesh.nv) {
         tools.edit.positions.set(mesh.positions.subarray(0, mesh.nv * 3));
         tools.edit.version++;
         tools.editSyncOverlay();
@@ -1278,9 +1408,12 @@ function bindInput() {
     const ctrl = e.ctrlKey || e.metaKey;
     for (const s of SHORTCUTS) {
       if (helpOpen && s.group !== 'ヘルプ' && !s.help) continue;
+      // モードで意味が変わるキーは、いまのモードの項目だけを見る
+      if (s.modes && !s.modes.includes(state.mode)) continue;
       const hit = s.match
         ? s.match(e)
-        : s.code === e.code && !!s.ctrl === ctrl && !!s.shift === e.shiftKey;
+        : s.code === e.code && !!s.ctrl === ctrl && !!s.shift === e.shiftKey
+          && !!s.alt === e.altKey;
       if (!hit) continue;
       if (s.prevent) e.preventDefault();
       s.run(e);
@@ -1507,7 +1640,9 @@ async function boot() {
     }
   } catch { /* IndexedDB が使えない環境では黙って続行 */ }
 
-  if (!restored) ui.toast('モデルの上を左ドラッグで彫刻、背景ドラッグで回転', 3600);
+  if (!restored) {
+    ui.toast('モデルの上を左ドラッグで彫刻、背景ドラッグで回転 — Tab でモデリングモード', 4200);
+  }
 
   window.addEventListener('beforeunload', () => { store.saveSettings(state); });
 

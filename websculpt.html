@@ -797,6 +797,18 @@ input.text:focus { border-color: var(--accent); }
   letter-spacing: .05em;
   text-transform: uppercase;
 }
+/* キー一覧のモード見出し（共通 / スカルプト / モデリング）。
+   その下に小見出し + 表が並ぶので、モードの区切りが分かるよう線を引く */
+.help-sec h3.help-mode {
+  margin: 22px 0 4px;
+  font-size: 13px;
+  color: var(--accent-2);
+  text-transform: none;
+  letter-spacing: 0;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 4px;
+}
+.help-sec h3.help-mode:first-of-type { margin-top: 8px; }
 .help-p { margin: 0 0 9px; font-size: 12.5px; line-height: 1.8; color: var(--text); }
 .help-steps { margin: 4px 0 10px; padding-left: 22px; }
 .help-steps li { font-size: 12.5px; line-height: 1.85; color: var(--text); }
@@ -12100,7 +12112,13 @@ function sections(shortcuts) {
     {
       id: 'start', title: 'はじめに',
       intro: [
-        'ブラウザだけで動く 3D スカルプトツールです。粘土のかたまりを削ったり盛ったりして形を作ります。ZBrush の操作と考え方に寄せてあります。',
+        'ブラウザだけで動く 3D スカルプト / ポリゴンモデリングツールです。'
+        + '粘土のかたまりを削ったり盛ったりして形を作ります。',
+        '<b>モードが 2 つあります。</b>'
+        + '<b>スカルプトモード</b>は ZBrush の操作と考え方に寄せてあります。'
+        + '<b>モデリングモード</b>は頂点・辺・面を直接編集するモードで、Blender の操作に寄せてあります。'
+        + '<b>Tab</b> で行き来し、<b>キー操作とマウスの割り当てもモードで変わります</b>'
+        + '（キーの一覧は〔キー操作〕にモードごとに出ています）。',
         'インストールも保存先の指定も要りません。触った形はブラウザの中に自動保存されます。',
       ],
       steps: [
@@ -12109,14 +12127,23 @@ function sections(shortcuts) {
         '細かく彫りたくなったら <b>G</b> で〔動的トポロジ〕を入れます。ポリゴンが自動で増えます。',
         '<b>X</b> を押すと左右対称になります。顔や生き物はこれを入れてから始めると早いです。',
         '形が崩れてきたら <b>D</b> で〔ダイナメッシュ〕。伸びきったポリゴンが作り直されます。',
+        '面を直接組みたくなったら <b>Tab</b> でモデリングモードへ。'
+        + '押し出しやループカットで土台を作ってから、<b>Tab</b> で戻って彫ります。',
       ],
       notes: [
         '失敗しても <b>Ctrl+Z</b> で戻せます（24 回ぶん）。',
         '視点を見失ったら <b>F</b> で全体が入る位置に戻ります。',
+        '上の手順のキー（G・X・D）は<b>スカルプトモードのもの</b>です。'
+        + 'モデリングモードでは同じキーが別の操作になります（G はギズモ、X は面の削除）。',
       ],
     },
     {
       id: 'view', title: '視点とマウス操作',
+      intro: [
+        '下は<b>スカルプトモード</b>の割り当てです。'
+        + 'モデリングモードでは左ドラッグが選択、中ドラッグが視点回転（Blender と同じ）になります。'
+        + '両モードの一覧は〔キー操作〕にあります。',
+      ],
       items: [
         { name: '左ドラッグ', desc: '彫る（選んでいるブラシを使う）' },
         { name: '右ドラッグ', desc: '視点を回す' },
@@ -12130,6 +12157,8 @@ function sections(shortcuts) {
       notes: [
         'ペンタブレットの筆圧に対応しています。〔筆圧〕を入れると強さと大きさに効きます。',
         '線が震えるときは <b>L</b> で〔レイジーマウス〕。カーソルを紐で引っぱるように追従して、なめらかな線になります。',
+        '<b>Space+ドラッグ</b>の平行移動はどちらのモードでも効きます。'
+        + 'モデリングモードで中ドラッグの意味が変わっても、これは変わりません。',
       ],
     },
     {
@@ -12261,18 +12290,24 @@ function sections(shortcuts) {
       ],
     },
     {
-      id: 'polymodel', title: 'ポリゴンモデリング（編集モード）',
+      id: 'polymodel', title: 'ポリゴンモデリング（モデリングモード）',
       intro: [
         '頂点・辺・面を直接選んで編集します。Blender の編集モードに相当します。',
-        '入るときに<b>四角化</b>し、出るときに三角形化して戻します。'
+        '<b>Tab</b> でスカルプトモードと行き来します。'
+        + 'モードを切り替えると<b>キー操作とマウスの割り当ても変わります</b>'
+        + '（スカルプトは ZBrush、モデリングは Blender に寄せてあります）。'
+        + 'キーの一覧は〔キー操作〕にモードごとに出ています。',
+        'モデリングへ入るときに<b>四角化</b>し、出るときに三角形化して戻します。'
         + '立方体・円柱・トーラスは 100% 四角、球は 90% ほどが四角になります。',
       ],
       steps: [
-        '〔ポリゴンモデリング〕→〔編集モード〕を入れます。ワイヤフレームが出ます。',
-        '選択の単位（頂点 / 辺 / 面）を選びます。',
-        'ビューポートを<b>クリック</b>で選択、<b>ドラッグ</b>で矩形選択。Shift で追加します。',
-        '〔選択を動かす（ギズモ）〕でハンドルを掴んで移動・回転・拡大縮小します。',
-        '終わったら〔編集モード〕を切ると、三角形化して彫刻メッシュへ戻ります。',
+        '<b>Tab</b> を押します（または〔ポリゴンモデリング〕でモードを切り替えます）。ワイヤフレームが出ます。',
+        '選択の単位を <b>1</b> 頂点 / <b>2</b> 辺 / <b>3</b> 面 で選びます。',
+        'ビューポートを<b>クリック</b>で選択、<b>ドラッグ</b>で矩形選択。Shift で追加します。'
+        + '<b>Alt+クリック</b>でエッジループになります。',
+        '<b>E</b> 押し出し、<b>I</b> インセット、<b>Ctrl+B</b> ベベル、<b>Ctrl+R</b> ループカットで面を増やします。',
+        '<b>G</b> 移動 / <b>R</b> 回転 / <b>S</b> 拡大縮小でギズモを立てて、ハンドルを掴んで動かします。',
+        '<b>Tab</b> でスカルプトへ戻ると、三角形化して彫刻メッシュへ書き戻します。',
       ],
       items: [
         { name: 'すべて / 解除 / 反転', desc: '選択の基本操作' },
@@ -12283,10 +12318,17 @@ function sections(shortcuts) {
         { name: 'エッジリング', desc: '選択した辺から、四角を跨いで向かい側へ渡る辺を選ぶ。ループカットが入る場所' },
         { name: 'ループカット', sub: 'Ctrl+R 相当',
           desc: 'エッジリングに沿って四角を割る。本数を指定できる（1 本なら中点）' },
+        { name: 'ベベル（面取り）', sub: 'Ctrl+B 相当',
+          desc: '選択した辺の角を落として帯を張る。辺が 3 本以上集まる頂点には角の面も張るので閉じたまま' },
         { name: '押し出し', sub: 'E 相当',
           desc: '選択した面を複製して、領域の縁に側面を張る。動かす向きは頂点ごとの法線' },
-        { name: 'インセット', sub: 'Shift+I 相当',
-          desc: '面の内側に一段小さい面を作る。面ごとに処理するので、隣り合う面を同時に選ぶと境目に帯ができる' },
+        { name: 'インセット', sub: 'I 相当',
+          desc: '選択した面をまとめて 1 つの領域として縮める。領域の縁の頂点だけを内側へ寄せるので、'
+            + '隣り合う面の境目に帯ができない' },
+        { name: 'インセット（面ごと）', sub: 'Shift+I 相当',
+          desc: '面 1 枚ずつ縮める。隣り合う面を同時に選ぶと境目に細い帯ができる' },
+        { name: 'ブリッジ', sub: 'Bridge Edge Loops 相当',
+          desc: '選択した 2 つの穴の縁を四角の帯で繋ぐ。離れた穴なら筒、同じ形の上の 2 つなら取っ手になる' },
         { name: '面を細分化', desc: '選択した面を 4 分割する。隣の面にも中点を差し込むので割れ目ができない' },
         { name: '面を削除', desc: '選択した面を消す。使われなくなった頂点も一緒に消える' },
         { name: '辺を溶解', desc: '選択した辺を消して、両側の 2 面を 1 面にまとめる。四角 2 枚なら六角形になる' },
@@ -12296,15 +12338,29 @@ function sections(shortcuts) {
         '押し出しとインセットのあとは<b>新しくできた面が選択されたまま</b>なので、続けて押せます。'
         + '「インセット → 内側へ押し出し」で凹み、「押し出しを繰り返す」で腕や角が伸びます。',
         '<b>四角は彫刻すると消えます。</b>動的トポロジもダイナメッシュもリメッシュも三角形化するので、'
-        + '「編集モードで土台を組む → 彫刻へ移る」の順で使ってください'
+        + '「モデリングで土台を組む → スカルプトへ移る」の順で使ってください'
         + '（ZBrush の ZModeler と DynaMesh の関係と同じです）。',
-        '編集モードとトランスポーズ・平面カットは同時に使えません（どれも左ドラッグを使うので）。',
+        'モデリングモードとトランスポーズ・平面カットは同時に使えません（どれも左ドラッグを使うので）。'
+        + 'モデリングへ入るとどちらも切れます。',
+        'ギズモは <b>G</b> 移動 / <b>R</b> 回転 / <b>S</b> 拡大縮小で、'
+        + '<b>そのキーのハンドルだけ</b>が出ます（Blender の G / R / S に当たります）。'
+        + 'ただし Blender のような「キーを押してマウスを動かすとすぐ動く」ではなく、'
+        + 'ハンドルを掴んでドラッグします。3 種類まとめて出すには <b>Shift+G</b> です。',
         '選択している辺は橙、形の縁（穴の境界）は赤で出ます。'
         + '赤が出ていたら閉じていない場所があるという意味です。',
         'ループカットは<b>1 回に 1 リングまで</b>です。直交する 2 リングは同じ四角を共有するので、'
         + '同時に切ると分割点が浮いて穴が開きます（Blender の Ctrl+R も 1 リングずつです）。',
-        'ベベル（面取り）はまだありません。辺の両端の頂点まわりを組み替えて角を塞ぐ必要があり、'
-        + '中途半端に入れるとメッシュが黙って壊れるので入れていません。',
+        'ベベルは辺が<b>「通り抜ける」選択</b>でだけ通ります。閉じたエッジループや'
+        + '立方体の全辺のように、どの頂点にもベベル辺が 2 本以上集まっている選択が条件です。'
+        + '端が途切れる選択は帯の両側に別々の頂点を割り当てられないので、'
+        + '黙って壊さずに理由を出して断ります。',
+        'ベベルのあとは<b>張った帯が選択されたまま</b>なので、続けて押し出すと'
+        + '角に沿ったリブ（畝）になります。',
+        'ブリッジは<b>穴の縁（境界の辺）を 2 つ</b>選んで使います。'
+        + '「〔面を削除〕で穴を 2 つ開ける → 辺モードで両方の縁を選ぶ → ブリッジ」の順です。'
+        + '面に挟まれた辺（穴になっていない辺）では通りません。'
+        + '桁になる場所に既に 2 面が付いた辺があるとき（立方体の向かい合う 2 面を消した形など）は、'
+        + '非多様体になるので断ります。',
       ],
     },
     {
@@ -12382,26 +12438,55 @@ function fromTable(list) {
   }));
 }
 
-function shortcutRows(shortcuts) {
-  const groups = new Map();
+/**
+ * キー一覧をモードごとに分ける。
+ *
+ * SHORTCUTS の modes を読む（無い項目は両モードで効くので「共通」）。
+ * マウスの割り当てはキー表に無いので、モードごとに手で足す。
+ * 1 / 2 / 3・A・G・X・E・I・R のようにモードで意味が変わるキーは、
+ * こうして分けないと同じキーが 2 行並んで読めなくなる。
+ */
+function shortcutModes(shortcuts) {
+  const bucket = (s) => {
+    if (!s.modes) return 'common';
+    if (s.modes.includes('sculpt') && s.modes.includes('model')) return 'common';
+    return s.modes.includes('model') ? 'model' : 'sculpt';
+  };
+  const groups = { common: new Map(), sculpt: new Map(), model: new Map() };
   for (const s of shortcuts || []) {
     if (s.hidden || !s.group) continue;
-    if (!groups.has(s.group)) groups.set(s.group, []);
-    groups.get(s.group).push({ keys: s.keys, jp: s.jp });
+    const g = groups[bucket(s)];
+    if (!g.has(s.group)) g.set(s.group, []);
+    g.get(s.group).push({ keys: s.keys, jp: s.jp });
   }
   // 表に無いがマウス側で処理しているもの。ここだけは手で足す
-  groups.set('視点', [
+  groups.common.set('視点', [
     { keys: '右ドラッグ', jp: '視点を回す' },
     { keys: 'ホイール', jp: '寄る / 引く' },
-    { keys: '中ドラッグ / Space+ドラッグ', jp: '平行移動' },
-    ...(groups.get('視点') || []).filter(r => !/Space/.test(r.keys)),
+    { keys: 'Space+ドラッグ', jp: '平行移動（どちらのモードでも）' },
+    ...(groups.common.get('視点') || []).filter(r => !/Space/.test(r.keys)),
   ]);
-  groups.set('押している間だけ', [
-    { keys: 'Shift+ドラッグ', jp: 'スムーズ' },
-    { keys: 'Ctrl+ドラッグ', jp: 'マスクを塗る' },
-    { keys: 'Alt+ドラッグ', jp: 'ブラシの向きを反転' },
+  groups.sculpt.set('マウス', [
+    { keys: '左ドラッグ', jp: 'モデルの上なら彫る / 背景なら視点を回す' },
+    { keys: '中ドラッグ', jp: '平行移動' },
+    { keys: 'Shift+ドラッグ', jp: 'スムーズ（押している間だけ）' },
+    { keys: 'Ctrl+ドラッグ', jp: 'マスクを塗る（押している間だけ）' },
+    { keys: 'Alt+ドラッグ', jp: 'ブラシの向きを反転（押している間だけ）' },
   ]);
-  return [...groups.entries()].map(([name, rows]) => ({ name, rows }));
+  groups.model.set('マウス', [
+    { keys: '左クリック', jp: '選ぶ（Shift で追加、何も無い所で解除）' },
+    { keys: '左ドラッグ', jp: '矩形選択' },
+    { keys: 'Alt+クリック', jp: 'エッジループを選ぶ' },
+    { keys: 'Ctrl+Alt+クリック', jp: 'エッジリングを選ぶ' },
+    { keys: '中ドラッグ', jp: '視点を回す（Blender と同じ）' },
+    { keys: 'Shift+中ドラッグ', jp: '平行移動' },
+  ]);
+  const toList = (m) => [...m.entries()].map(([name, rows]) => ({ name, rows }));
+  return [
+    { mode: '共通（どちらのモードでも）', groups: toList(groups.common) },
+    { mode: 'スカルプトモード（ZBrush 準拠）', groups: toList(groups.sculpt) },
+    { mode: 'モデリングモード（Blender 準拠）', groups: toList(groups.model) },
+  ];
 }
 
 const TABLES = {
@@ -12458,17 +12543,21 @@ function renderTable(parent, t) {
 }
 
 function renderShortcuts(parent, shortcuts) {
-  for (const g of shortcutRows(shortcuts)) {
-    el('h3', null, parent).textContent = g.name;
-    const wrap = el('div', 'help-tablewrap', parent);
-    const tb = el('table', 'help-table keys', wrap);
-    const body = el('tbody', null, tb);
-    for (const r of g.rows) {
-      const row = el('tr', null, body);
-      row.dataset.search = `${r.keys} ${r.jp}`.toLowerCase();
-      el('td', 'kcell', row).innerHTML = r.keys.split(' / ')
-        .map(k => `<kbd>${k}</kbd>`).join(' / ');
-      el('td', null, row).textContent = r.jp;
+  for (const m of shortcutModes(shortcuts)) {
+    if (!m.groups.length) continue;
+    el('h3', 'help-mode', parent).textContent = m.mode;
+    for (const g of m.groups) {
+      el('div', 'subhead', parent).textContent = g.name;
+      const wrap = el('div', 'help-tablewrap', parent);
+      const tb = el('table', 'help-table keys', wrap);
+      const body = el('tbody', null, tb);
+      for (const r of g.rows) {
+        const row = el('tr', null, body);
+        row.dataset.search = `${m.mode} ${g.name} ${r.keys} ${r.jp}`.toLowerCase();
+        el('td', 'kcell', row).innerHTML = r.keys.split(' / ')
+          .map(k => `<kbd>${k}</kbd>`).join(' / ');
+        el('td', null, row).textContent = r.jp;
+      }
     }
   }
 }
@@ -13547,29 +13636,31 @@ function buildUI(app) {
       + 'レイヤー・モーフは破棄されます。';
   }
 
-  // --- ポリゴンモデリング（編集モード）------------------------------------
-  let editToggle = null, editModeSeg = null, editInfoEl = null;
+  // --- ポリゴンモデリング（モデリングモード）--------------------------------
+  let modeSeg = null, editModeSeg = null, editInfoEl = null;
   {
     const ed = section(right, 'ポリゴンモデリング', true);
     el('p', 'note', ed).textContent =
-      '彫刻メッシュを四角化して、頂点 / 辺 / 面を選んで編集します。'
-      + '入るときに四角化し、出るときに三角形化して戻します。'
-      + '四角は彫刻すると消えるので「編集モードで組む → 彫刻へ移る」の順で使います。';
-    editToggle = toggle(ed, {
-      label: '編集モード', value: state.editMode,
-      title: '四角化して編集モードに入ります（トランスポーズ / 平面カットとは同時に使えません）',
-      onChange: (on) => app.setEditMode(on),
-    });
+      'モードを切り替えると、キー操作とマウスの割り当ても変わります。'
+      + 'スカルプトは ZBrush、モデリングは Blender に寄せてあります（Tab で行き来）。'
+      + '彫刻メッシュはモデリングへ入るときに四角化し、出るときに三角形化して戻します。'
+      + '四角は彫刻すると消えるので「モデリングで組む → スカルプトへ移る」の順で使います。';
+    modeSeg = segmented(ed, [
+      { label: 'スカルプト', value: 'sculpt', title: 'ZBrush 準拠。左ドラッグで彫刻します' },
+      { label: 'モデリング', value: 'model', title: 'Blender 準拠。左ドラッグで選択します'
+        + '（トランスポーズ / 平面カットとは同時に使えません）' },
+    ], state.mode, (v) => app.setMode(v));
     editInfoEl = el('p', 'note', ed);
 
-    el('div', 'subhead', ed).textContent = '選択の単位';
+    el('div', 'subhead', ed).textContent = '選択の単位（1 / 2 / 3）';
     editModeSeg = segmented(ed, [
-      { label: '頂点', value: 'vert', title: '頂点を選ぶ' },
-      { label: '辺', value: 'edge', title: '辺を選ぶ' },
-      { label: '面', value: 'face', title: '面を選ぶ' },
+      { label: '頂点', value: 'vert', title: '頂点を選ぶ（1）' },
+      { label: '辺', value: 'edge', title: '辺を選ぶ（2）' },
+      { label: '面', value: 'face', title: '面を選ぶ（3）' },
     ], state.editSelect, (v) => app.editSetSelectMode(v));
     el('p', 'note', ed).textContent =
-      'ビューポートをクリックで選択、ドラッグで矩形選択。Shift で追加選択します。';
+      'ビューポートをクリックで選択、ドラッグで矩形選択。Shift で追加選択します。'
+      + 'Alt+クリックでエッジループ、Ctrl+Alt+クリックでエッジリングになります。';
 
     el('div', 'subhead', ed).textContent = '選択';
     btnRow(ed, [
@@ -13601,6 +13692,20 @@ function buildUI(app) {
         title: '選択した辺のエッジリングに沿って四角を割ります（Blender の Ctrl+R）',
         onClick: () => app.tools.editModel('loopCut') },
     ]);
+    slider(ed, {
+      label: 'ベベル量', min: 0.02, max: 0.49, step: 0.01, value: state.editBevel,
+      title: '角を落とす幅。区間の重心へ寄せる割合',
+      onInput: (v) => { state.editBevel = v; },
+    });
+    btnRow(ed, [
+      { label: 'ベベル（面取り）', cls: 'wide',
+        title: '選択した辺の角を落として帯を張ります（Blender の Ctrl+B）。'
+          + '〔エッジループ〕で繋がった形に選んでから使ってください',
+        onClick: () => app.tools.editModel('bevel') },
+    ]);
+    el('p', 'note', ed).textContent =
+      'ベベルは辺が「通り抜ける」選択でだけ通ります。端が途切れる選択（辺が 1 本しか'
+      + '集まらない頂点がある）は、帯の両側に別の頂点を割り当てられないので断ります。';
 
     el('div', 'subhead', ed).textContent = '面を増やす（面モードで使います）';
     slider(ed, {
@@ -13619,9 +13724,15 @@ function buildUI(app) {
       onInput: (v) => { state.editInset = v; },
     });
     btnRow(ed, [
-      { label: 'インセット', title: '面の内側に一段小さい面を作ります（Blender の Shift+I 相当。面ごと）',
+      { label: 'インセット', title: '選択した面をまとめて 1 つの領域として縮めます（Blender の I）。'
+          + '隣り合う面の境目に帯ができません',
         onClick: () => app.tools.editModel('inset') },
-      { label: '面を細分化', title: '選択した面を 4 分割します',
+      { label: 'インセット（面ごと）', title: '面 1 枚ずつ縮めます（Blender の Shift+I）。'
+          + '隣り合う面を同時に選ぶと境目に帯ができます',
+        onClick: () => app.tools.editModel('insetFaces') },
+    ]);
+    btnRow(ed, [
+      { label: '面を細分化', cls: 'wide', title: '選択した面を 4 分割します',
         onClick: () => app.tools.editModel('subdivide') },
     ]);
     el('p', 'note', ed).textContent =
@@ -13639,12 +13750,31 @@ function buildUI(app) {
       { label: '面の向きを反転', cls: 'wide', title: '選択した面の裏表を入れ替えます',
         onClick: () => app.tools.editApply('flip') },
     ]);
-    el('p', 'note', ed).textContent =
-      '選択した頂点を動かすには、〔トランスポーズ〕ではなくこの下の〔選択を動かす〕を使います。';
+
+    el('div', 'subhead', ed).textContent = '穴を繋ぐ（辺モードで使います）';
     btnRow(ed, [
-      { label: '選択を動かす（ギズモ）', cls: 'wide primary',
-        title: '選択した頂点にギズモを立てて、移動・回転・拡大縮小します',
-        onClick: () => app.editGizmo() },
+      { label: 'ブリッジ', cls: 'wide',
+        title: '選択した 2 つの穴の縁を四角の帯で繋ぎます（Blender の Bridge Edge Loops）',
+        onClick: () => app.tools.editModel('bridge') },
+    ]);
+    el('p', 'note', ed).textContent =
+      '〔面を削除〕で穴を 2 つ開け、辺モードでその縁を両方選んでから押します。'
+      + '離れた穴どうしを繋ぐと筒になり、同じ形の上の 2 つを繋ぐと取っ手になります。'
+      + '頂点数が同じ縁どうしでだけ通ります。';
+
+    el('div', 'subhead', ed).textContent = '選択を動かす（G / R / S）';
+    el('p', 'note', ed).textContent =
+      '選択した頂点を動かすには、〔トランスポーズ〕ではなくこちらを使います。'
+      + 'キーで呼ぶと、そのキーのハンドルだけが出ます（Blender の G / R / S）。';
+    btnRow(ed, [
+      { label: '移動', title: '移動の矢印だけを出します（G）', onClick: () => app.editGizmo('move') },
+      { label: '回転', title: '回転のリングだけを出します（R）', onClick: () => app.editGizmo('rotate') },
+      { label: '拡大縮小', title: '拡大縮小のハンドルだけを出します（S）', onClick: () => app.editGizmo('scale') },
+    ]);
+    btnRow(ed, [
+      { label: 'ギズモ（全部のハンドル）', cls: 'wide primary',
+        title: '移動・回転・拡大縮小のハンドルをまとめて出します（Shift+G。ZBrush のトランスポーズと同じ）',
+        onClick: () => app.editGizmo(null) },
     ]);
   }
 
@@ -14091,13 +14221,13 @@ function buildUI(app) {
     closeHelp() { help.close(); },
     toggleHelp() { help.toggle(); },
     helpIsOpen() { return help.isOpen(); },
-    /** 編集モードの表示を state / 編集メッシュに合わせる */
+    /** モードの表示を state / 編集メッシュに合わせる */
     refreshEdit() {
-      if (editToggle) editToggle.set(state.editMode);
+      if (modeSeg) modeSeg.set(state.mode);
       if (editModeSeg) editModeSeg.set(state.editSelect);
       if (!editInfoEl) return;
       const i = app.tools ? app.tools.editInfo() : null;
-      if (!i) { editInfoEl.textContent = '編集モードに入っていません。'; return; }
+      if (!i) { editInfoEl.textContent = 'スカルプトモードです（Tab でモデリングへ）。'; return; }
       const n = (x) => x.toLocaleString();
       editInfoEl.textContent =
         `頂点 ${n(i.verts)} / 辺 ${n(i.edges)} / 面 ${n(i.faces)}`
@@ -15593,8 +15723,14 @@ class Transpose {
     this._stampId = 0;
 
     this._handles = null;
+    this._filtered = [];        // only で絞ったときに返す配列（使い回す）
     this._lastScale = 1;
     this._ringScratch = new Float64Array(12);   // 矢印の先端リング（毎フレーム使い回す）
+
+    // 出すハンドルを絞る。null なら全部（ZBrush のトランスポーズ）。
+    // 'move' / 'rotate' / 'scale' を入れるとそれだけになる（Blender の G / R / S）。
+    // 'scale' は一様スケール（中心）も含める。
+    this.only = null;
 
     // --- ドラッグ状態 ---------------------------------------------------
     this._kind = null;
@@ -15929,7 +16065,19 @@ class Transpose {
         p[e * 3 + 2] = pz + (B[2] * sx + B[5] * sy + B[8] * sz) * h;
       }
     }
-    return H;
+    if (!this.only) return H;
+    const out = this._filtered;
+    out.length = 0;
+    for (const h of H) if (this._allows(h.kind)) out.push(h);
+    return out;
+  }
+
+  /** only で絞ったときに、その種類のハンドルを出すか */
+  _allows(kind) {
+    if (!this.only) return true;
+    // 中心の一様スケールは拡大縮小の仲間として扱う
+    if (this.only === 'scale') return kind === 'scale' || kind === 'uniform';
+    return kind === this.only;
   }
 
   // --- ヒットテスト -------------------------------------------------------
@@ -15962,12 +16110,14 @@ class Transpose {
 
     // 中心は矢印の根元と重なる。先に見て厳密不等号で比べることで、
     // ど真ん中を掴んだら一様スケールになる（他ツールと同じ挙動）。
-    {
+    // only で絞っているときは、出していないハンドルは掴めない
+    // （見えないものが当たると「掴んだのに違う動きをする」になる）
+    if (this._allows('uniform')) {
       const r = t + L * CENTER_HALF;
       const s = Math.sqrt(rayPointDist2(ox, oy, oz, dx, dy, dz, px, py, pz)) / r;
       if (s < best) { best = s; kind = 'uniform'; axis = -1; }
     }
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; this._allows('scale') && i < 3; i++) {
       const j = (i + 1) % 3, k = (i + 2) % 3;
       const ux = B[j * 3], uy = B[j * 3 + 1], uz = B[j * 3 + 2];
       const vx = B[k * 3], vy = B[k * 3 + 1], vz = B[k * 3 + 2];
@@ -15977,12 +16127,12 @@ class Transpose {
         px + (ux + vx) * off, py + (uy + vy) * off, pz + (uz + vz) * off)) / r;
       if (s < best) { best = s; kind = 'scale'; axis = i; }
     }
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; this._allows('move') && i < 3; i++) {
       const s = Math.sqrt(raySegDist2(ox, oy, oz, dx, dy, dz, px, py, pz,
         px + B[i * 3] * L, py + B[i * 3 + 1] * L, pz + B[i * 3 + 2] * L)) / t;
       if (s < best) { best = s; kind = 'move'; axis = i; }
     }
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; this._allows('rotate') && i < 3; i++) {
       const j = (i + 1) % 3, k = (i + 2) % 3;
       const ux = B[j * 3], uy = B[j * 3 + 1], uz = B[j * 3 + 2];
       const vx = B[k * 3], vy = B[k * 3 + 1], vz = B[k * 3 + 2];
@@ -19291,6 +19441,75 @@ function loopCut(em, cuts = 1) {
 }
 
 /**
+ * 選択面の「隅」を、頂点ごと・扇ごとのまとまりに分ける。
+ *
+ * 隅 = （面, その面のループ中の 1 頂点）。faceVerts の添字がそのまま隅の識別子に
+ * なるので、番号を振り直す必要がない。
+ *
+ * 同じ頂点の隅どうしを、**選択領域の内側の辺をまたいで**繋ぐ（Union-Find）。
+ * こうすると「ある頂点のまわりで、選択面が辺を通って繋がっているかたまり」が
+ * 1 つのまとまりになる。領域が辺では繋がらず頂点だけで触れ合っているとき
+ * （砂時計形）は、同じ頂点にまとまりが 2 つできる。
+ *
+ * 押し出しと領域インセットは、どちらも「まとまりごとに新しい頂点を 1 個作る」。
+ * 頂点ごとに 1 個で済ませると、砂時計の腰のところで辺に面が 4 枚集まって
+ * 非多様体になる。
+ *
+ * @returns {{cid: Int32Array, cvert: Int32Array, nc: number, find: (x: number) => number}}
+ *   cid[faceVerts の添字] → 隅の番号（選択外は -1）、cvert[隅] → 頂点、
+ *   find(隅) → まとまりの代表
+ */
+function cornerGroups(em, sel, selSet) {
+  const cid = new Int32Array(em.faceVerts.length).fill(-1);
+  let nc = 0;
+  for (const f of sel) for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) cid[i] = nc++;
+  const cvert = new Int32Array(nc);
+  for (const f of sel) for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) cvert[cid[i]] = em.faceVerts[i];
+  const parent = new Int32Array(nc);
+  for (let c = 0; c < nc; c++) parent[c] = c;
+  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+
+  for (const f of sel) {
+    const s = em.faceStart[f], n = em.faceSize(f);
+    for (let k = 0; k < n; k++) {
+      const ia = s + k, ib = s + (k + 1) % n;
+      const a = em.faceVerts[ia], b = em.faceVerts[ib];
+      const e = edgeOf(em, a, b);
+      if (e < 0) continue;
+      const f0 = em.edgeFace[e * 2], f1 = em.edgeFace[e * 2 + 1];
+      const g = f0 === f ? f1 : f0;
+      if (g < 0 || !selSet.has(g)) continue;
+      const gs = em.faceStart[g], gn = em.faceSize(g);
+      for (let j = 0; j < gn; j++) {
+        const u = em.faceVerts[gs + j];
+        if (u !== a && u !== b) continue;
+        const x = find(cid[u === a ? ia : ib]), y = find(cid[gs + j]);
+        if (x !== y) parent[y] = x;
+      }
+    }
+  }
+  return { cid, cvert, nc, find };
+}
+
+/** 選択領域の縁の辺（反対側の面が選択されていない辺）を、面ごとの隅の対で返す */
+function regionRim(em, sel, selSet) {
+  const rim = [];
+  for (const f of sel) {
+    const s = em.faceStart[f], n = em.faceSize(f);
+    for (let k = 0; k < n; k++) {
+      const ia = s + k, ib = s + (k + 1) % n;
+      const e = edgeOf(em, em.faceVerts[ia], em.faceVerts[ib]);
+      if (e < 0) continue;
+      const f0 = em.edgeFace[e * 2], f1 = em.edgeFace[e * 2 + 1];
+      const other = f0 === f ? f1 : f0;
+      if (other >= 0 && selSet.has(other)) continue;
+      rim.push([f, ia, ib]);
+    }
+  }
+  return rim;
+}
+
+/**
  * 選択した面を押し出す。
  *
  * 選択領域の頂点を複製して選択面をそちらへ繋ぎ替え、領域の縁に側面の四角を張る。
@@ -19303,6 +19522,15 @@ function loopCut(em, cuts = 1) {
  * 領域の平均法線ひとつで動かすと、向きの違う面をまとめて選んだときに
  * 平均が打ち消し合って動かない（実測で複製した頂点が元の位置に重なった）。
  *
+ * 複製は「頂点ごと」ではなく **「頂点のまわりで、選択辺を通って繋がる面のまとまり
+ * ごと」**。ある頂点で選択領域が辺では繋がらず頂点だけで触れ合っているとき
+ * （砂時計形）、複製を 1 個で済ませるとその縦の辺に壁が 4 枚集まって非多様体になる。
+ * まとまりごとに分ければ、それぞれが自分の縦辺を持つので辺は 2 面のままになる。
+ * 立方体の全辺をベベルして帯をまとめて押し出す流れがちょうどこれに当たる
+ * （帯は互いに辺を共有せず、24 個の扇頂点をそれぞれ 2 枚で分け合っている。
+ *  以前は非多様体辺が 48 本出ていた）。
+ * 普通の（辺で繋がった）領域ではまとまりが 1 つになるので結果は変わらない。
+ *
  * @param {number} offset 法線方向に動かす量
  */
 function extrudeSelectedFaces(em, offset = 0) {
@@ -19310,20 +19538,24 @@ function extrudeSelectedFaces(em, offset = 0) {
   for (let f = 0; f < em.nf; f++) if (em.faceAlive[f] && em.selFace[f]) sel.push(f);
   if (sel.length === 0) return { faces: 0, verts: 0, walls: 0 };
   const selSet = new Set(sel);
+  const { cid, cvert, find } = cornerGroups(em, sel, selSet);
 
-  const dup = new Map();
+  // まとまりごとに 1 個ずつ複製する
   const P = Array.from(em.positions);
   let nv = em.nv;
+  const dup = new Map();            // まとまりの代表 → 新頂点
   for (const f of sel) {
     for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) {
-      const v = em.faceVerts[i];
-      if (dup.has(v)) continue;
-      dup.set(v, nv++);
+      const r = find(cid[i]);
+      if (dup.has(r)) continue;
+      const v = cvert[r];
+      dup.set(r, nv++);
       P.push(em.positions[v * 3], em.positions[v * 3 + 1], em.positions[v * 3 + 2]);
     }
   }
+  const dupAt = (i) => dup.get(find(cid[i]));
 
-  // 頂点ごとの法線（その頂点に触っている選択面の平均）と、領域全体の平均法線
+  // まとまりごとの法線（そこに触っている選択面の平均）と、領域全体の平均法線
   const vn = new Map();
   const nrm = new Float64Array(3);
   let ax = 0, ay = 0, az = 0;
@@ -19331,9 +19563,9 @@ function extrudeSelectedFaces(em, offset = 0) {
     em.faceNormal(f, nrm);
     ax += nrm[0]; ay += nrm[1]; az += nrm[2];
     for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) {
-      const v = em.faceVerts[i];
-      let a = vn.get(v);
-      if (!a) { a = [0, 0, 0]; vn.set(v, a); }
+      const r = find(cid[i]);
+      let a = vn.get(r);
+      if (!a) { a = [0, 0, 0]; vn.set(r, a); }
       a[0] += nrm[0]; a[1] += nrm[1]; a[2] += nrm[2];
     }
   }
@@ -19342,8 +19574,8 @@ function extrudeSelectedFaces(em, offset = 0) {
     ax /= l; ay /= l; az /= l;
   }
   if (offset !== 0) {
-    for (const [v, nvi] of dup) {
-      const a = vn.get(v) || [ax, ay, az];
+    for (const [r, nvi] of dup) {
+      const a = vn.get(r) || [ax, ay, az];
       const l = Math.hypot(a[0], a[1], a[2]);
       // 法線が打ち消し合った頂点だけ、領域の平均法線で逃がす
       const dx = l > 1e-6 ? a[0] / l : ax;
@@ -19358,24 +19590,14 @@ function extrudeSelectedFaces(em, offset = 0) {
   const add = [];
   for (const f of sel) {
     const loop = [];
-    for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) loop.push(dup.get(em.faceVerts[i]));
+    for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) loop.push(dupAt(i));
     add.push(loop);
   }
-  let walls = 0;
-  for (const f of sel) {
-    const s = em.faceStart[f], n = em.faceSize(f);
-    for (let k = 0; k < n; k++) {
-      const a = em.faceVerts[s + k], b = em.faceVerts[s + (k + 1) % n];
-      const e = edgeOf(em, a, b);
-      if (e < 0) continue;
-      // 領域の縁 = 反対側の面が選択されていない（または境界）
-      const f0 = em.edgeFace[e * 2], f1 = em.edgeFace[e * 2 + 1];
-      const other = f0 === f ? f1 : f0;
-      if (other >= 0 && selSet.has(other)) continue;
-      add.push([a, b, dup.get(b), dup.get(a)]);
-      walls++;
-    }
+  const rim = regionRim(em, sel, selSet);
+  for (const [, ia, ib] of rim) {
+    add.push([em.faceVerts[ia], em.faceVerts[ib], dupAt(ib), dupAt(ia)]);
   }
+  const walls = rim.length;
 
   em.positions = new Float32Array(P);
   em.nv = nv;
@@ -19469,6 +19691,101 @@ function insetSelectedFaces(em, amount = 0.2) {
 }
 
 /**
+ * 選択した面を**領域まとめて**インセットする（Blender の I）。
+ *
+ * `insetSelectedFaces`（Shift+I 相当）が面 1 枚ずつ縮めるのに対して、こちらは
+ * 選択領域を 1 つの塊として扱う。**領域の縁の頂点だけ**を内側へ寄せた新頂点に
+ * 置き換え、領域の内側の頂点はそのまま使う。だから隣り合う面の境目に帯ができない。
+ *
+ * 内側へ寄せる向きは、その頂点に触っている**選択面の重心の平均**へ向かう方向。
+ * 面ごとインセットが「その面の重心へ寄せる」のと同じ考え方で、選択が 1 枚のときは
+ * 面ごとインセットと同じ結果になる。領域全体の重心へ寄せる方式は、大きい領域や
+ * 凹んだ領域で遠い側が中心へ吸い寄せられて潰れるので採らない。
+ *
+ * 巻き方は面ごとインセットと同じ (a, b, inner(b), inner(a))。
+ *
+ * 縁が無いとき（閉じた形を全部選んだとき）は、縮める先が無いので理由を出して断る。
+ *
+ * @param {number} amount 0..1。重心へ寄せる割合
+ */
+function insetRegion(em, amount = 0.2) {
+  const t = Math.max(0.001, Math.min(0.95, amount));
+  const sel = [];
+  for (let f = 0; f < em.nf; f++) if (em.faceAlive[f] && em.selFace[f]) sel.push(f);
+  if (sel.length === 0) return { faces: 0, verts: 0, band: 0, reason: '面が選択されていません' };
+  const selSet = new Set(sel);
+  const { cid, cvert, find } = cornerGroups(em, sel, selSet);
+
+  const rim = regionRim(em, sel, selSet);
+  if (rim.length === 0) {
+    return {
+      faces: 0, verts: 0, band: 0,
+      reason: '選択領域に縁がありません（閉じた形を全部選ぶと内側へ寄せる先がありません）。'
+        + '一部だけ選んでから実行してください',
+    };
+  }
+  // 縁に触っているまとまりだけが新頂点を持つ。内側の頂点は動かさない
+  const needs = new Set();
+  for (const [, ia, ib] of rim) { needs.add(find(cid[ia])); needs.add(find(cid[ib])); }
+
+  // まとまりごとに「触っている選択面の重心の平均」を出す
+  const acc = new Map();
+  const c = new Float64Array(3);
+  for (const f of sel) {
+    em.faceCenter(f, c);
+    for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) {
+      const r = find(cid[i]);
+      if (!needs.has(r)) continue;
+      let a = acc.get(r);
+      if (!a) { a = [0, 0, 0, 0]; acc.set(r, a); }
+      a[0] += c[0]; a[1] += c[1]; a[2] += c[2]; a[3]++;
+    }
+  }
+  const P = Array.from(em.positions);
+  let nv = em.nv;
+  const inner = new Map();          // まとまりの代表 → 内側の新頂点
+  for (const [r, a] of acc) {
+    const i3 = cvert[r] * 3;
+    const inv = 1 / a[3];
+    const ox = em.positions[i3], oy = em.positions[i3 + 1], oz = em.positions[i3 + 2];
+    P.push(ox + (a[0] * inv - ox) * t, oy + (a[1] * inv - oy) * t, oz + (a[2] * inv - oz) * t);
+    inner.set(r, nv++);
+  }
+
+  const add = [];
+  for (const f of sel) {
+    const loop = [];
+    for (let i = em.faceStart[f]; i < em.faceStart[f + 1]; i++) {
+      const w = inner.get(find(cid[i]));
+      loop.push(w === undefined ? em.faceVerts[i] : w);
+    }
+    add.push(loop);
+  }
+  for (const [, ia, ib] of rim) {
+    add.push([em.faceVerts[ia], em.faceVerts[ib], inner.get(find(cid[ib])), inner.get(find(cid[ia]))]);
+  }
+
+  // _replaceFaces は「生き残り → add」の順に並べるので、縮めた面は先頭 sel.length 枚
+  let survivors = 0;
+  for (let f = 0; f < em.nf; f++) if (em.faceAlive[f] && !selSet.has(f)) survivors++;
+
+  em.positions = new Float32Array(P);
+  em.nv = nv;
+  em.selVert = new Uint8Array(nv);
+  em._replaceFaces(sel, add);
+  em.rebuild();
+  // 縮めた領域を選択にしておく（続けて押し出せば凹みになる）
+  em.clearSelection();
+  for (let i = 0; i < sel.length; i++) {
+    const f = survivors + i;
+    if (f < em.nf && em.faceAlive[f]) em.selFace[f] = 1;
+  }
+  em.syncSelection('face');
+  em.version++; em.topoVersion++;
+  return { faces: sel.length, verts: inner.size, band: rim.length, reason: '' };
+}
+
+/**
  * 選択した面を 4 分割する（四角 → 四角 4 枚。n-gon → 四角 n 枚）。
  *
  * 辺の中点は隣の面と**共有する**。共有しないと同じ位置に頂点が 2 個できて、
@@ -19552,23 +19869,474 @@ function subdivideSelectedFaces(em) {
 }
 
 // ---------------------------------------------------------------------------
-// ベベル（面取り）は入れていない。
+// ベベル（面取り）
 //
-// 一度書いてテストに落とした。難しいのは「ベベルする辺が集まる頂点」ではなく
-// **辺の両端の頂点**。辺 (a,b) の両側 2 面を内側へ寄せて帯を張ると、a と b を
-// 使っている「3 枚目の面」との間に隙間が残る（立方体では 1 頂点に 3 面ある）。
-// 実測で境界辺 10 本・オイラー標数 0 になった。
+// 一度「辺の両側 2 面を内側へ寄せて帯を張る」だけで書いて失敗した。辺 (a,b) の
+// 両端の頂点を使っている 3 枚目の面との間に隙間が残る（立方体では 1 頂点に 3 面）。
+// 実測で境界辺 10 本・オイラー標数 0。**帯を張るだけでは駄目で、頂点を分割する
+// 必要がある。**
 //
-// 正しくやるには端の頂点まわりの面を組み替えて角を塞ぐ必要があり、
-// 「辺を独立したものに限る」という制限では回避できない（端は必ず存在する）。
-// 中途半端に通すとメッシュが黙って壊れるので、出さないことにした。段 4 の課題。
+// 正しい手順:
+//   1. 頂点まわりの面を回転順に並べる（扇）
+//   2. ベベルする辺のところで扇を区切る。k 本のベベル辺があれば k 個の区間になる
+//   3. 区間ごとに新しい頂点を 1 個作る（= 頂点の分割）
+//   4. 各面は、自分が属する区間の新頂点を使うように作り直す
+//   5. ベベル辺ごとに、両側の新頂点 4 個で帯を 1 枚張る
+//   6. **ベベル辺が 3 本以上集まる頂点には「角の面」を 1 枚張る**（前回抜けていた処理）
 // ---------------------------------------------------------------------------
-  return { edgeOf, oppositeEdgeInQuad, edgeRing, edgeLoop, selectLoopOrRing, loopCut, extrudeSelectedFaces, insetSelectedFaces, subdivideSelectedFaces };
+
+/** 面 f のループで、頂点 v の次に来る頂点への辺（出ていく辺） */
+function outEdgeAt(em, f, v) {
+  const s = em.faceStart[f], n = em.faceSize(f);
+  for (let k = 0; k < n; k++) {
+    if (em.faceVerts[s + k] !== v) continue;
+    return edgeOf(em, v, em.faceVerts[s + (k + 1) % n]);
+  }
+  return -1;
+}
+
+/**
+ * 頂点 v のまわりの面を回転順に並べる。
+ *
+ * 各面 f について「v から出ていく辺」を取り、その辺のもう片方の面へ渡る。
+ * これを繰り返すと扇を一定の向きに回れる。
+ *
+ * @returns {{faces: number[], seps: number[], closed: boolean}|null}
+ *   faces[i] と faces[i+1] の間の辺が seps[i]（閉じているなら seps は faces と同じ長さ）。
+ *   境界がある・非多様体で一周できない場合は null。
+ */
+function vertexFan(em, v) {
+  const start = em.vFaceStart[v], end = em.vFaceStart[v + 1];
+  const total = end - start;
+  if (total === 0) return null;
+  const f0 = em.vFace[start];
+  const faces = [f0], seps = [];
+  let f = f0;
+  for (let guard = 0; guard < total + 2; guard++) {
+    const e = outEdgeAt(em, f, v);
+    if (e < 0) return null;
+    const g0 = em.edgeFace[e * 2], g1 = em.edgeFace[e * 2 + 1];
+    if (g0 < 0 || g1 < 0) return null;          // 境界。扇が閉じない
+    const nxt = g0 === f ? g1 : g0;
+    seps.push(e);
+    if (nxt === f0) {
+      // 一周した。拾った面の数が v の隣接面の数と合っていなければ非多様体
+      return faces.length === total ? { faces, seps, closed: true } : null;
+    }
+    if (faces.includes(nxt)) return null;       // 8 の字。扱わない
+    faces.push(nxt);
+    f = nxt;
+  }
+  return null;
+}
+
+/**
+ * 選択した辺をベベルする（面取り）。
+ *
+ * **すべての端の頂点で「ベベルする辺が 2 本以上集まっている」ことを要求する。**
+ * 1 本しか集まらない頂点（= 帯がそこで途切れる）は、扇を 1 か所で切っても区間が
+ * 1 つしかできないため、帯の両側に別々の頂点を割り当てられない。無理に通すと
+ * 潰れた面ができる。閉じたエッジループや立方体の全辺のような「通り抜ける」選択なら
+ * どの頂点でも 2 本以上になるので、実用上はこれで足りる
+ * （〔エッジループ〕で選んでから使うのが普通の流れ）。
+ *
+ * 断るときは reason に理由を入れて返す。黙って壊すことはしない。
+ *
+ * 新頂点の位置は「その区間に属する面の重心の平均」へ amount だけ寄せた点。
+ * 辺方向に一定距離ずらす方式より自己交差しにくく、面の大きさに自然に追従する。
+ *
+ * @param {number} amount 0..0.5 くらい。区間の重心へ寄せる割合
+ */
+function bevelSelectedEdges(em, amount = 0.2) {
+  const t = Math.max(0.01, Math.min(0.49, amount));
+  const sel = [];
+  for (let e = 0; e < em.ne; e++) if (em.selEdge[e]) sel.push(e);
+  if (sel.length === 0) return { edges: 0, verts: 0, faces: 0, refused: 0, reason: '辺が選択されていません' };
+
+  // 境界・非多様体の辺は扱えない
+  const bev = [];
+  let refused = 0;
+  for (const e of sel) {
+    const f0 = em.edgeFace[e * 2], f1 = em.edgeFace[e * 2 + 1];
+    if (f0 < 0 || f1 < 0 || f0 === f1) { refused++; continue; }
+    bev.push(e);
+  }
+  if (bev.length === 0) {
+    return { edges: 0, verts: 0, faces: 0, refused, reason: '境界の辺はベベルできません' };
+  }
+  const isBev = new Uint8Array(em.ne);
+  for (const e of bev) isBev[e] = 1;
+
+  // 端の頂点ごとにベベル辺の本数を数える
+  const kAt = new Int32Array(em.nv);
+  for (const e of bev) { kAt[em.edgeA[e]]++; kAt[em.edgeB[e]]++; }
+  const affected = [];
+  for (let v = 0; v < em.nv; v++) if (kAt[v] > 0) affected.push(v);
+
+  const lone = affected.filter(v => kAt[v] === 1);
+  if (lone.length) {
+    return {
+      edges: 0, verts: 0, faces: 0, refused: bev.length,
+      reason: `ベベル辺が 1 本しか集まらない頂点が ${lone.length} 個あります。`
+        + '帯がそこで途切れるので処理できません。〔エッジループ〕で辺を繋がった形に'
+        + '選んでから実行してください',
+    };
+  }
+
+  // 扇を作る。境界や非多様体が混ざっていたら断る
+  const fans = new Map();
+  for (const v of affected) {
+    const fan = vertexFan(em, v);
+    if (!fan) {
+      return {
+        edges: 0, verts: 0, faces: 0, refused: bev.length,
+        reason: `頂点 ${v} のまわりが一周していません（境界か非多様体）。ベベルできません`,
+      };
+    }
+    fans.set(v, fan);
+  }
+
+  // 区間へ切る。faces[i] と faces[i+1] の間が seps[i]
+  const P = Array.from(em.positions);
+  let nv = em.nv;
+  // corner[(v,f)] → 新頂点
+  const newAt = new Map();
+  const key = (v, f) => v * 1048576 + f;
+  // 角の面を張るための、区間の新頂点（扇の回転順）
+  const cornerRings = new Map();
+  const c = new Float64Array(3);
+
+  for (const v of affected) {
+    const { faces, seps } = fans.get(v);
+    const m = faces.length;
+    // 区間の開始位置（seps[i] がベベル辺なら faces[i+1] が新しい区間の先頭）
+    const starts = [];
+    for (let i = 0; i < m; i++) if (isBev[seps[i]]) starts.push((i + 1) % m);
+    // kAt[v] >= 2 を保証しているので starts.length >= 2
+    const ring = [];
+    const i3 = v * 3;
+    const ox = em.positions[i3], oy = em.positions[i3 + 1], oz = em.positions[i3 + 2];
+    for (let s = 0; s < starts.length; s++) {
+      const from = starts[s];
+      const to = starts[(s + 1) % starts.length];
+      // from から to の直前までが 1 区間
+      const arc = [];
+      let i = from;
+      for (let guard = 0; guard <= m; guard++) {
+        arc.push(faces[i]);
+        i = (i + 1) % m;
+        if (i === to) break;
+      }
+      // 区間の面の重心の平均へ寄せる
+      let ax = 0, ay = 0, az = 0;
+      for (const f of arc) { em.faceCenter(f, c); ax += c[0]; ay += c[1]; az += c[2]; }
+      const inv = 1 / arc.length;
+      ax = ox + (ax * inv - ox) * t;
+      ay = oy + (ay * inv - oy) * t;
+      az = oz + (az * inv - oz) * t;
+      // **1 区間目は元の頂点スロットを使い回す。** 全部を新規にすると元の頂点が
+      // どの面からも参照されない孤児として残り、頂点数が水増しされる
+      // （立方体の全辺ベベルで 24 のはずが 32 になり、オイラー標数が 10 に見えた。
+      //  面と辺は正しかったので、位相ではなく数え方の問題だった）。
+      let id;
+      if (s === 0) {
+        id = v;
+        P[i3] = ax; P[i3 + 1] = ay; P[i3 + 2] = az;
+      } else {
+        P.push(ax, ay, az);
+        id = nv++;
+      }
+      ring.push(id);
+      for (const f of arc) newAt.set(key(v, f), id);
+    }
+    cornerRings.set(v, ring);
+  }
+  const newVerts = nv - em.nv;
+
+  // 影響を受ける頂点を使っている面を作り直す
+  const kill = new Set();
+  const add = [];
+  const touched = new Set();
+  for (const v of affected) for (const f of fans.get(v).faces) touched.add(f);
+  for (const f of touched) {
+    const s = em.faceStart[f], n = em.faceSize(f);
+    const loop = [];
+    for (let k = 0; k < n; k++) {
+      const u = em.faceVerts[s + k];
+      const r = newAt.get(key(u, f));
+      loop.push(r === undefined ? u : r);
+    }
+    add.push(loop);
+    kill.add(f);
+  }
+
+  // ベベル辺ごとの帯。
+  // f0 のループに a→b の向きで現れるなら (b0, a0, a1, b1)。
+  // 立方体の全辺ベベルで法線を計算して確かめた（下・前の辺の帯が (0,-1,-1) 方向を
+  // 向く = 外向き）。逆順にすると帯が裏返る。
+  let bands = 0;
+  const bandFirst = add.length;     // add の中で帯が始まる位置
+  for (const e of bev) {
+    const a = em.edgeA[e], b = em.edgeB[e];
+    const f0 = em.edgeFace[e * 2], f1 = em.edgeFace[e * 2 + 1];
+    const a0 = newAt.get(key(a, f0)), b0 = newAt.get(key(b, f0));
+    const a1 = newAt.get(key(a, f1)), b1 = newAt.get(key(b, f1));
+    if (a0 === undefined || b0 === undefined || a1 === undefined || b1 === undefined) continue;
+    if (a0 === a1 || b0 === b1) continue;      // 潰れる（起きないはずだが念のため）
+    const s0 = em.faceStart[f0], n0 = em.faceSize(f0);
+    let aFirst = false;
+    for (let k = 0; k < n0; k++) {
+      const u = em.faceVerts[s0 + k], w = em.faceVerts[s0 + (k + 1) % n0];
+      if (u === a && w === b) { aFirst = true; break; }
+      if (u === b && w === a) { aFirst = false; break; }
+    }
+    add.push(aFirst ? [b0, a0, a1, b1] : [a0, b0, b1, a1]);
+    bands++;
+  }
+
+  // ベベル辺が 3 本以上集まる頂点には角の面を張る。
+  // 巻き方は頂点法線（まわりの面の平均）と突き合わせて決める。扇を回る向きが
+  // 外向きになるかは形によって変わるので、計算して合わせるのが確実。
+  let corners = 0;
+  const fn = new Float64Array(3);
+  for (const v of affected) {
+    if (kAt[v] < 3) continue;
+    const ring = cornerRings.get(v);
+    if (ring.length < 3) continue;
+    let nx = 0, ny = 0, nz = 0;
+    for (const f of fans.get(v).faces) { em.faceNormal(f, fn); nx += fn[0]; ny += fn[1]; nz += fn[2]; }
+    // ring の巻き方を Newell で見て、頂点法線と逆なら反転する
+    let gx = 0, gy = 0, gz = 0;
+    for (let k = 0; k < ring.length; k++) {
+      const p = ring[k] * 3, q = ring[(k + 1) % ring.length] * 3;
+      gx += (P[p + 1] - P[q + 1]) * (P[p + 2] + P[q + 2]);
+      gy += (P[p + 2] - P[q + 2]) * (P[p] + P[q]);
+      gz += (P[p] - P[q]) * (P[p + 1] + P[q + 1]);
+    }
+    add.push(gx * nx + gy * ny + gz * nz >= 0 ? ring.slice() : ring.slice().reverse());
+    corners++;
+  }
+
+  // _replaceFaces は「生き残った面を元の順で並べたあと、add を順に足す」ので、
+  // add[i] の新しい面番号は（生き残り数 + i）になる。帯を選択に残すのに使う。
+  // 「新しい頂点だけで出来ている面」で判定する方法は使えない: 1 区間目は元の
+  // 頂点スロットを使い回すので、帯にも古い番号が混ざる。
+  let survivors = 0;
+  for (let f = 0; f < em.nf; f++) if (em.faceAlive[f] && !kill.has(f)) survivors++;
+
+  em.positions = new Float32Array(P);
+  em.nv = nv;
+  em.selVert = new Uint8Array(nv);
+  em._replaceFaces([...kill], add);
+  em.rebuild();
+  // 張った帯を選択にしておく（続けて動かせるように）
+  em.clearSelection();
+  for (let i = 0; i < bands; i++) {
+    const f = survivors + bandFirst + i;
+    if (f < em.nf && em.faceAlive[f]) em.selFace[f] = 1;
+  }
+  em.syncSelection('face');
+  em.version++; em.topoVersion++;
+  return { edges: bev.length, verts: newVerts, faces: bands, corners, refused, reason: '' };
+}
+
+// ---------------------------------------------------------------------------
+// ブリッジ（Bridge Edge Loops）
+//
+// **穴の縁（境界のループ）2 つ**を四角の帯で繋ぐ。面を消して開けた 2 つの穴を
+// 繋いで筒にする、離れた 2 つの形を繋ぐ、という使い方をする。
+//
+// 面の上を通る（境界でない）エッジループ同士のブリッジは扱わない。その場合は
+// 間の面をどう捨てるかを決める必要があり、選び方で結果が変わって黙って壊れやすい。
+// 「面を削除して穴を開けてからブリッジ」の手順なら、何が起きるか目で見て分かる。
+// ---------------------------------------------------------------------------
+
+/**
+ * 選択された境界辺を、頂点で繋いで閉じたループに分ける。
+ * どの頂点にもちょうど 2 本集まっていることを要求する（枝分かれは扱えない）。
+ */
+function selectedBoundaryLoops(em) {
+  const sel = [];
+  let interior = 0;
+  for (let e = 0; e < em.ne; e++) {
+    if (!em.selEdge[e]) continue;
+    if (em.edgeFace[e * 2 + 1] >= 0) { interior++; continue; }
+    sel.push(e);
+  }
+  if (sel.length === 0) return { loops: [], interior, reason: '' };
+
+  const at = new Map();
+  for (const e of sel) {
+    for (const v of [em.edgeA[e], em.edgeB[e]]) {
+      let a = at.get(v);
+      if (!a) { a = []; at.set(v, a); }
+      a.push(e);
+    }
+  }
+  for (const [v, a] of at) {
+    if (a.length !== 2) {
+      return {
+        loops: [], interior,
+        reason: `頂点 ${v} に選択された境界辺が ${a.length} 本集まっています`
+          + '（ループは 1 頂点につき 2 本でないと辿れません）',
+      };
+    }
+  }
+
+  const used = new Set();
+  const loops = [];
+  for (const e0 of sel) {
+    if (used.has(e0)) continue;
+    const verts = [];
+    let e = e0, v = em.edgeA[e0];
+    for (let guard = 0; guard <= sel.length; guard++) {
+      verts.push(v);
+      used.add(e);
+      const w = em.edgeA[e] === v ? em.edgeB[e] : em.edgeA[e];
+      const pair = at.get(w);
+      const nxt = pair[0] === e ? pair[1] : pair[0];
+      if (nxt === e0) break;          // 一周した
+      e = nxt; v = w;
+    }
+    if (verts.length >= 3) loops.push(verts);
+  }
+  return { loops, interior, reason: '' };
+}
+
+/**
+ * ループの並び順を「隣の面が辺を辿る向きと逆」に揃える。
+ *
+ * 辺を共有する 2 面は、その辺を必ず逆向きに辿る。だからループ側を隣の面と逆向きに
+ * 並べておけば、そのまま (a_i, a_i+1, ...) と書いた四角が隣の面と噛み合う。
+ * 巻き方が揃ったメッシュなら 1 本調べれば全体で成り立つ。
+ */
+function orientBoundaryLoop(em, verts) {
+  const e = edgeOf(em, verts[0], verts[1]);
+  if (e < 0) return verts;
+  const f = em.edgeFace[e * 2];
+  const s = em.faceStart[f], n = em.faceSize(f);
+  for (let k = 0; k < n; k++) {
+    if (em.faceVerts[s + k] === verts[0] && em.faceVerts[s + (k + 1) % n] === verts[1]) {
+      verts.reverse();                // 面と同じ向きだったので逆にする
+      break;
+    }
+  }
+  return verts;
+}
+
+/**
+ * 選択した 2 つの穴の縁を四角の帯で繋ぐ（Blender の Bridge Edge Loops）。
+ *
+ * 頂点数が同じ 2 つの閉じた境界ループを要求する。数が違うループを繋ぐには
+ * 三角で辻褄を合わせる必要があり、どこに寄せるかで結果が変わるので断る。
+ *
+ * 対応の付け方:
+ *   * 向きは巻き方から決める。両方のループを「隣の面と逆向き」に揃えたうえで、
+ *     B は A と**逆に**辿る。こうすると帯の四角が両側の面と噛み合う
+ *     （A 側の辺を A の並び順で、B 側の辺を B の並び順で辿ることになる）。
+ *   * 回転のずれ（どの頂点同士を繋ぐか）は距離で決める。捻れた帯にならないように
+ *     全対応の距離和が最小になるずれを選ぶ。ループが大きいときは総当りが重いので
+ *     a_0 に一番近い頂点を選ぶだけにする。
+ *
+ * 繋ぐと桁（縦の辺）が新しくできるが、そこに**既に 2 面が付いた辺がある**場合は
+ * 非多様体になるので断る（立方体の向かい合う 2 面を消して繋ぐと、側面の辺が
+ * ちょうどそれに当たる）。
+ */
+function bridgeEdgeLoops(em) {
+  const { loops, interior, reason } = selectedBoundaryLoops(em);
+  if (reason) return { loops: 0, faces: 0, reason };
+  if (loops.length !== 2) {
+    return {
+      loops: loops.length, faces: 0,
+      reason: loops.length === 0
+        ? '穴の縁（境界の辺）が選択されていません。'
+          + (interior > 0
+            ? `選択されている ${interior} 本はどれも面に挟まれた辺です。`
+              + '〔面を削除〕で穴を開けてから、その縁を選んでください'
+            : '〔面を削除〕で穴を開けてから、その縁を選んでください')
+        : `境界のループが ${loops.length} 個あります。ブリッジは 2 個で使います`,
+    };
+  }
+  const [A, B] = loops;
+  const n = A.length;
+  if (B.length !== n) {
+    return {
+      loops: 2, faces: 0,
+      reason: `2 つのループの頂点数が違います（${n} と ${B.length}）。`
+        + '同じ数にしてから実行してください（ループカットや細分化で数を合わせられます）',
+    };
+  }
+  const shared = new Set(A);
+  for (const v of B) {
+    if (shared.has(v)) {
+      return { loops: 2, faces: 0, reason: `2 つのループが頂点 ${v} を共有しています。離れた縁同士で使います` };
+    }
+  }
+  orientBoundaryLoop(em, A);
+  orientBoundaryLoop(em, B);
+
+  // B は A と逆向きに辿る。partner(A[i]) = B[(s - i) mod n]
+  const p = em.positions;
+  const d2 = (a, b) => {
+    const i = a * 3, j = b * 3;
+    const dx = p[i] - p[j], dy = p[i + 1] - p[j + 1], dz = p[i + 2] - p[j + 2];
+    return dx * dx + dy * dy + dz * dz;
+  };
+  const mod = (x) => ((x % n) + n) % n;
+  let best = 0;
+  if (n <= 256) {
+    let bestSum = Infinity;
+    for (let s = 0; s < n; s++) {
+      let sum = 0;
+      for (let i = 0; i < n; i++) sum += d2(A[i], B[mod(s - i)]);
+      if (sum < bestSum) { bestSum = sum; best = s; }
+    }
+  } else {
+    let bestD = Infinity;
+    for (let j = 0; j < n; j++) {
+      const d = d2(A[0], B[j]);
+      if (d < bestD) { bestD = d; best = j; }
+    }
+  }
+
+  // 桁になる辺が既に埋まっていないか先に見る
+  for (let i = 0; i < n; i++) {
+    const e = edgeOf(em, A[i], B[mod(best - i)]);
+    if (e >= 0 && em.edgeFace[e * 2 + 1] >= 0) {
+      return {
+        loops: 2, faces: 0,
+        reason: `頂点 ${A[i]} と ${B[mod(best - i)]} の間には既に 2 面が付いた辺があります。`
+          + 'ここを繋ぐと非多様体になるので断ります（向かい合う 2 面を消した立方体などが'
+          + 'これに当たります。間に段を入れるか、離れた穴同士で使ってください）',
+      };
+    }
+  }
+
+  const add = [];
+  for (let i = 0; i < n; i++) {
+    add.push([A[i], A[(i + 1) % n], B[mod(best - i - 1)], B[mod(best - i)]]);
+  }
+  let survivors = 0;
+  for (let f = 0; f < em.nf; f++) if (em.faceAlive[f]) survivors++;
+
+  em._replaceFaces([], add);
+  em.rebuild();
+  // 張った帯を選択にしておく
+  em.clearSelection();
+  for (let i = 0; i < add.length; i++) {
+    const f = survivors + i;
+    if (f < em.nf && em.faceAlive[f]) em.selFace[f] = 1;
+  }
+  em.syncSelection('face');
+  em.version++; em.topoVersion++;
+  return { loops: 2, faces: add.length, verts: n, reason: '' };
+}
+  return { edgeOf, oppositeEdgeInQuad, edgeRing, edgeLoop, selectLoopOrRing, loopCut, extrudeSelectedFaces, insetSelectedFaces, insetRegion, subdivideSelectedFaces, bevelSelectedEdges, bridgeEdgeLoops };
 })();
 
 /* ===== tools.js ===== */
 __M['tools.js'] = (function () {
-// ---------------------------------------------------------------------------
+﻿// ---------------------------------------------------------------------------
 // tools.js
 // 各機能モジュール（デフォーム / マスクツール / スカルプトレイヤー / ポリグループ /
 // トランスポーズ / クリップ / モーフ）をアプリへ束ねる層。
@@ -19593,7 +20361,7 @@ const { remesh, quadDominant, edgeLengthForTris } = __M['remesh.js'];
 const { initRemeshWorker, remeshInWorker, remeshWorkerState, remeshWorkerError, remeshWorkerWasm } = __M['remeshworker.js'];
 const { clamp } = __M['math.js'];
 const { editMeshFromSculpt, editMeshToSculpt, pickVert, pickEdge, pickFace, boxSelect } = __M['editmesh.js'];
-const { selectLoopOrRing, loopCut, extrudeSelectedFaces, insetSelectedFaces, subdivideSelectedFaces } = __M['editops.js'];
+const { selectLoopOrRing, loopCut, extrudeSelectedFaces, insetSelectedFaces, insetRegion, subdivideSelectedFaces, bevelSelectedEdges, bridgeEdgeLoops } = __M['editops.js'];
 
 /** 変形とマスク操作の既定パラメータ一式（state に置く） */
 function defaultToolState() {
@@ -20206,7 +20974,7 @@ class Tools {
       return false;
     }
     this.edit = em;
-    this.editMode = 'face';
+    this.selectUnit = 'face';
     // 表示用に三角形化して彫刻メッシュへ入れる。編集中の見た目はこれ。
     editMeshToSculpt(em, this.mesh);
     this.afterTopologyChange();
@@ -20243,7 +21011,7 @@ class Tools {
     if (!this.edit) return null;
     const st = this.edit.faceStats();
     return {
-      mode: this.editMode,
+      selectUnit: this.selectUnit,
       verts: this.edit.nv, edges: this.edit.ne,
       faces: st.faces, quad: st.quad, tri: st.tri, ngon: st.ngon,
       quadRatio: st.quadRatio,
@@ -20252,11 +21020,12 @@ class Tools {
     };
   }
 
-  editSetMode(mode) {
+  /** 選択の単位を変える。unit は 'vert' | 'edge' | 'face' */
+  editSetSelectUnit(unit) {
     if (!this.edit) return;
-    this.editMode = mode;
-    // 選択を新しいモードの主体へ持ち替える（Blender と同じ引き継ぎ）
-    this.edit.syncSelection(mode);
+    this.selectUnit = unit;
+    // 選択を新しい単位の主体へ持ち替える（Blender と同じ引き継ぎ）
+    this.edit.syncSelection(unit);
     this.editSyncOverlay();
     if (this.ui && this.ui.refreshEdit) this.ui.refreshEdit();
   }
@@ -20299,7 +21068,7 @@ class Tools {
     }
     // 選択した頂点は小さな十字で示す（頂点モードで見えるように）
     let extra = null;
-    if (this.editMode === 'vert') {
+    if (this.selectUnit === 'vert') {
       const sel = [];
       for (let v = 0; v < em.nv; v++) if (em.selVert[v]) sel.push(v);
       const cap = Math.min(sel.length, 20000);
@@ -20341,7 +21110,7 @@ class Tools {
   /** 選択操作。op は 'all' | 'none' | 'invert' | 'grow' | 'shrink' | 'linked' */
   editSelect(op) {
     if (!this.edit) return;
-    const em = this.edit, mode = this.editMode;
+    const em = this.edit, mode = this.selectUnit;
     if (op === 'all') em.selectAll(mode);
     else if (op === 'none') em.clearSelection();
     else if (op === 'invert') em.invertSelection(mode);
@@ -20360,7 +21129,7 @@ class Tools {
    */
   editPick(p, add = false) {
     if (!this.edit) return null;
-    const em = this.edit, mode = this.editMode;
+    const em = this.edit, mode = this.selectUnit;
     // 拾う範囲はモデルの大きさに対する相対値。画面の px では測れない
     // （ピッキングは表面のワールド座標を返すので、そこからの距離で決める）
     const tol = em.bounds().radius * 0.12;
@@ -20386,7 +21155,7 @@ class Tools {
   /** 矩形選択。project はワールド → 画面 */
   editBoxSelect(project, rect, add = false) {
     if (!this.edit) return null;
-    const r = boxSelect(this.edit, project, rect, this.editMode, add);
+    const r = boxSelect(this.edit, project, rect, this.selectUnit, add);
     this.editSyncOverlay();
     this.redraw();
     if (this.ui && this.ui.refreshEdit) this.ui.refreshEdit();
@@ -20395,7 +21164,8 @@ class Tools {
 
   /**
    * モデリング操作（段 2 / 段 3）。
-   * op は 'loopSelect' | 'ringSelect' | 'loopCut' | 'extrude' | 'inset' | 'subdivide'
+   * op は 'loopSelect' | 'ringSelect' | 'loopCut' | 'extrude' | 'inset' | 'insetFaces'
+   * | 'subdivide' | 'bevel' | 'bridge'
    */
   editModel(op) {
     if (!this.edit) return;
@@ -20432,13 +21202,28 @@ class Tools {
       if (r.faces === 0) { this.toast('面が選択されていません'); return; }
       this.toast(`押し出し: ${r.faces} 面 / 側面 ${r.walls} 枚`);
     } else if (op === 'inset') {
+      const r = insetRegion(em, st.editInset || 0.2);
+      if (r.faces === 0) { this.toast(r.reason || '面が選択されていません', 5000); return; }
+      this.toast(`インセット（領域）: ${r.faces} 面 / 帯 ${r.band} 枚`);
+    } else if (op === 'insetFaces') {
       const r = insetSelectedFaces(em, st.editInset || 0.2);
       if (r.faces === 0) { this.toast('面が選択されていません'); return; }
-      this.toast(`インセット: ${r.faces} 面（面ごと）`);
+      this.toast(`インセット（面ごと）: ${r.faces} 面`);
+    } else if (op === 'bridge') {
+      const r = bridgeEdgeLoops(em);
+      if (r.faces === 0) { this.toast(r.reason || '辺が選択されていません', 6000); return; }
+      this.toast(`ブリッジ: 帯 ${r.faces} 枚で 2 つの穴を繋ぎました（${r.verts} 頂点ずつ）`, 4000);
     } else if (op === 'subdivide') {
       const r = subdivideSelectedFaces(em);
       if (r.faces === 0) { this.toast('面が選択されていません'); return; }
       this.toast(`細分化: ${r.faces} 面 → ${r.faces * 4} 面（頂点 +${r.verts}）`);
+    } else if (op === 'bevel') {
+      const r = bevelSelectedEdges(em, st.editBevel || 0.2);
+      // 断るときは理由がそのまま出る。黙って壊さない方針
+      if (r.edges === 0) { this.toast(r.reason || '辺が選択されていません', 6000); return; }
+      this.toast(`ベベル: ${r.edges} 辺 → 帯 ${r.faces} 枚 / 角 ${r.corners} 枚（頂点 +${r.verts}）`
+        + `${r.refused ? `（${r.refused} 本は境界のため断りました）` : ''}`
+        + ' — 帯を選択にしてあるので続けて押し出せます', 5000);
     }
     this.editRefreshDisplay();
     if (this.ui && this.ui.refreshEdit) this.ui.refreshEdit();
@@ -20914,7 +21699,7 @@ class SubToolSet {
 
 /* ===== main.js ===== */
 __M['main.js'] = (function () {
-// ---------------------------------------------------------------------------
+﻿// ---------------------------------------------------------------------------
 // main.js - アプリ本体（状態 / 入力 / メインループ）
 // ---------------------------------------------------------------------------
 
@@ -21019,12 +21804,17 @@ const state = {
   bprLightEl: 45,          // 光の高度角（度）
   bprTransparent: false,   // 背景を透明にして書き出す
   bprGrid: false,          // 床グリッドを入れる
-  // ポリゴンモデリング（編集モード）
-  editMode: false,        // 編集モードに入っているか
+  // --- モード -------------------------------------------------------------
+  // 'sculpt' = スカルプト（ZBrush の操作を踏襲）
+  // 'model'  = ポリゴンモデリング（Blender の操作を踏襲）
+  // ショートカットもマウスの割り当てもこれで切り替わる。Tab で行き来する。
+  mode: 'sculpt',
+  // ポリゴンモデリング（モデリングモードの設定）
   editSelect: 'face',     // 'vert' | 'edge' | 'face'
   editCuts: 1,            // ループカットの本数
   editExtrude: 0.25,      // 押し出し量（モデル半径に対する割合）
   editInset: 0.2,         // インセット量 0..1
+  editBevel: 0.2,         // ベベル量 0..0.49（区間の重心へ寄せる割合）
   invertOrbitY: false,
   bgPreset: 'dark',
   bgTop: BG_PRESETS.dark.top,
@@ -21320,26 +22110,39 @@ const app = {
       busy = false;
     }
   },
-  // --- ポリゴンモデリング（編集モード）------------------------------------
-  setEditMode(on) {
+  // --- モードの切り替え ----------------------------------------------------
+  /**
+   * スカルプト（ZBrush 準拠）とモデリング（Blender 準拠）を行き来する。
+   *
+   * モデリングへ入るときに四角化し、出るときに三角形化して戻す。
+   * ショートカットとマウスの割り当ても切り替わる（SHORTCUTS の modes と
+   * pointerdown の分岐が state.mode を見ている）。
+   */
+  setMode(mode) {
     if (busy) return;
-    if (on === state.editMode) return;
-    if (on) {
-      // 編集モードとトランスポーズ / 平面カットは同時に使えない（どれも
+    const want = mode === 'model' ? 'model' : 'sculpt';
+    if (want === state.mode) return;
+    if (want === 'model') {
+      // モデリングとトランスポーズ / 平面カットは同時に使えない（どれも
       // 左ドラッグを取り合う）
       applyTransposeMode(false);
       state.clipMode = 'off';
       if (!tools.editEnter()) return;
-      state.editMode = true;
-      tools.editSetMode(state.editSelect);
+      state.mode = 'model';
+      tools.editSetSelectUnit(state.editSelect);
     } else {
+      applyTransposeMode(false);
       tools.editExit(true);
-      state.editMode = false;
+      state.mode = 'sculpt';
     }
     ui.syncFromState();
     if (ui.refreshEdit) ui.refreshEdit();
+    ui.toast(state.mode === 'model'
+      ? 'モデリングモード（Blender 準拠のキー操作）— Tab でスカルプトへ戻ります'
+      : 'スカルプトモード（ZBrush 準拠のキー操作）— Tab でモデリングへ', 3200);
   },
-  toggleEditMode() { app.setEditMode(!state.editMode); },
+  toggleMode() { app.setMode(state.mode === 'model' ? 'sculpt' : 'model'); },
+  isModel: () => state.mode === 'model',
   /**
    * 選択した頂点にギズモを立てる。
    *
@@ -21347,9 +22150,12 @@ const app = {
    * 頂点番号が 1:1** なので（triangulate は positions をそのまま渡し、setGeometry は
    * 並べ替えない）、選択をマスクへ写せば既存のギズモがそのまま効く。
    * ギズモは「マスクされていない頂点」を動かす規約なので、選択を 0、非選択を 1 にする。
+   *
+   * @param {'move'|'rotate'|'scale'|null} only 出すハンドルを絞る。Blender の
+   *   G / R / S に対応させるため。null なら全部（ZBrush のトランスポーズと同じ）
    */
-  editGizmo() {
-    if (!state.editMode || !tools.edit) { ui.toast('先に編集モードに入ります'); return; }
+  editGizmo(only = null) {
+    if (state.mode !== 'model' || !tools.edit) { ui.toast('先にモデリングモードへ入ります'); return; }
     const em = tools.edit;
     const sel = em.selectionCount();
     if (sel.verts === 0) { ui.toast('頂点が選択されていません'); return; }
@@ -21360,13 +22166,16 @@ const app = {
     }
     for (let v = 0; v < mesh.nv; v++) mesh.mask[v] = em.selVert[v] ? 0 : 1;
     mesh.markAllDirty();
+    tools.gizmo.only = only;
     if (!tools.gizmoActivate()) return;
     applyTransposeMode(true);
-    ui.toast(`${sel.verts.toLocaleString()} 頂点にギズモを立てました（ハンドルを掴んで動かします）`, 4000);
+    const jp = { move: '移動', rotate: '回転', scale: '拡大縮小' };
+    ui.toast(`${sel.verts.toLocaleString()} 頂点にギズモを立てました`
+      + `${only ? `（${jp[only]}のハンドルだけ）` : '（ハンドルを掴んで動かします）'}`, 4000);
   },
   editSetSelectMode(mode) {
     state.editSelect = mode;
-    if (state.editMode) tools.editSetMode(mode);
+    if (state.mode === 'model') tools.editSetSelectUnit(mode);
     ui.syncFromState();
   },
   setTranspose(on) { applyTransposeMode(on); },
@@ -21782,6 +22591,8 @@ function applyTransposeMode(on) {
     state.transposeMode = false;
     tools.gizmoDeactivate();
     gizmoHover = null;
+    // ハンドルの絞り込み（Blender の G / R / S）は次に立てるまで持ち越さない
+    tools.gizmo.only = null;
   }
   if (ui) ui.syncTranspose(state.transposeMode);
 }
@@ -21886,8 +22697,25 @@ function isTypingTarget(t, ctrl) {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// ショートカット
+//
+// **modes でモードを絞る。** 無ければ両モードで効く。
+//   modes: ['sculpt'] … スカルプトモードだけ（ZBrush の割り当て）
+//   modes: ['model']  … モデリングモードだけ（Blender の割り当て）
+// 1 / 2 / 3・A・G・X・E・I・R は**モードで意味が変わる**ので、同じキーの項目が
+// 2 つ並ぶ。keydown は先に一致したものを実行するが、いま使えないモードの項目は
+// 飛ばすので衝突しない。
+//
+// 使い方ページ（help.js）もこの modes を読んでモードごとの表を作る。
+// キーを増やすときはここだけ触れば表にも出る。
+// ---------------------------------------------------------------------------
 const SHORTCUTS = [
-  // --- 編集 ---
+  // --- モード（共通。いちばん上に置く）---
+  { group: 'モード', keys: 'Tab', jp: 'スカルプト ⇄ モデリングを切り替える', code: 'Tab', prevent: true,
+    run: () => app.toggleMode() },
+
+  // --- 編集（共通）---
   { group: '編集', keys: 'Ctrl+Z', jp: '元に戻す', code: 'KeyZ', ctrl: true, prevent: true,
     run: () => app.undo() },
   { group: '編集', keys: 'Ctrl+Shift+Z', jp: 'やり直す', code: 'KeyZ', ctrl: true, shift: true, prevent: true,
@@ -21895,48 +22723,48 @@ const SHORTCUTS = [
   { group: '編集', keys: 'Ctrl+Y', jp: 'やり直す（別のキー）', code: 'KeyY', ctrl: true, prevent: true,
     run: () => app.redo() },
 
-  // --- ブラシ ---
-  { group: 'ブラシ', keys: '1 〜 9, 0', jp: 'ブラシを選ぶ（左の並び順）',
-    match: (e) => !e.ctrlKey && !e.metaKey && /^Digit\d$/.test(e.code),
+  // --- ブラシ（スカルプト）---
+  { group: 'ブラシ', modes: ['sculpt'], keys: '1 〜 9, 0', jp: 'ブラシを選ぶ（左の並び順）',
+    match: (e) => !e.ctrlKey && !e.metaKey && !e.altKey && /^Digit\d$/.test(e.code),
     run: (e) => {
       const idx = (parseInt(e.code.slice(5), 10) + 9) % 10;   // 1→0, 0→9
       if (idx < BRUSH_IDS.length) ui.setBrush(BRUSH_IDS[idx]);
     } },
-  { group: 'ブラシ', keys: '[ / ]', jp: 'ブラシの大きさ', code: 'BracketLeft',
+  { group: 'ブラシ', modes: ['sculpt'], keys: '[ / ]', jp: 'ブラシの大きさ', code: 'BracketLeft',
     run: () => { state.radiusPx = clamp(state.radiusPx * 0.88, 6, 400); ui.syncFromState(); } },
-  { keys: ']', hidden: true, code: 'BracketRight',
+  { keys: ']', hidden: true, modes: ['sculpt'], code: 'BracketRight',
     run: () => { state.radiusPx = clamp(state.radiusPx * 1.14, 6, 400); ui.syncFromState(); } },
-  { group: 'ブラシ', keys: ', / .', jp: 'ブラシの強さ', code: 'Comma',
+  { group: 'ブラシ', modes: ['sculpt'], keys: ', / .', jp: 'ブラシの強さ', code: 'Comma',
     run: () => { state.strength = clamp(state.strength - 0.05, 0.01, 1); ui.syncFromState(); } },
-  { keys: '.', hidden: true, code: 'Period',
+  { keys: '.', hidden: true, modes: ['sculpt'], code: 'Period',
     run: () => { state.strength = clamp(state.strength + 0.05, 0.01, 1); ui.syncFromState(); } },
-  { group: 'ブラシ', keys: 'B', jp: 'バックフェイスマスク（裏側を彫らない）', code: 'KeyB',
+  { group: 'ブラシ', modes: ['sculpt'], keys: 'B', jp: 'バックフェイスマスク（裏側を彫らない）', code: 'KeyB',
     run: () => {
       state.backfaceMask = !state.backfaceMask; ui.syncFromState();
       ui.toast('バックフェイスマスク: ' + (state.backfaceMask ? 'ON' : 'OFF'));
     } },
-  { group: 'ブラシ', keys: 'L', jp: 'レイジーマウス（線を滑らかにする）', code: 'KeyL',
+  { group: 'ブラシ', modes: ['sculpt'], keys: 'L', jp: 'レイジーマウス（線を滑らかにする）', code: 'KeyL',
     run: () => {
       state.lazyRadius = state.lazyRadius > 0.5 ? 0 : 24; ui.syncFromState();
       ui.toast('レイジーマウス: ' + (state.lazyRadius > 0.5 ? `ON (${state.lazyRadius}px)` : 'OFF'));
     } },
 
-  // --- 形を変える ---
-  { group: '形を変える', keys: 'X', jp: 'X ミラー（左右対称）', code: 'KeyX',
+  // --- 形を変える（スカルプト）---
+  { group: '形を変える', modes: ['sculpt'], keys: 'X', jp: 'X ミラー（左右対称）', code: 'KeyX',
     run: () => {
       state.symmetry.x = !state.symmetry.x; ui.syncFromState();
       ui.toast('X ミラー: ' + (state.symmetry.x ? 'ON' : 'OFF'));
     } },
-  { group: '形を変える', keys: 'G', jp: '動的トポロジ（彫りながら細かくする）', code: 'KeyG',
+  { group: '形を変える', modes: ['sculpt'], keys: 'G', jp: '動的トポロジ（彫りながら細かくする）', code: 'KeyG',
     run: () => {
       state.dynTopo = !state.dynTopo; ui.syncFromState();
       ui.toast('動的トポロジ: ' + (state.dynTopo ? 'ON' : 'OFF'));
     } },
-  { group: '形を変える', keys: 'D', jp: 'ダイナメッシュ（形を作り直す）', code: 'KeyD',
+  { group: '形を変える', modes: ['sculpt'], keys: 'D', jp: 'ダイナメッシュ（形を作り直す）', code: 'KeyD',
     run: () => app.dynamesh() },
-  { group: '形を変える', keys: 'W', jp: 'トランスポーズ（掴んで動かす）', code: 'KeyW',
+  { group: '形を変える', modes: ['sculpt'], keys: 'W', jp: 'トランスポーズ（掴んで動かす）', code: 'KeyW',
     run: () => app.toggleTranspose() },
-  { group: '形を変える', keys: 'C', jp: '平面カットの切り替え（オフ→クリップ→トリム→スライス）', code: 'KeyC',
+  { group: '形を変える', modes: ['sculpt'], keys: 'C', jp: '平面カットの切り替え（オフ→クリップ→トリム→スライス）', code: 'KeyC',
     run: () => {
       const order = ['off', 'clip', 'trim', 'slice'];
       state.clipMode = order[(order.indexOf(state.clipMode) + 1) % order.length];
@@ -21944,24 +22772,83 @@ const SHORTCUTS = [
       const jp = { off: 'オフ', clip: 'クリップ', trim: 'トリム', slice: 'スライス' };
       ui.toast('平面カット: ' + jp[state.clipMode]);
     } },
-  { group: '形を変える', keys: 'PageUp / PageDown', jp: '分割レベルを上げる / 下げる', code: 'PageUp', prevent: true,
-    run: () => app.levelUp() },
-  { keys: 'PageDown', hidden: true, code: 'PageDown', prevent: true,
+  { group: '形を変える', modes: ['sculpt'], keys: 'PageUp / PageDown', jp: '分割レベルを上げる / 下げる',
+    code: 'PageUp', prevent: true, run: () => app.levelUp() },
+  { keys: 'PageDown', hidden: true, modes: ['sculpt'], code: 'PageDown', prevent: true,
     run: () => app.levelDown() },
 
-  // --- 表示 ---
+  // --- 選択（モデリング）---
+  { group: '選択', modes: ['model'], keys: '1 / 2 / 3', jp: '選択の単位を 頂点 / 辺 / 面 に変える',
+    match: (e) => !e.ctrlKey && !e.metaKey && !e.altKey && /^Digit[123]$/.test(e.code),
+    run: (e) => {
+      const kind = ['vert', 'edge', 'face'][parseInt(e.code.slice(5), 10) - 1];
+      app.editSetSelectMode(kind);
+      ui.toast('選択の単位: ' + { vert: '頂点', edge: '辺', face: '面' }[kind]);
+    } },
+  { group: '選択', modes: ['model'], keys: 'A', jp: 'すべて選ぶ', code: 'KeyA',
+    run: () => tools.editSelect('all') },
+  { group: '選択', modes: ['model'], keys: 'Alt+A', jp: '選択を解除する', code: 'KeyA', alt: true, prevent: true,
+    run: () => tools.editSelect('none') },
+  { group: '選択', modes: ['model'], keys: 'Ctrl+I', jp: '選択を反転する', code: 'KeyI', ctrl: true, prevent: true,
+    run: () => tools.editSelect('invert') },
+  { group: '選択', modes: ['model'], keys: 'Ctrl+L', jp: '繋がっている塊を全部選ぶ', code: 'KeyL', ctrl: true, prevent: true,
+    run: () => tools.editSelect('linked') },
+  { group: '選択', modes: ['model'], keys: 'Ctrl+Plus / Ctrl+Minus', jp: '選択を広げる / 縮める',
+    code: 'Equal', ctrl: true, prevent: true, run: () => tools.editSelect('grow') },
+  { keys: 'Ctrl+Minus', hidden: true, modes: ['model'], code: 'Minus', ctrl: true, prevent: true,
+    run: () => tools.editSelect('shrink') },
+
+  // --- ギズモ（モデリング）---
+  // Blender の G / R / S。ギズモは移動・回転・拡縮のハンドルを一度に出すので、
+  // どのキーで呼んだかで出すハンドルを絞る（そうしないと 3 つのキーが同じ意味になる）。
+  { group: 'ギズモ', modes: ['model'], keys: 'G', jp: '選択を移動（ギズモ）', code: 'KeyG',
+    run: () => app.editGizmo('move') },
+  { group: 'ギズモ', modes: ['model'], keys: 'R', jp: '選択を回転（ギズモ）', code: 'KeyR',
+    run: () => app.editGizmo('rotate') },
+  { group: 'ギズモ', modes: ['model'], keys: 'S', jp: '選択を拡大縮小（ギズモ）', code: 'KeyS',
+    run: () => app.editGizmo('scale') },
+  { group: 'ギズモ', modes: ['model'], keys: 'Shift+G', jp: 'ハンドルを全部出す（ZBrush と同じ）',
+    code: 'KeyG', shift: true, run: () => app.editGizmo(null) },
+
+  // --- 面を作る（モデリング）---
+  { group: '面を作る', modes: ['model'], keys: 'E', jp: '押し出し', code: 'KeyE',
+    run: () => tools.editModel('extrude') },
+  { group: '面を作る', modes: ['model'], keys: 'I', jp: 'インセット（領域）', code: 'KeyI',
+    run: () => tools.editModel('inset') },
+  { group: '面を作る', modes: ['model'], keys: 'Shift+I', jp: 'インセット（面ごと）', code: 'KeyI', shift: true,
+    run: () => tools.editModel('insetFaces') },
+  { group: '面を作る', modes: ['model'], keys: 'Ctrl+B', jp: 'ベベル（面取り）', code: 'KeyB', ctrl: true, prevent: true,
+    run: () => tools.editModel('bevel') },
+  { group: '面を作る', modes: ['model'], keys: 'Ctrl+R', jp: 'ループカット', code: 'KeyR', ctrl: true, prevent: true,
+    run: () => tools.editModel('loopCut') },
+  { group: '面を作る', modes: ['model'], keys: 'Ctrl+F', jp: '選択した面を細分化', code: 'KeyF', ctrl: true, prevent: true,
+    run: () => tools.editModel('subdivide') },
+  { group: '面を作る', modes: ['model'], keys: 'Ctrl+Alt+B', jp: 'ブリッジ（2 つの穴の縁を繋ぐ）',
+    code: 'KeyB', ctrl: true, alt: true, prevent: true, run: () => tools.editModel('bridge') },
+
+  // --- 減らす / 直す（モデリング）---
+  { group: '減らす / 直す', modes: ['model'], keys: 'X', jp: '選択した面を削除', code: 'KeyX',
+    run: () => tools.editApply('delete') },
+  { group: '減らす / 直す', modes: ['model'], keys: 'Ctrl+X', jp: '選択した辺を溶解', code: 'KeyX', ctrl: true, prevent: true,
+    run: () => tools.editApply('dissolve') },
+  { group: '減らす / 直す', modes: ['model'], keys: 'Shift+N', jp: '面の向きを反転', code: 'KeyN', shift: true,
+    run: () => tools.editApply('flip') },
+
+  // --- 表示（共通。A だけはモデリングで「すべて選ぶ」に譲る）---
   { group: '表示', keys: 'F', jp: '全体が入るように視点を戻す', code: 'KeyF',
     run: () => { frameCamera(); ui.toast('全体表示'); } },
   { group: '表示', keys: 'M', jp: 'マテリアル（MatCap）を次へ', code: 'KeyM',
     run: () => ui.setMaterial((state.material + 1) % renderer.matcapCount) },
-  { group: '表示', keys: 'A', jp: '陰影（AO）', code: 'KeyA',
+  { group: '表示', modes: ['sculpt'], keys: 'A', jp: '陰影（AO）', code: 'KeyA',
+    run: () => { state.ao = !state.ao; ui.syncFromState(); ui.toast('AO: ' + (state.ao ? 'ON' : 'OFF')); } },
+  { group: '表示', keys: 'Shift+A', jp: '陰影（AO）', code: 'KeyA', shift: true,
     run: () => { state.ao = !state.ao; ui.syncFromState(); ui.toast('AO: ' + (state.ao ? 'ON' : 'OFF')); } },
   { group: '表示', keys: 'Shift+W', jp: 'ワイヤフレーム', code: 'KeyW', shift: true,
     run: () => { state.wireframe = !state.wireframe; ui.syncFromState(); } },
   { group: '表示', keys: 'H', jp: '床のグリッド', code: 'KeyH',
     run: () => { state.grid = !state.grid; ui.syncFromState(); ui.toast('フロアグリッド: ' + (state.grid ? 'ON' : 'OFF')); } },
 
-  // --- ヘルプ ---
+  // --- ヘルプ（共通）---
   { group: 'ヘルプ', keys: 'F1 または ?', jp: '使い方を開く / 閉じる', code: 'F1', prevent: true,
     run: () => ui.toggleHelp() },
   // help: true は「使い方ページを開いている間も通すキー」の印
@@ -21982,17 +22869,22 @@ const SHORTCUTS = [
 // 矩形は DOM の div で描く。オーバーレイ線のバッファは編集メッシュのワイヤ表示に
 // 使っていて 1 本しかないので、そこへ混ぜると毎フレーム作り直しになる。
 // ---------------------------------------------------------------------------
-const editBox = { on: false, x0: 0, y0: 0, x1: 0, y1: 0, add: false, el: null };
+const editBox = {
+  on: false, x0: 0, y0: 0, x1: 0, y1: 0, add: false, loop: false, ring: false, el: null,
+};
 
 function editBoxEl() {
   if (!editBox.el) editBox.el = document.getElementById('editbox');
   return editBox.el;
 }
 
-function editDragBegin(x, y, add) {
+function editDragBegin(x, y, add, alt, ctrl) {
   editBox.on = true;
   editBox.x0 = x; editBox.y0 = y; editBox.x1 = x; editBox.y1 = y;
   editBox.add = !!add;
+  // Alt+クリック = エッジループ、Ctrl+Alt+クリック = エッジリング
+  editBox.loop = !!alt && !ctrl;
+  editBox.ring = !!alt && !!ctrl;
   const el = editBoxEl();
   if (el) { el.style.display = 'none'; }
 }
@@ -22032,8 +22924,24 @@ function editDragEnd() {
   const w = Math.abs(editBox.x1 - editBox.x0), h = Math.abs(editBox.y1 - editBox.y0);
   if (w < 4 && h < 4) {
     // クリック扱い。カーソル下の表面のワールド座標から一番近いものを拾う
-    if (renderer.pick.ok) tools.editPick(renderer.pick.point, editBox.add);
-    else if (!editBox.add) tools.editSelect('none');
+    if (renderer.pick.ok) {
+      // Alt+クリックは「拾った辺からループ / リングへ伸ばす」。辺モードでないと
+      // 意味がないので、そのときだけ一時的に辺で拾う（Blender と同じ感覚にする）
+      if (editBox.loop || editBox.ring) {
+        const back = state.editSelect;
+        if (back !== 'edge') tools.editSetSelectUnit('edge');
+        tools.editPick(renderer.pick.point, editBox.add);
+        tools.editModel(editBox.ring ? 'ringSelect' : 'loopSelect');
+        if (back !== 'edge') {
+          // 選んだ辺のループを、元の単位へ引き継ぐ（辺 → 面なら囲まれた面が選ばれる）
+          tools.editSetSelectUnit(back);
+        }
+      } else {
+        tools.editPick(renderer.pick.point, editBox.add);
+      }
+    } else if (!editBox.add) {
+      tools.editSelect('none');
+    }
     return;
   }
   const r = tools.editBoxSelect(makeProjector(),
@@ -22065,7 +22973,14 @@ function bindInput() {
     // ストローク開始時はリードを掴んでいる点に合わせる（初動が遅れないように）
     ptr.lazyX = ptr.x; ptr.lazyY = ptr.y; ptr.lazyInit = true;
 
-    if (e.button === 1 || (e.button === 0 && spaceDown)) {
+    // マウスの割り当てはモードで変わる。
+    //   スカルプト（ZBrush）: 中ドラッグ = 平行移動
+    //   モデリング（Blender）: 中ドラッグ = 視点回転 / Shift+中ドラッグ = 平行移動
+    // Space+ドラッグの平行移動はどちらでも効く（見失ったときの共通の逃げ道）。
+    const model = state.mode === 'model';
+    if (e.button === 1) {
+      ptr.mode = (model && !e.shiftKey) ? 'orbit' : 'pan';
+    } else if (e.button === 0 && spaceDown) {
       ptr.mode = 'pan';
     } else if (e.button === 2) {
       ptr.mode = 'orbit';
@@ -22081,9 +22996,10 @@ function bindInput() {
       } else {
         ptr.mode = 'orbit';
       }
-    } else if (e.button === 0 && state.editMode) {
-      // 編集モードでは彫らない。クリックで拾い、ドラッグで矩形選択する
-      editDragBegin(ptr.x, ptr.y, e.shiftKey);
+    } else if (e.button === 0 && model) {
+      // モデリングモードでは彫らない。クリックで拾い、ドラッグで矩形選択する。
+      // Alt+クリックでエッジループ、Ctrl+Alt+クリックでエッジリング（Blender と同じ）
+      editDragBegin(ptr.x, ptr.y, e.shiftKey, e.altKey, e.ctrlKey || e.metaKey);
       ptr.mode = 'editbox';
     } else if (e.button === 0 && state.clipMode !== 'off') {
       ptr.mode = clipDragBegin(ptr.x, ptr.y) ? 'clip' : 'orbit';
@@ -22143,7 +23059,7 @@ function bindInput() {
       }
       // 編集モード中は、動かした結果を編集メッシュへ書き戻す。
       // 頂点番号は 1:1 なのでそのまま写せる。
-      if (state.editMode && tools.edit && tools.edit.nv === mesh.nv) {
+      if (state.mode === 'model' && tools.edit && tools.edit.nv === mesh.nv) {
         tools.edit.positions.set(mesh.positions.subarray(0, mesh.nv * 3));
         tools.edit.version++;
         tools.editSyncOverlay();
@@ -22193,9 +23109,12 @@ function bindInput() {
     const ctrl = e.ctrlKey || e.metaKey;
     for (const s of SHORTCUTS) {
       if (helpOpen && s.group !== 'ヘルプ' && !s.help) continue;
+      // モードで意味が変わるキーは、いまのモードの項目だけを見る
+      if (s.modes && !s.modes.includes(state.mode)) continue;
       const hit = s.match
         ? s.match(e)
-        : s.code === e.code && !!s.ctrl === ctrl && !!s.shift === e.shiftKey;
+        : s.code === e.code && !!s.ctrl === ctrl && !!s.shift === e.shiftKey
+          && !!s.alt === e.altKey;
       if (!hit) continue;
       if (s.prevent) e.preventDefault();
       s.run(e);
@@ -22417,7 +23336,9 @@ async function boot() {
     }
   } catch { /* IndexedDB が使えない環境では黙って続行 */ }
 
-  if (!restored) ui.toast('モデルの上を左ドラッグで彫刻、背景ドラッグで回転', 3600);
+  if (!restored) {
+    ui.toast('モデルの上を左ドラッグで彫刻、背景ドラッグで回転 — Tab でモデリングモード', 4200);
+  }
 
   window.addEventListener('beforeunload', () => { store.saveSettings(state); });
 

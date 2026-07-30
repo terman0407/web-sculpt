@@ -170,8 +170,14 @@ export class Transpose {
     this._stampId = 0;
 
     this._handles = null;
+    this._filtered = [];        // only で絞ったときに返す配列（使い回す）
     this._lastScale = 1;
     this._ringScratch = new Float64Array(12);   // 矢印の先端リング（毎フレーム使い回す）
+
+    // 出すハンドルを絞る。null なら全部（ZBrush のトランスポーズ）。
+    // 'move' / 'rotate' / 'scale' を入れるとそれだけになる（Blender の G / R / S）。
+    // 'scale' は一様スケール（中心）も含める。
+    this.only = null;
 
     // --- ドラッグ状態 ---------------------------------------------------
     this._kind = null;
@@ -506,7 +512,19 @@ export class Transpose {
         p[e * 3 + 2] = pz + (B[2] * sx + B[5] * sy + B[8] * sz) * h;
       }
     }
-    return H;
+    if (!this.only) return H;
+    const out = this._filtered;
+    out.length = 0;
+    for (const h of H) if (this._allows(h.kind)) out.push(h);
+    return out;
+  }
+
+  /** only で絞ったときに、その種類のハンドルを出すか */
+  _allows(kind) {
+    if (!this.only) return true;
+    // 中心の一様スケールは拡大縮小の仲間として扱う
+    if (this.only === 'scale') return kind === 'scale' || kind === 'uniform';
+    return kind === this.only;
   }
 
   // --- ヒットテスト -------------------------------------------------------
@@ -539,12 +557,14 @@ export class Transpose {
 
     // 中心は矢印の根元と重なる。先に見て厳密不等号で比べることで、
     // ど真ん中を掴んだら一様スケールになる（他ツールと同じ挙動）。
-    {
+    // only で絞っているときは、出していないハンドルは掴めない
+    // （見えないものが当たると「掴んだのに違う動きをする」になる）
+    if (this._allows('uniform')) {
       const r = t + L * CENTER_HALF;
       const s = Math.sqrt(rayPointDist2(ox, oy, oz, dx, dy, dz, px, py, pz)) / r;
       if (s < best) { best = s; kind = 'uniform'; axis = -1; }
     }
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; this._allows('scale') && i < 3; i++) {
       const j = (i + 1) % 3, k = (i + 2) % 3;
       const ux = B[j * 3], uy = B[j * 3 + 1], uz = B[j * 3 + 2];
       const vx = B[k * 3], vy = B[k * 3 + 1], vz = B[k * 3 + 2];
@@ -554,12 +574,12 @@ export class Transpose {
         px + (ux + vx) * off, py + (uy + vy) * off, pz + (uz + vz) * off)) / r;
       if (s < best) { best = s; kind = 'scale'; axis = i; }
     }
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; this._allows('move') && i < 3; i++) {
       const s = Math.sqrt(raySegDist2(ox, oy, oz, dx, dy, dz, px, py, pz,
         px + B[i * 3] * L, py + B[i * 3 + 1] * L, pz + B[i * 3 + 2] * L)) / t;
       if (s < best) { best = s; kind = 'move'; axis = i; }
     }
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; this._allows('rotate') && i < 3; i++) {
       const j = (i + 1) % 3, k = (i + 2) % 3;
       const ux = B[j * 3], uy = B[j * 3 + 1], uz = B[j * 3 + 2];
       const vx = B[k * 3], vy = B[k * 3 + 1], vz = B[k * 3 + 2];

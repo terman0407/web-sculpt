@@ -787,6 +787,18 @@ input.text:focus { border-color: var(--accent); }
   letter-spacing: .05em;
   text-transform: uppercase;
 }
+/* キー一覧のモード見出し（共通 / スカルプト / モデリング）。
+   その下に小見出し + 表が並ぶので、モードの区切りが分かるよう線を引く */
+.help-sec h3.help-mode {
+  margin: 22px 0 4px;
+  font-size: 13px;
+  color: var(--accent-2);
+  text-transform: none;
+  letter-spacing: 0;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 4px;
+}
+.help-sec h3.help-mode:first-of-type { margin-top: 8px; }
 .help-p { margin: 0 0 9px; font-size: 12.5px; line-height: 1.8; color: var(--text); }
 .help-steps { margin: 4px 0 10px; padding-left: 22px; }
 .help-steps li { font-size: 12.5px; line-height: 1.85; color: var(--text); }
