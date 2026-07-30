@@ -248,6 +248,31 @@ const app = {
   fillColor() { sculptor.fillColor(state.paintColor); ui.toast('全体を塗りました'); },
   setRenderScale(v) { renderer.setRenderScale(v); },
   setView(name) { camera.setView(name); ui.toast('視点: ' + name); },
+  /**
+   * 選択している部分に寄る（Blender のテンキー「.」= View Selected）。
+   * モデリングモードで選択があるときだけ選択の範囲に寄り、それ以外は全体表示。
+   */
+  frameSelection() {
+    const em = state.mode === 'model' ? tools.edit : null;
+    if (!em || em.selectionCount().verts === 0) { frameCamera(); ui.toast('全体表示'); return; }
+    let lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    let n = 0;
+    for (let v = 0; v < em.nv; v++) {
+      if (!em.selVert[v]) continue;
+      n++;
+      for (let e = 0; e < 3; e++) {
+        const p = em.positions[v * 3 + e];
+        if (p < lo[e]) lo[e] = p;
+        if (p > hi[e]) hi[e] = p;
+      }
+    }
+    if (n === 0) { frameCamera(); return; }
+    const r = Math.max(1e-3, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 0.5);
+    V3.set(camera.target, (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2);
+    // 画角に収まる距離。少し余白を持たせる
+    camera.distance = r / Math.tan(camera.fov * 0.5) * 1.6;
+    ui.toast(`選択 ${n.toLocaleString()} 頂点に寄りました`);
+  },
 
   // --- 分割レベル（SDiv） ----------------------------------------------
   divide() {
@@ -441,6 +466,8 @@ const app = {
     }
     ui.syncFromState();
     if (ui.refreshEdit) ui.refreshEdit();
+    // そのモードでいちばん使うタブへ移す（探し回らずに済むように）
+    if (ui.setTab) ui.setTab(state.mode === 'model' ? 'model' : 'sculpt');
     ui.toast(state.mode === 'model'
       ? 'モデリングモード（Blender 準拠のキー操作）— Tab でスカルプトへ戻ります'
       : 'スカルプトモード（ZBrush 準拠のキー操作）— Tab でモデリングへ', 3200);
@@ -1340,6 +1367,32 @@ const SHORTCUTS = [
     run: () => { state.wireframe = !state.wireframe; ui.syncFromState(); } },
   { group: '表示', keys: 'H', jp: '床のグリッド', code: 'KeyH',
     run: () => { state.grid = !state.grid; ui.syncFromState(); ui.toast('フロアグリッド: ' + (state.grid ? 'ON' : 'OFF')); } },
+
+  // --- 視点（共通。Blender のテンキーに合わせる）---
+  { group: '視点', keys: 'テンキー 1 / 3 / 7', jp: '正面 / 右 / 上（Ctrl を足すと反対側）',
+    match: (e) => !e.shiftKey && !e.altKey && /^Numpad[137]$/.test(e.code),
+    prevent: true,
+    run: (e) => {
+      const back = e.ctrlKey || e.metaKey;
+      const at = { Numpad1: back ? 'back' : 'front', Numpad3: back ? 'left' : 'right',
+        Numpad7: back ? 'bottom' : 'top' }[e.code];
+      camera.setView(at);
+      ui.toast('視点: ' + { front: '正面', back: '背面', right: '右', left: '左', top: '上', bottom: '下' }[at]);
+    } },
+  { group: '視点', keys: 'テンキー 4 / 6 / 8 / 2', jp: '15° ずつ回す',
+    match: (e) => !e.ctrlKey && !e.metaKey && !e.altKey && /^Numpad[4682]$/.test(e.code),
+    prevent: true,
+    run: (e) => {
+      // orbit は画面 px で受けるので、15° 相当の px に換算して渡す（0.0075 rad/px）
+      const step = (15 * Math.PI / 180) / 0.0075;
+      const d = { Numpad4: [-step, 0], Numpad6: [step, 0], Numpad8: [0, -step], Numpad2: [0, step] }[e.code];
+      camera.invertOrbitY = state.invertOrbitY;
+      camera.orbit(d[0], d[1]);
+    } },
+  { group: '視点', keys: 'テンキー .', jp: '選択部分に寄る（モデリング）/ 全体表示',
+    code: 'NumpadDecimal', prevent: true, run: () => app.frameSelection() },
+  { group: '視点', keys: 'Home', jp: '全体が入るように視点を戻す', code: 'Home', prevent: true,
+    run: () => { frameCamera(); ui.toast('全体表示'); } },
 
   // --- ヘルプ（共通）---
   { group: 'ヘルプ', keys: 'F1 または ?', jp: '使い方を開く / 閉じる', code: 'F1', prevent: true,

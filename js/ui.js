@@ -1,4 +1,4 @@
-// ---------------------------------------------------------------------------
+﻿// ---------------------------------------------------------------------------
 // ui.js - DOM パネルの構築。state を直接読み書きし、必要な時だけ app にコールバック。
 // ---------------------------------------------------------------------------
 
@@ -227,6 +227,47 @@ export function buildUI(app) {
   const statsEl = document.getElementById('stats');
   const toastEl = document.getElementById('toast');
 
+  // --- 右パネルをタブに分ける ---------------------------------------------
+  //
+  // 節が 20 以上あって縦一列だと、目的の項目までスクロールが遠い。役割ごとに
+  // 分けて、いっぺんに見えるのは 4〜6 節までに抑える。
+  //
+  // タブを跨いだ節も DOM には残す（display: none で隠すだけ）。作り直す方式にすると
+  // 節ごとに持っている参照（スライダーやリスト）を張り替える必要があって、
+  // syncFromState / refreshXxx が全部壊れる。
+  //
+  // モードを切り替えたときは、そのモードでいちばん使うタブへ自動で移る
+  // （スカルプト → 〔彫る〕、モデリング → 〔モデリング〕）。
+  const TABS = [
+    { id: 'sculpt', label: '彫る', title: 'ブラシ・アルファ・シンメトリ・マスク' },
+    { id: 'topo', label: 'トポロジ', title: '動的トポロジ・分割・ダイナメッシュ・リメッシュ' },
+    { id: 'model', label: 'モデル', title: 'ポリゴンモデリング（モデリングモード）' },
+    { id: 'tools', label: 'ツール', title: 'デフォーム・レイヤー・グループ・サブツールなど' },
+    { id: 'view', label: '表示', title: 'マテリアル・面の陰影・視点・レンダリング' },
+    { id: 'file', label: '保存', title: 'ブラウザ内保存' },
+  ];
+  const tabBar = el('div', 'tabbar', right);
+  const P = {};                       // タブ id → 節を入れる箱
+  const tabBtns = {};
+  let curTab = 'sculpt';
+  for (const t of TABS) {
+    const b = el('button', 'tab', tabBar);
+    b.textContent = t.label;
+    b.title = t.title;
+    b.onclick = () => setTab(t.id);
+    tabBtns[t.id] = b;
+    P[t.id] = el('div', 'tabpage', right);
+  }
+  function setTab(id) {
+    if (!P[id]) return;
+    curTab = id;
+    for (const t of TABS) {
+      tabBtns[t.id].classList.toggle('on', t.id === id);
+      P[t.id].classList.toggle('show', t.id === id);
+    }
+    right.scrollTop = 0;
+  }
+
   // --- 追加ツールのパネル用に持ち回る参照 --------------------------------
   // section() を作る順で参照が必要になるので、先に宣言しておく。
   let deformAxisSeg = null;
@@ -373,7 +414,7 @@ export function buildUI(app) {
   ]);
 
   // --- 右：ブラシ設定 ---------------------------------------------------
-  const bs = section(right, 'ブラシ');
+  const bs = section(P.sculpt, 'ブラシ');
   const sRadius = slider(bs, {
     label: '半径 (画面px)', min: 6, max: 400, step: 1, value: state.radiusPx,
     fmt: v => v.toFixed(0), title: '[ / ] キーで変更',
@@ -488,7 +529,7 @@ export function buildUI(app) {
   }
 
   // --- シンメトリ -------------------------------------------------------
-  const sy = section(right, 'シンメトリ');
+  const sy = section(P.sculpt, 'シンメトリ');
   const symRow = el('div', 'btnrow', sy);
   const symBtns = {};
   for (const ax of ['x', 'y', 'z']) {
@@ -503,7 +544,7 @@ export function buildUI(app) {
   }
 
   // --- トポロジ ---------------------------------------------------------
-  const tp = section(right, '動的トポロジ');
+  const tp = section(P.topo, '動的トポロジ');
   const tDyn = toggle(tp, {
     label: 'ダイナミックトポロジ', value: state.dynTopo,
     title: 'ストローク中に自動で再分割する（G キー）',
@@ -532,7 +573,7 @@ export function buildUI(app) {
   ]);
 
   // --- 分割レベル（SDiv） -----------------------------------------------
-  const sd = section(right, '分割レベル');
+  const sd = section(P.topo, '分割レベル');
   const lvlLabel = el('div', 'lvl', sd);
   btnRow(sd, [
     { label: '◀ 下げる', title: 'PageDown', onClick: () => app.levelDown() },
@@ -558,7 +599,7 @@ export function buildUI(app) {
   }
 
   // --- ダイナメッシュ ---------------------------------------------------
-  const dm = section(right, 'ダイナメッシュ');
+  const dm = section(P.topo, 'ダイナメッシュ');
   const sDynaRes = slider(dm, {
     label: '解像度', min: 24, max: 320, step: 4, value: state.dynaResolution,
     fmt: v => v.toFixed(0),
@@ -586,7 +627,7 @@ export function buildUI(app) {
     + 'ラフに形を出す → ダイナメッシュ → 彫り込む、を繰り返すのが基本の流れです。';
 
   // --- マスク -----------------------------------------------------------
-  const mk = section(right, 'マスク');
+  const mk = section(P.sculpt, 'マスク');
   btnRow(mk, [
     { label: 'クリア', onClick: () => app.clearMask() },
     { label: '反転', onClick: () => app.invertMask() },
@@ -596,7 +637,7 @@ export function buildUI(app) {
   // --- サブツール ---------------------------------------------------------
   // ZBrush の SubTool 相当。1 つのシーンに独立したメッシュを複数置き、
   // 編集できるのはアクティブな 1 つだけ。
-  const su = section(right, 'サブツール');
+  const su = section(P.tools, 'サブツール');
   {
     subtoolList = listBox(su, {
       empty: '（サブツールなし）',
@@ -643,7 +684,7 @@ export function buildUI(app) {
 
   // --- アルファ / ストローク ---------------------------------------------
   // ZBrush の Alpha パレットと Stroke パレット相当。
-  const al = section(right, 'アルファ / ストローク', true);
+  const al = section(P.sculpt, 'アルファ / ストローク', true);
   {
     el('div', 'subhead', al).textContent = 'ブラシアルファ（断面形状）';
     const grid = el('div', 'alphagrid', al);
@@ -722,7 +763,7 @@ export function buildUI(app) {
   // ZBrush の Deformation パレット相当。スライダーは値を決めるだけで、
   // 「適用」を押した瞬間に 1 回だけ効く破壊的操作（Undo で戻す）。
   // onInput で毎回掛けるとドラッグ中に何十回も適用されてしまう。
-  const df = section(right, 'デフォーム', true);
+  const df = section(P.tools, 'デフォーム', true);
   {
     const axisRow = el('div', null, df);
     el('div', 'subhead', axisRow).textContent = '軸';
@@ -756,7 +797,7 @@ export function buildUI(app) {
   }
 
   // --- マスクツール -----------------------------------------------------
-  const mkt = section(right, 'マスクツール', true);
+  const mkt = section(P.tools, 'マスクツール', true);
   {
     el('div', 'subhead', mkt).textContent = '合成方法';
     segmented(mkt, [
@@ -803,7 +844,7 @@ export function buildUI(app) {
   }
 
   // --- スカルプトレイヤー -----------------------------------------------
-  const ly = section(right, 'スカルプトレイヤー', true);
+  const ly = section(P.tools, 'スカルプトレイヤー', true);
   {
     layerList = listBox(ly, {
       empty: '（レイヤーなし。「＋」で追加）',
@@ -830,7 +871,7 @@ export function buildUI(app) {
   }
 
   // --- ポリグループ / 部分表示 ------------------------------------------
-  const pg = section(right, 'ポリグループ', true);
+  const pg = section(P.tools, 'ポリグループ', true);
   {
     el('div', 'subhead', pg).textContent = 'グループを作る';
     btnRow(pg, GROUP_METHODS.map((g) => ({
@@ -872,7 +913,7 @@ export function buildUI(app) {
   }
 
   // --- モーフターゲット --------------------------------------------------
-  const mo = section(right, 'モーフターゲット', true);
+  const mo = section(P.tools, 'モーフターゲット', true);
   {
     btnRow(mo, [
       { label: '記憶', cls: 'primary', title: 'いまの形をモーフターゲットとして記憶する', onClick: () => app.tools.morphStore() },
@@ -897,7 +938,7 @@ export function buildUI(app) {
   }
 
   // --- リメッシュ（ZRemesher 相当） ---------------------------------------
-  const rm = section(right, 'リメッシュ', true);
+  const rm = section(P.topo, 'リメッシュ');
   {
     remeshTrisSlider = slider(rm, {
       label: '目標ポリゴン数', min: 500, max: 300000, step: 500, value: state.remeshTris,
@@ -957,7 +998,7 @@ export function buildUI(app) {
   // --- ポリゴンモデリング（モデリングモード）--------------------------------
   let modeSeg = null, editModeSeg = null, editInfoEl = null;
   {
-    const ed = section(right, 'ポリゴンモデリング', true);
+    const ed = section(P.model, 'ポリゴンモデリング');
     el('p', 'note', ed).textContent =
       'モードを切り替えると、キー操作とマウスの割り当ても変わります。'
       + 'スカルプトは ZBrush、モデリングは Blender に寄せてあります（Tab で行き来）。'
@@ -1151,7 +1192,7 @@ export function buildUI(app) {
   rpv.addEventListener('pointerdown', (e) => { if (e.target === rpv) rpvClose(); });
 
   {
-    const rd = section(right, 'レンダリング', true);
+    const rd = section(P.view, 'レンダリング', true);
     el('p', 'note', rd).textContent =
       '影・高品質 AO・輪郭線を入れて解像度を上げ、静止画として PNG に書き出します。'
       + 'ビューポートの表示は変わりません（押したときだけ別に描きます）。';
@@ -1240,7 +1281,7 @@ export function buildUI(app) {
   }
 
   // --- クリップ / トリム -------------------------------------------------
-  const cl = section(right, 'クリップ / トリム', true);
+  const cl = section(P.tools, 'クリップ / トリム', true);
   {
     el('div', 'subhead', cl).textContent = 'ドラッグで切る';
     clipModeSeg = segmented(cl, [
@@ -1274,7 +1315,7 @@ export function buildUI(app) {
   }
 
   // --- トランスポーズ ----------------------------------------------------
-  const tr = section(right, 'トランスポーズ', true);
+  const tr = section(P.tools, 'トランスポーズ', true);
   {
     transposeToggle = toggle(tr, {
       label: 'トランスポーズ（W キー）', value: false,
@@ -1293,7 +1334,7 @@ export function buildUI(app) {
   }
 
   // --- マテリアル -------------------------------------------------------
-  const mt = section(right, 'マテリアル');
+  const mt = section(P.view, 'マテリアル');
   const matGrid = el('div', 'matgrid', mt);
   const matBtns = [];
   MATERIALS.forEach((m, i) => {
@@ -1332,7 +1373,7 @@ export function buildUI(app) {
     '頂点を割らずに描画側で法線を切り替えるので、切り替えても形もポリゴン数も変わりません。';
 
   // --- ブラウザ内保存 ---------------------------------------------------
-  const sv = section(right, '保存（ブラウザ内）');
+  const sv = section(P.file, '保存（ブラウザ内）');
   const nameInput = el('input', 'text', sv);
   nameInput.type = 'text';
   nameInput.placeholder = 'スロット名（例: head-01）';
@@ -1397,7 +1438,7 @@ export function buildUI(app) {
   }
 
   // --- 表示 -------------------------------------------------------------
-  const dp = section(right, '表示', true);
+  const dp = section(P.view, '表示');
   const tWire = toggle(dp, {
     label: 'ワイヤフレーム', value: state.wireframe, title: 'W キー',
     onChange: v => { state.wireframe = v; },
@@ -1455,31 +1496,8 @@ export function buildUI(app) {
     { label: 'AO のみ', value: 1, title: 'SSAO の結果だけを表示' },
   ], state.debugView, (v) => { state.debugView = v; });
 
-  // --- ヘルプ -----------------------------------------------------------
-  const hp = section(right, '操作方法', true);
-  hp.innerHTML = `
-    <table class="keys">
-      <tr><td>左ドラッグ（モデル上）</td><td>彫刻</td></tr>
-      <tr><td>左ドラッグ（背景）/ 右ドラッグ</td><td>回転</td></tr>
-      <tr><td>中ドラッグ / Space+左</td><td>平行移動</td></tr>
-      <tr><td>ホイール</td><td>ズーム</td></tr>
-      <tr><td>Shift+ドラッグ</td><td>スムーズ</td></tr>
-      <tr><td>Alt+ドラッグ</td><td>ブラシ反転（掘る）</td></tr>
-      <tr><td>Ctrl+ドラッグ</td><td>マスクを塗る</td></tr>
-      <tr><td>Ctrl+Alt+ドラッグ</td><td>マスクを消す</td></tr>
-      <tr><td>1 … 0</td><td>ブラシ切り替え</td></tr>
-      <tr><td>[ ]</td><td>ブラシ半径</td></tr>
-      <tr><td>, .</td><td>ブラシ強さ</td></tr>
-      <tr><td>X / G / W / A / M</td><td>Xミラー / 動的トポロジ / ワイヤ / AO / マテリアル</td></tr>
-      <tr><td>D</td><td>ダイナメッシュ実行</td></tr>
-      <tr><td>L / B / H</td><td>レイジーマウス / バックフェイスマスク / グリッド</td></tr>
-      <tr><td>PageUp / PageDown</td><td>分割レベルを上げる / 下げる</td></tr>
-      <tr><td>F</td><td>モデル全体を表示</td></tr>
-      <tr><td>Ctrl+Z / Ctrl+Shift+Z</td><td>元に戻す / やり直し</td></tr>
-    </table>`;
-
   // --- 視点プリセット ----------------------------------------------------
-  const vw = section(right, '視点', true);
+  const vw = section(P.view, '視点');
   btnRow(vw, [
     { label: '正面', onClick: () => app.setView('front') },
     { label: '背面', onClick: () => app.setView('back') },
@@ -1490,6 +1508,13 @@ export function buildUI(app) {
     { label: '上', onClick: () => app.setView('top') },
     { label: '下', onClick: () => app.setView('bottom') },
     { label: '全体表示 (F)', onClick: () => app.frameCamera() },
+  ]);
+  el('p', 'note', vw).textContent =
+    'テンキーでも切り替えられます（1 正面 / 3 右 / 7 上、Ctrl を足すと反対側）。'
+    + '4 / 6 / 8 / 2 で 15° ずつ回り、. で選択部分に寄ります。';
+  btnRow(vw, [
+    { label: '? 使い方を開く (F1)', cls: 'wide',
+      title: 'キー操作の一覧はこちら（モードごとに出ます）', onClick: () => help.toggle() },
   ]);
   btnRow(vw, [
     { label: '設定を初期化', title: '保存された UI 設定を消す', onClick: () => app.resetSettings() },
@@ -1550,7 +1575,23 @@ export function buildUI(app) {
     if (h !== statHtml) { statsEl.innerHTML = h; statHtml = h; }
   }
 
+  // 節を作る順は「参照が要る順」で決まるので、見せたい順に並べ直す。
+  // appendChild はノードを動かすので、書いた順にそのまま並ぶ
+  const reorder = (page, titles) => {
+    for (const t of titles) {
+      const sec = [...page.children].find((c) => {
+        const h = c.querySelector('.sec-head');
+        return h && h.textContent.includes(t);
+      });
+      if (sec) page.appendChild(sec);
+    }
+  };
+  reorder(P.view, ['マテリアル', '表示', '視点', 'レンダリング']);
+  reorder(P.tools, ['サブツール', 'デフォーム', 'トランスポーズ', 'クリップ / トリム',
+    'マスクツール', 'スカルプトレイヤー', 'ポリグループ', 'モーフターゲット']);
+
   // 初回描画
+  setTab(state.mode === 'model' ? 'model' : 'sculpt');
   refreshLayers();
   refreshGroups();
   refreshMorph();
@@ -1565,6 +1606,9 @@ export function buildUI(app) {
     closeHelp() { help.close(); },
     toggleHelp() { help.toggle(); },
     helpIsOpen() { return help.isOpen(); },
+    /** 右パネルのタブを切り替える */
+    setTab(id) { setTab(id); },
+    currentTab() { return curTab; },
     /** モードの表示を state / 編集メッシュに合わせる */
     refreshEdit() {
       if (modeSeg) modeSeg.set(state.mode);

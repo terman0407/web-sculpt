@@ -166,7 +166,45 @@ html, body {
 }
 
 /* ---------- 右パネル ---------- */
-.panel { padding: 4px 0 40px; }
+.panel { padding: 0 0 40px; }
+
+/* 右パネルのタブ。節が 20 以上あるので役割で分ける。
+   スクロールしても選んでいるタブが見えるように上に貼り付ける */
+.tabbar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 1px;
+  padding: 0;
+  background: var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.tab {
+  padding: 9px 2px;
+  background: var(--panel-2);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tab:hover { background: #1e222a; color: var(--text); }
+.tab.on {
+  background: var(--panel);
+  border-bottom-color: var(--accent);
+  color: var(--text);
+  font-weight: 600;
+}
+.tabpage { display: none; }
+.tabpage.show { display: block; }
+
 .section { border-bottom: 1px solid var(--line); }
 .sec-head {
   width: 100%;

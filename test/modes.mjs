@@ -461,6 +461,56 @@ try {
   const ring = await run(`return window.WebSculpt.tools.editInfo().sel;`);
   ok(ring.edges > 1, `Ctrl+Alt+クリックでリングへ伸びる (${ring.edges})`);
 
+  // --- 右パネルのタブ -------------------------------------------------------
+  head('右パネルのタブ');
+  {
+    r = await run(`const W = window.WebSculpt;
+      const bar = document.querySelector('.tabbar');
+      const tabs = [...document.querySelectorAll('.tab')];
+      const pages = [...document.querySelectorAll('.tabpage')];
+      return {
+        n: tabs.length, labels: tabs.map(t => t.textContent),
+        overflow: bar.scrollWidth > bar.clientWidth + 1,
+        clipped: tabs.some(t => t.scrollWidth > t.clientWidth + 1),
+        shown: pages.filter(p => p.classList.contains('show')).length,
+        empty: pages.filter(p => p.querySelectorAll('.sec-head').length === 0).length,
+        cur: W.ui.currentTab(),
+        secs: pages.map(p => [...p.querySelectorAll('.sec-head')].length),
+      };`);
+    ok(r.n === 6, `タブが 6 つある (${r.n}: ${r.labels.join('/')})`);
+    ok(!r.overflow, 'タブが横に溢れていない');
+    ok(!r.clipped, 'タブの文字が切れていない');
+    ok(r.shown === 1, `見えているページはいつも 1 つ (${r.shown})`);
+    ok(r.empty === 0, `空のタブが無い (${r.empty})`);
+    ok(Math.max(...r.secs) <= 8, `1 タブに詰め込みすぎていない (最大 ${Math.max(...r.secs)} 節)`);
+    console.log(`       節の配分: ${r.secs.join(' / ')}（合計 ${r.secs.reduce((a, b) => a + b, 0)}）`);
+
+    // モードを切り替えるとそのモードのタブへ移る
+    await run(`window.WebSculpt.app.setMode('sculpt'); return 1;`);
+    await frames(3);
+    r = await run(`return { cur: window.WebSculpt.ui.currentTab() };`);
+    ok(r.cur === 'sculpt', `スカルプトへ入ると〔彫る〕タブへ移る (${r.cur})`);
+    await key('Tab', 'Tab');
+    await frames(4);
+    r = await run(`const W = window.WebSculpt;
+      const page = [...document.querySelectorAll('.tabpage')].find(p => p.classList.contains('show'));
+      return { cur: W.ui.currentTab(), mode: W.state.mode,
+        secs: [...page.querySelectorAll('.sec-head')].map(s => s.textContent.replace('▾','').trim()) };`);
+    ok(r.mode === 'model' && r.cur === 'model',
+      `モデリングへ入ると〔モデル〕タブへ移る (${r.cur})`);
+    ok(r.secs.includes('ポリゴンモデリング'), `見えているのがモデリングの節 (${r.secs.join(',')})`);
+
+    // タブを手で切り替えられる
+    await run(`window.WebSculpt.ui.setTab('view'); return 1;`);
+    await frames(2);
+    r = await run(`const page = [...document.querySelectorAll('.tabpage')].find(p => p.classList.contains('show'));
+      return { cur: window.WebSculpt.ui.currentTab(),
+        first: (page.querySelector('.sec-head') || {}).textContent || '' };`);
+    ok(r.cur === 'view', `タブを手で切り替えられる (${r.cur})`);
+    ok(/マテリアル/.test(r.first), `表示タブの先頭はマテリアル (${r.first.replace('▾', '').trim()})`);
+    await run(`window.WebSculpt.ui.setTab('model'); return 1;`);
+  }
+
   // --- 使い方ページがモードごとの表を出す ----------------------------------
   head('使い方ページのキー表');
   r = await run(`const W = window.WebSculpt;
