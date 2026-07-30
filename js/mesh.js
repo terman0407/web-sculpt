@@ -41,6 +41,103 @@ function growU8(src, used, cap) {
   return a;
 }
 
+// ---------------------------------------------------------------------------
+// スナップショット（アンドゥ）の配列の持ち方
+//
+// 詳しくは SculptMesh#snapshot のコメント。ここは「差分をどこまで許すか」と
+// 「全長へ戻す」処理。History（sculptor.js）がこれを使って履歴を組む。
+// ---------------------------------------------------------------------------
+
+/** スナップショットが差分にできる配列 */
+export const SNAP_KEYS = ['positions', 'colors', 'mask', 'vAlive', 'tris'];
+
+// 差分の連鎖の上限。全長へ戻すのに「アンカーからここまで」の回数だけ
+// 差分を当てるので、深くすると省メモリだが undo が遅くなる。
+// 8 なら 260 万頂点でも 1 回の undo で 8 回ぶんの適用で済む。
+const SNAP_MAX_DEPTH = 8;
+
+/**
+ * 差分にする / 全長を持つの判定。
+ *
+ * 差分は 1 要素あたり「添字 4 バイト + 値 elemBytes」。全長は 1 要素 elemBytes。
+ * だから差分が得になるのは、変わった割合が elemBytes / (4 + elemBytes) より
+ * 小さいとき（Float32 なら 1/2、Uint8 なら 1/5）。ぎりぎりで差分にしても
+ * ほとんど縮まないので 0.8 を掛けて余裕を取る。
+ */
+function deltaCap(n, elemBytes) {
+  return Math.floor(n * (elemBytes / (4 + elemBytes)) * 0.8);
+}
+
+/** 1 つの配列のスナップショット表現を作る */
+function snapEntry(key, src, n, prev, base, shared) {
+  const pe = prev ? prev[key] : null;
+  const pa = base ? base[key] : null;
+  if (pe && pa && pa.length === n) {
+    const cap = deltaCap(n, src.BYTES_PER_ELEMENT);
+    let changed = 0;
+    for (let i = 0; i < n; i++) {
+      if (pa[i] !== src[i] && ++changed > cap) break;
+    }
+    if (changed === 0) { shared.push(key); return pe; }
+    if (changed <= cap) {
+      const depth = pe.delta ? pe.depth + 1 : 1;
+      if (depth <= SNAP_MAX_DEPTH) {
+        const idx = new Int32Array(changed);
+        const val = new src.constructor(changed);
+        let w = 0;
+        for (let i = 0; i < n && w < changed; i++) {
+          if (pa[i] !== src[i]) { idx[w] = i; val[w] = src[i]; w++; }
+        }
+        return { delta: true, from: prev, idx, val, depth };
+      }
+    }
+  }
+  return src.slice(0, n);
+}
+
+/**
+ * スナップショットの配列を全長へ戻す。
+ *
+ * 差分ならアンカー（全長を持っている履歴）まで遡り、そこから**古い方から順に**
+ * 差分を当てる。同じ要素を何度も上書きすることがあるので順番は変えられない。
+ * 確保は 1 回だけ（アンカーの複製）。
+ */
+export function resolveSnapshot(state, key) {
+  const chain = [];
+  let s = state;
+  while (s[key] && s[key].delta) { chain.push(s[key]); s = s[key].from; }
+  const anchor = s[key];
+  if (chain.length === 0) return anchor;
+  const out = anchor.slice();
+  for (let c = chain.length - 1; c >= 0; c--) {
+    const idx = chain[c].idx, val = chain[c].val;
+    for (let i = 0; i < idx.length; i++) out[idx[i]] = val[i];
+  }
+  return out;
+}
+
+/**
+ * 差分をほどいて全長に置き換える。
+ *
+ * 差分は `from` で**前のスナップショットのオブジェクト**を指すので、履歴を
+ * 捨てても指されている限り解放されない。古い履歴を捨てたら残った先頭に
+ * これを掛けて、捨てた履歴への参照を切る。
+ *
+ * 共有（前の履歴と同じ配列を指している）はほどかなくてよい。配列 1 本を
+ * 指しているだけで、履歴オブジェクトを掴んでいるわけではないから。
+ */
+export function materializeSnapshot(state) {
+  let n = 0;
+  for (const key of SNAP_KEYS) {
+    if (!state[key] || !state[key].delta) continue;
+    state[key] = resolveSnapshot(state, key);
+    n++;
+    const i = state.shared.indexOf(key);
+    if (i >= 0) state.shared.splice(i, 1);
+  }
+  return n;
+}
+
 export class SculptMesh {
   constructor(capV = 4096, capT = 8192) {
     this.capV = 0;
@@ -802,33 +899,37 @@ export class SculptMesh {
   /**
    * アンドゥ用のスナップショット。
    *
-   * @param {object} [prev] 直前のスナップショット。**中身が同じ配列は
-   *   コピーせず、前の履歴のものをそのまま指す**（restore は読むだけなので安全）。
+   * 配列ごとに **3 つの形** のどれかを持つ（`resolveSnapshot` で全長へ戻す）:
    *
-   *   1 ストロークで全部が変わることはまずない。粘土で彫れば positions だけ、
-   *   ポリペイントなら colors だけ、マスクを塗れば mask だけが変わり、接続
-   *   （tris / vAlive / フリーリスト）は動的トポロジを使わない限り変わらない。
-   *   260 万頂点だと 1 件 132MB のうち tris が 63MB、colors が 31MB を占めるので、
-   *   共有しないと 320MB の上限に 2 件しか収まらず「2 回しか戻れない」ことになる。
+   *   1. **共有** — 中身が 1 つも変わっていなければ、前の履歴の入れ物を
+   *      そのまま指す（restore は読むだけなので安全）。コストは 0。
+   *   2. **差分** — 変わった要素だけを `{delta, from, idx, val}` で持つ。
+   *      `from` は**前のスナップショットのオブジェクト**。全長へ戻すときは
+   *      アンカー（全長を持っている履歴）まで遡ってから差分を当てていく。
+   *   3. **全長** — 上の 2 つが使えないとき（長さが変わった = トポロジが変わった、
+   *      変わった要素が多すぎる、差分の連鎖が深すぎる）は切り出してコピーする。
    *
-   *   判定は **中身の比較**。topoVersion では駄目で、addVertex はこれを上げないし、
-   *   上げ忘れが 1 か所あるだけで履歴が黙って壊れる（違う接続を共有してしまう）。
-   *   比較は違いが出た時点で打ち切るので、変わった配列に対しては実質無料。
+   * 1 ストロークで全部が変わることはまずない。粘土で彫れば positions だけ、
+   * ポリペイントなら colors だけ、マスクを塗れば mask だけが変わり、接続
+   * （tris / vAlive / フリーリスト）は動的トポロジを使わない限り変わらない。
+   * さらに **変わるのは筆の下の数千頂点だけ** なので、そこを差分にすると
+   * 1 件あたりが桁で小さくなる。260 万頂点で 1 件 44.6MB（戻れるのは 7 回）
+   * だったものが、差分なら数十 KB で済む。
+   *
+   * 判定は **中身の比較**。topoVersion では駄目で、addVertex はこれを上げないし、
+   * 上げ忘れが 1 か所あるだけで履歴が黙って壊れる（違う接続を共有してしまう）。
+   * 比較は上限を超えた時点で打ち切る。
+   *
+   * @param {object} [prev] 直前のスナップショット
+   * @param {object} [base] prev の**中身**（全長の配列を key ごとに持つ）。
+   *   差分を取る相手。prev が差分の連鎖でも毎回ほどかずに済むよう、History が
+   *   materialize したものを渡す。無ければ差分にせず全長を持つ
    */
-  snapshot(prev = null) {
+  snapshot(prev = null, base = null) {
     const nv = this.nv, nt = this.nt;
     const shared = [];
-    /** 中身が同じなら前のを指す。違えば切り出してコピーする */
-    const keep = (key, src, n) => {
-      const p = prev ? prev[key] : null;
-      if (p && p.length === n) {
-        let same = true;
-        for (let i = 0; i < n; i++) { if (p[i] !== src[i]) { same = false; break; } }
-        if (same) { shared.push(key); return p; }
-      }
-      return src.slice(0, n);
-    };
-    /** フリーリストは JS 配列なので別扱い */
+    const lens = { positions: nv * 3, colors: nv * 3, mask: nv, vAlive: nv, tris: nt * 3 };
+    /** フリーリストは JS 配列なので別扱い（小さいので差分にしない） */
     const keepList = (key, src) => {
       const p = prev ? prev[key] : null;
       if (p && p.length === src.length) {
@@ -838,29 +939,28 @@ export class SculptMesh {
       }
       return src.slice();
     };
-    return {
+    const out = {
       nv, nt,
       liveVerts: this.liveVerts, liveTris: this.liveTris,
-      positions: keep('positions', this.positions, nv * 3),
-      colors: keep('colors', this.colors, nv * 3),
-      mask: keep('mask', this.mask, nv),
-      vAlive: keep('vAlive', this.vAlive, nv),
-      tris: keep('tris', this.tris, nt * 3),
       freeVerts: keepList('freeVerts', this.freeVerts),
       freeTris: keepList('freeTris', this.freeTris),
-      // 前の履歴と共有している配列の名前（メモリ量を二重に数えないため）
+      // 前の履歴と共有している配列の名前（診断用）
       shared,
     };
+    for (const key of SNAP_KEYS) {
+      out[key] = snapEntry(key, this[key], lens[key], prev, base, shared);
+    }
+    return out;
   }
 
   restore(s) {
     this._allocVerts(s.nv);
     this._allocTris(s.nt);
-    this.positions.set(s.positions);
-    this.colors.set(s.colors);
-    this.mask.set(s.mask);
-    this.vAlive.set(s.vAlive);
-    this.tris.set(s.tris);
+    this.positions.set(resolveSnapshot(s, 'positions'));
+    this.colors.set(resolveSnapshot(s, 'colors'));
+    this.mask.set(resolveSnapshot(s, 'mask'));
+    this.vAlive.set(resolveSnapshot(s, 'vAlive'));
+    this.tris.set(resolveSnapshot(s, 'tris'));
     this.nv = s.nv; this.nt = s.nt;
     this.liveVerts = s.liveVerts; this.liveTris = s.liveTris;
     this.freeVerts = s.freeVerts.slice();

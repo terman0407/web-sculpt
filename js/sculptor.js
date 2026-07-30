@@ -9,7 +9,7 @@
 // ---------------------------------------------------------------------------
 
 import { V3, clamp } from './math.js';
-import { RING_STRIDE } from './mesh.js';
+import { RING_STRIDE, SNAP_KEYS, materializeSnapshot } from './mesh.js';
 import { BrushEngine, needsTopology, usesDelta } from './brushes.js';
 import { refineRegion } from './dyntopo.js';
 import { dynamesh } from './dynamesh.js';
@@ -143,70 +143,127 @@ function descend(mesh, start, p, maxSteps = 400) {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * アンドゥの履歴。
+ *
+ * 各履歴は `mesh.snapshot()` の形（配列ごとに 共有 / 差分 / 全長）で持つ。
+ * 差分を取る相手として **直前の履歴の中身を全長で 1 組だけ** 抱える（`base`）。
+ * これがないと、差分の連鎖を毎コミットでほどく必要があって重い。
+ * base 1 組ぶんは余分に食うが、1 件ごとの差分が桁で小さくなるので釣りが出る
+ * （260 万頂点で 1 件 44.6MB / 7 回 → base 44.6MB + 差分数十 KB で上限まで戻れる）。
+ *
+ * **base は「いまの履歴（states[cur]）の中身」と必ず一致していること。**
+ * ずれると差分が嘘の値を持ち、undo で形が黙って壊れる。だから履歴が動く
+ * 操作（reset / commit / undo / redo）のあとは必ず `_syncBase` を通す。
+ */
 export class History {
   constructor(limit = 24, byteLimit = 320 * 1024 * 1024) {
     this.limit = limit;
     this.byteLimit = byteLimit;
     this.states = [];
     this.cur = -1;
+    this.base = null;      // states[cur] の中身（全長）。差分を取る相手
   }
+
+  /** base をメッシュの中身に合わせる。長さが同じなら書き写すだけ（確保しない） */
+  _syncBase(mesh) {
+    const lens = {
+      positions: mesh.nv * 3, colors: mesh.nv * 3,
+      mask: mesh.nv, vAlive: mesh.nv, tris: mesh.nt * 3,
+    };
+    let b = this.base;
+    if (!b) b = this.base = {};
+    for (const k of SNAP_KEYS) {
+      const n = lens[k];
+      if (!b[k] || b[k].length !== n) b[k] = mesh[k].slice(0, n);
+      else b[k].set(mesh[k].subarray(0, n));
+    }
+  }
+
   reset(mesh) {
     this.states = [mesh.snapshot()];
     this.cur = 0;
+    this.base = null;
+    this._syncBase(mesh);
   }
+
   commit(mesh) {
+    // やり直しぶんを捨てる。差分は「古い方」を指すので、新しい方を捨てても
+    // 残った履歴の参照は切れない
     if (this.cur < this.states.length - 1) this.states.length = this.cur + 1;
-    // 直前の履歴を渡すと、接続が変わっていなければ tris などを共有してくれる
-    this.states.push(mesh.snapshot(this.states[this.states.length - 1]));
+    const prev = this.states[this.states.length - 1];
+    this.states.push(mesh.snapshot(prev, this.base));
     this.cur = this.states.length - 1;
+    this._syncBase(mesh);
     // 件数とメモリ量の両方で古い履歴を捨てる（最新 2 件は必ず残す）
     while (this.states.length > this.limit
       || (this.states.length > 2 && this.bytes() > this.byteLimit)) {
       this.states.shift();
-      // 捨てた履歴が持っていた配列を後続が共有していることがある。共有されて
-      // いる限り解放されないので、残った先頭を「持ち主」に付け替えないと
-      // bytes() がそのぶんを数え落とす（実際には減っていないのに減ったと見える）。
-      if (this.states.length) this.states[0].shared = [];
+      // 捨てた履歴を差分の親として指している履歴があるので、残った先頭の差分を
+      // ほどく。これをしないと捨てた配列が解放されない（減ったつもりで減らない）。
+      if (this.states.length) materializeSnapshot(this.states[0]);
       this.cur--;
     }
   }
+
   canUndo() { return this.cur > 0; }
   canRedo() { return this.cur >= 0 && this.cur < this.states.length - 1; }
+
   undo(mesh) {
     if (!this.canUndo()) return false;
     this.cur--;
     mesh.restore(this.states[this.cur]);
+    this._syncBase(mesh);
     return true;
   }
+
   redo(mesh) {
     if (!this.canRedo()) return false;
     this.cur++;
     mesh.restore(this.states[this.cur]);
+    this._syncBase(mesh);
     return true;
   }
+
   /**
    * 履歴が実際に抱えているバイト数。
-   * 前の履歴と共有している配列は数えない（1 本を複数の履歴が指しているだけなので、
-   * 数えると実際の何倍にも見えて履歴が早く捨てられる）。
+   *
+   * **入れ物の同一性で数える。** 共有している配列は 1 本ぶんだけ、差分は
+   * 添字 + 値のぶんだけ。名前の一覧（shared）で数えていた頃は、履歴を捨てた
+   * あとに持ち主が消えて数え落とすことがあった。
+   * 差分を取るために抱えている base も履歴のコストなので足す。
    */
   bytes() {
     let b = 0;
+    const seen = new Set();
     for (const s of this.states) {
-      const sh = s.shared || [];
-      for (const k of ['positions', 'colors', 'mask', 'vAlive', 'tris']) {
-        if (!sh.includes(k)) b += s[k].byteLength;
+      for (const k of SNAP_KEYS) {
+        let e = s[k];
+        while (e && !seen.has(e)) {
+          seen.add(e);
+          if (e.delta) { b += e.idx.byteLength + e.val.byteLength; e = e.from[k]; } else { b += e.byteLength; e = null; }
+        }
       }
     }
+    if (this.base) for (const k of SNAP_KEYS) b += this.base[k].byteLength;
     return b;
   }
 
   /** 履歴の内訳（診断とテスト用） */
   info() {
-    let sharedArrays = 0;
-    for (const s of this.states) sharedArrays += (s.shared || []).length;
+    let sharedArrays = 0, deltaArrays = 0, fullArrays = 0, deltaElems = 0;
+    for (const s of this.states) {
+      sharedArrays += (s.shared || []).length;
+      for (const k of SNAP_KEYS) {
+        const e = s[k];
+        if (e && e.delta) { deltaArrays++; deltaElems += e.idx.length; } else if (!(s.shared || []).includes(k)) fullArrays++;
+      }
+    }
     return {
-      states: this.states.length, cur: this.cur, sharedArrays,
+      states: this.states.length, cur: this.cur,
+      sharedArrays, deltaArrays, fullArrays, deltaElems,
       bytes: this.bytes(), limit: this.limit, byteLimit: this.byteLimit,
+      baseBytes: this.base ? SNAP_KEYS.reduce((a, k) => a + this.base[k].byteLength, 0) : 0,
     };
   }
 }

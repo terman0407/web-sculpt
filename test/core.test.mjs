@@ -1,5 +1,5 @@
 // WebSculpt コアロジックの検証（DOM / WebGPU に触らない部分）
-import { SculptMesh, PRIMITIVES, weld } from '../js/mesh.js';
+import { SculptMesh, PRIMITIVES, weld, SNAP_KEYS } from '../js/mesh.js';
 import { Sculptor, mirrorPoint, History } from '../js/sculptor.js';
 import { splitEdge, collapseEdge, refineRegion } from '../js/dyntopo.js';
 import { exportOBJ, exportSTL, exportPLY, importOBJ, importSTL, importMesh } from '../js/io.js';
@@ -259,10 +259,12 @@ head('アンドゥ / リドゥ');
 }
 
 // ---------------------------------------------------------------------------
-// アンドゥの履歴は「接続が変わっていなければ tris / vAlive を前の履歴と共有する」。
-// tris はスナップショット中で一番大きい配列なので、これで同じメモリ上限で
-// 戻れる回数がほぼ倍になる。共有しても復元が壊れないことを確かめる。
-head('アンドゥ履歴のメモリ共有');
+// アンドゥの履歴は配列ごとに「共有 / 差分 / 全長」を使い分ける。
+//   * 中身が同じなら前の履歴の配列をそのまま指す（接続や色は普通変わらない）
+//   * 変わった要素が少なければ添字と値だけ持つ（彫るのは筆の下の数千頂点だけ）
+//   * 長さが変わった（= トポロジが変わった）ら全長を持つ
+// 省メモリの仕掛けなので、**復元が壊れないこと**を毎回確かめる。
+head('アンドゥ履歴のメモリ（共有と差分）');
 {
   const g = PRIMITIVES.sphere();
   const m = new SculptMesh();
@@ -272,6 +274,8 @@ head('アンドゥ履歴のメモリ共有');
   s.divide(); s.divide();
   state.worldRadius = 0.3;
   const snaps = [];
+  // 分割は頂点数を変えるので全長になる。差分を見たいのはここから先のストローク
+  const strokeFrom = s.history.states.length;
 
   // 接続を変えないストロークを 6 回（dynTopo オフなので分割は起きない）
   for (let k = 0; k < 6; k++) {
@@ -292,20 +296,27 @@ head('アンドゥ履歴のメモリ共有');
   // 全部共有されているはず = 1 件あたり 4 本
   ok(i1.sharedArrays >= (i1.states - 1) * 4,
     `変わっていない配列が共有されている (${i1.sharedArrays} 本 / 期待 ${(i1.states - 1) * 4} 本以上)`);
-  for (const st2 of H.states.slice(1)) {
+  // positions は共有されず、差分になっているはず（筆の下しか変わっていない）
+  let strokeDeltas = 0;
+  for (const st2 of H.states.slice(strokeFrom)) {
     ok(!st2.shared.includes('positions'), '彫ったのに positions が共有されている');
+    ok(st2.positions.delta === true, '彫った positions が差分になっていない');
+    if (st2.positions.delta) strokeDeltas++;
   }
-  // 共有していないときのバイト数と比べる
-  let naive = 0;
-  for (const st2 of H.states) {
-    naive += st2.positions.byteLength + st2.colors.byteLength + st2.mask.byteLength
-      + st2.vAlive.byteLength + st2.tris.byteLength;
-  }
-  ok(i1.bytes < naive * 0.45,
-    `メモリが減っている (${(naive / 1048576).toFixed(1)}MB → ${(i1.bytes / 1048576).toFixed(1)}MB)`);
+  ok(strokeDeltas === 6, `6 回のストロークが全部差分になっている (${strokeDeltas})`);
+  // 全長を持ったときのバイト数と比べる（base 1 組ぶんは差分の代金として乗る）
+  const full = SNAP_KEYS.reduce((a, k) => a
+    + (k === 'tris' ? m.nt * 3 : (k === 'mask' || k === 'vAlive' ? m.nv : m.nv * 3))
+      * m[k].BYTES_PER_ELEMENT, 0);
+  const naive = full * i1.states;
+  ok(i1.bytes < naive * 0.35,
+    `メモリが減っている (全長なら ${(naive / 1048576).toFixed(1)}MB → ${(i1.bytes / 1048576).toFixed(1)}MB)`);
+  ok(i1.baseBytes === full,
+    `差分用の base は全長 1 組ぶん (${i1.baseBytes} != ${full})`);
   console.log(`  ${m.liveVerts.toLocaleString()} 頂点 / ${i1.states} 件`
-    + ` / 共有なし ${(naive / 1048576).toFixed(1)}MB → 共有あり ${(i1.bytes / 1048576).toFixed(1)}MB`
-    + ` (${(naive / i1.bytes).toFixed(2)} 倍節約)`);
+    + ` / 全長なら ${(naive / 1048576).toFixed(1)}MB → 実際 ${(i1.bytes / 1048576).toFixed(1)}MB`
+    + `（うち base ${(i1.baseBytes / 1048576).toFixed(1)}MB / 差分 ${i1.deltaElems.toLocaleString()} 要素）`
+    + ` = ${(naive / i1.bytes).toFixed(2)} 倍節約`);
 
   // 共有していても 1 段ずつ正しく戻れること
   for (let k = snaps.length - 1; k >= 1; k--) {
@@ -345,7 +356,9 @@ head('アンドゥ履歴のメモリ共有');
     validate(m, { label: 'undo after topology change' });
   }
 
-  // 古い履歴を捨てても数え落とさないこと（持ち主の付け替え）
+  // 古い履歴を捨てたら、捨てた履歴への参照が残らないこと。
+  // 差分は「前のスナップショットのオブジェクト」を指すので、ほどかないと
+  // 捨てた配列が解放されない（減ったつもりで減らない）。
   {
     const h2 = new History(4, 1024 * 1024 * 1024);
     const m2 = new SculptMesh();
@@ -353,20 +366,154 @@ head('アンドゥ履歴のメモリ共有');
     h2.reset(m2);
     for (let k = 0; k < 10; k++) { m2.positions[0] = 0.5 + k * 0.001; h2.commit(m2); }
     ok(h2.states.length === 4, `件数上限が効いている (${h2.states.length})`);
-    ok(h2.states[0].shared.length === 0,
-      '先頭を捨てたあと、残った先頭が持ち主になっていない（bytes が数え落とす）');
+    // 先頭は差分でないこと（差分なら捨てた履歴を指している）
+    for (const k of SNAP_KEYS) {
+      ok(!(h2.states[0][k] && h2.states[0][k].delta),
+        `先頭の ${k} が差分のまま（捨てた履歴を掴んでいる）`);
+    }
+    // 残っている履歴から辿れるオブジェクトが、全部いま残っている履歴のものか
+    const live = new Set(h2.states);
+    let dangling = 0;
+    for (const st2 of h2.states) {
+      for (const k of SNAP_KEYS) {
+        let e = st2[k];
+        while (e && e.delta) { if (!live.has(e.from)) dangling++; e = e.from[k]; }
+      }
+    }
+    ok(dangling === 0, `捨てた履歴を指している差分が ${dangling} 本残っている`);
     // 実際に別々のバッファを何本抱えているかを数え上げて突き合わせる
     let real = 0;
     const seen = new Set();
     for (const st2 of h2.states) {
-      for (const k of ['positions', 'colors', 'mask', 'vAlive', 'tris']) {
-        if (seen.has(st2[k])) continue;
-        seen.add(st2[k]);
-        real += st2[k].byteLength;
+      for (const k of SNAP_KEYS) {
+        let e = st2[k];
+        while (e && !seen.has(e)) {
+          seen.add(e);
+          if (e.delta) { real += e.idx.byteLength + e.val.byteLength; e = e.from[k]; } else { real += e.byteLength; e = null; }
+        }
       }
     }
+    for (const k of SNAP_KEYS) real += h2.base[k].byteLength;
     ok(h2.bytes() === real, `bytes() が実際の保持量と合わない (${h2.bytes()} != ${real})`);
+    // 捨てたあとでも残っている履歴へ正しく戻れる
+    const want = h2.states[0].positions[0];
+    while (h2.canUndo()) h2.undo(m2);
+    ok(Math.abs(m2.positions[0] - want) < 1e-9,
+      `捨てたあとの undo で値が戻らない (${m2.positions[0]} != ${want})`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// 差分の履歴は「全長を持つ実装と同じ結果になる」ことが唯一の条件。
+// 共有・差分・全長の切り替えとアンカーの張り直しが絡むので、コミットとアンドゥと
+// リドゥをでたらめな順で長く回して、全長だけを持つ素朴な履歴と突き合わせる。
+// ここが通らないなら省メモリの仕掛けが形を黙って壊している。
+head('アンドゥ履歴と素朴な実装の一致（でたらめな操作列）');
+{
+  const g = PRIMITIVES.quadball();
+  const m = new SculptMesh();
+  m.setGeometry(g.positions, g.indices);
+  const H = new History(8, 1024 * 1024 * 1024);
+  H.reset(m);
+
+  // 素朴な履歴（全長のコピーだけを持つ）。同じ操作を並べて掛ける
+  const refStates = [{
+    positions: m.positions.slice(0, m.nv * 3), colors: m.colors.slice(0, m.nv * 3),
+    mask: m.mask.slice(0, m.nv), vAlive: m.vAlive.slice(0, m.nv),
+    tris: m.tris.slice(0, m.nt * 3), nv: m.nv, nt: m.nt,
+  }];
+  let refCur = 0;
+  const snapRef = () => ({
+    positions: m.positions.slice(0, m.nv * 3), colors: m.colors.slice(0, m.nv * 3),
+    mask: m.mask.slice(0, m.nv), vAlive: m.vAlive.slice(0, m.nv),
+    tris: m.tris.slice(0, m.nt * 3), nv: m.nv, nt: m.nt,
+  });
+  const cmpRef = (label) => {
+    const r = refStates[refCur];
+    if (m.nv !== r.nv || m.nt !== r.nt) {
+      ok(false, `${label}: 頂点/三角形の数が違う (${m.nv}/${m.nt} != ${r.nv}/${r.nt})`);
+      return false;
+    }
+    for (const k of ['positions', 'colors', 'mask', 'vAlive', 'tris']) {
+      const a = m[k], b = r[k];
+      for (let i = 0; i < b.length; i++) {
+        if (a[i] !== b[i]) {
+          ok(false, `${label}: ${k}[${i}] が違う (${a[i]} != ${b[i]})`);
+          return false;
+        }
+      }
+    }
+    return true;
+  };
+
+  // 決め打ちの疑似乱数（毎回同じ列を回す）
+  let seed = 12345;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+
+  let ops = 0, bad = 0;
+  for (let step = 0; step < 220 && bad === 0; step++) {
+    const roll = rnd();
+    if (roll < 0.55) {
+      // 変更してコミット。中身の変え方を混ぜる（少しだけ / たくさん / 長さも変える）
+      const kind = rnd();
+      if (kind < 0.45) {
+        // 数頂点だけ動かす → 差分になるはず
+        for (let j = 0; j < 5; j++) {
+          const v = Math.floor(rnd() * m.nv);
+          m.positions[v * 3] += (rnd() - 0.5) * 0.1;
+          m.positions[v * 3 + 2] += (rnd() - 0.5) * 0.1;
+        }
+      } else if (kind < 0.65) {
+        // 色とマスクを少し塗る
+        for (let j = 0; j < 7; j++) {
+          const v = Math.floor(rnd() * m.nv);
+          m.colors[v * 3 + 1] = rnd();
+          m.mask[v] = Math.floor(rnd() * 255);
+        }
+      } else if (kind < 0.85) {
+        // 全部動かす → 全長になるはず
+        for (let i = 0; i < m.nv * 3; i++) m.positions[i] += (rnd() - 0.5) * 0.002;
+      } else {
+        // 頂点を足して接続も変える → 長さが変わるので全長になるはず
+        const v = m.addVertex(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5);
+        const t = m.addTriangle(v, Math.floor(rnd() * v), Math.floor(rnd() * v));
+        if (t < 0) m.positions[0] += 0.001;
+      }
+      H.commit(m);
+      if (refCur < refStates.length - 1) refStates.length = refCur + 1;
+      refStates.push(snapRef());
+      refCur = refStates.length - 1;
+      // 素朴な側も件数上限を合わせる
+      while (refStates.length > H.limit) { refStates.shift(); refCur--; }
+      ops++;
+    } else if (roll < 0.8) {
+      const a = H.undo(m), b = refCur > 0;
+      if (b) refCur--;
+      if (a !== b) { ok(false, `undo の可否が違う (${a} != ${b})`); bad++; break; }
+      if (a) { if (!cmpRef(`undo #${step}`)) bad++; ops++; }
+    } else {
+      const a = H.redo(m), b = refCur < refStates.length - 1;
+      if (b) refCur++;
+      if (a !== b) { ok(false, `redo の可否が違う (${a} != ${b})`); bad++; break; }
+      if (a) { if (!cmpRef(`redo #${step}`)) bad++; ops++; }
+    }
+    if (bad === 0 && H.cur !== refCur) {
+      ok(false, `cur がずれた (${H.cur} != ${refCur})`);
+      bad++;
+    }
+  }
+  ok(bad === 0, `でたらめな ${ops} 操作で素朴な実装と一致しない`);
+  const inf = H.info();
+  ok(inf.deltaArrays > 0, '差分がまったく作られていない（判定が厳しすぎる）');
+  ok(inf.fullArrays > 0, '全長がまったく作られていない（長さが変わる操作を落としている）');
+  console.log(`  ${ops} 操作 / 履歴 ${inf.states} 件`
+    + ` / 差分 ${inf.deltaArrays} 本（${inf.deltaElems.toLocaleString()} 要素）`
+    + ` / 全長 ${inf.fullArrays} 本 / 共有 ${inf.sharedArrays} 本`);
+
+  // 最後に全部戻して、いちばん古い履歴まで正しく着けること
+  while (H.canUndo()) { H.undo(m); refCur--; }
+  ok(cmpRef('全部 undo'), '全部 undo した先が素朴な実装と一致しない');
+  validate(m, { label: 'delta history 全部 undo', closed: false });
 }
 
 // ---------------------------------------------------------------------------
