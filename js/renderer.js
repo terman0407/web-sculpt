@@ -931,6 +931,7 @@ export class Renderer {
     U[UO.cav + 1] = state.peak;
     U[UO.cav + 2] = state.cavityGain;
     U[UO.cav + 3] = 0;
+    this._writeShade(state);
     // グリッド間隔はモデルサイズに合わせて 1-2-5 系列で丸める
     U[UO.grid] = niceStep(camera.modelRadius * 0.5);
     U[UO.grid + 1] = camera.modelRadius * 16;      // 板の広さ（フェード距離の基準にもなる）
@@ -1102,6 +1103,24 @@ export class Renderer {
   // 4 の輪郭線と 5 の平均以外は実時間表示と同じパイプラインを使い回す。
   // -----------------------------------------------------------------------
 
+  /**
+   * シェーディングの種類を書く。
+   *
+   * フラットと自動スムースは**フラグメントシェーダ側で面の法線を出す**方式なので、
+   * ここで渡すのは種別と自動用のしきい値だけ。頂点バッファは触らない。
+   * 自動は「面の法線が頂点法線から angle 以上離れていたらフラット」という規則で、
+   * 立方体は全面フラット・球は全面スムース・彫った稜線はそこだけ立つ。
+   */
+  _writeShade(state) {
+    const U = this.uniformData;
+    const mode = state.shading === 'flat' ? 1 : (state.shading === 'auto' ? 2 : 0);
+    const deg = state.autoSmoothAngle === undefined ? 30 : state.autoSmoothAngle;
+    U[UO.shade] = mode;
+    U[UO.shade + 1] = Math.cos(clamp(deg, 0, 180) * Math.PI / 180);
+    U[UO.shade + 2] = 0;
+    U[UO.shade + 3] = 0;
+  }
+
   /** BPR 用ユニフォームを書く。opts が null なら実時間表示の値（影なし） */
   _writeBpr(opts) {
     const U = this.uniformData;
@@ -1242,6 +1261,7 @@ export class Renderer {
       U[UO.cav + 1] = state.peak;
       U[UO.cav + 2] = state.cavityGain;
       U[UO.cav + 3] = 0;
+      this._writeShade(state);
       U[UO.grid] = niceStep(camera.modelRadius * 0.5);
       U[UO.grid + 1] = camera.modelRadius * 16;
       U[UO.grid + 2] = 1.0;

@@ -74,6 +74,9 @@ const state = {
   exportQuads: false,      // OBJ を四角優勢で書き出す
   // 表示
   material: 0,
+  // 面の陰影の付け方。'smooth' 頂点法線 / 'flat' 面法線 / 'auto' 角度で切り替え
+  shading: 'smooth',
+  autoSmoothAngle: 30,   // 自動スムースのしきい値（度）
   wireframe: false,
   ao: true,
   aoIntensity: 1.0,

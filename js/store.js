@@ -53,7 +53,7 @@ const SETTING_KEYS = [
   'pressureSize', 'pressureStrength', 'backfaceMask',
   'dynTopo', 'decimate', 'detail', 'maxVerts',
   'dynaResolution', 'dynaSmooth', 'dynaTransferColor',
-  'material', 'wireframe', 'ao', 'aoIntensity', 'aoRadius', 'aoPower',
+  'material', 'shading', 'autoSmoothAngle', 'wireframe', 'ao', 'aoIntensity', 'aoRadius', 'aoPower',
   'cavity', 'peak', 'cavityGain', 'grid', 'exposure', 'maskDarken',
   'renderScale', 'invertOrbitY', 'bgPreset', 'paintColor', 'symmetry',
 ];

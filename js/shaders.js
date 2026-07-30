@@ -9,8 +9,8 @@
 //   5. overlay: ブラシリングを canvas に直接描画
 // ---------------------------------------------------------------------------
 
-// 行列6 + vec4×13 = 148 float = 592 byte
-export const UNIFORM_FLOATS = 6 * 16 + 13 * 4;
+// 行列6 + vec4×14 = 152 float = 608 byte
+export const UNIFORM_FLOATS = 6 * 16 + 14 * 4;
 
 // Float32Array 内のオフセット（float 単位）
 export const UO = {
@@ -23,7 +23,8 @@ export const UO = {
   lightVP: 120,    // 光源からの viewProj（シャドウマップの引き当てに使う）
   bprA: 136,       // x 影の強さ, y 影のにじみ(texel), z AO サンプル数, w シャドウマップ解像度
   bprB: 140,       // x 輪郭線の太さ(px), y 輪郭線の濃さ, z 拡散光の強さ, w 環境光
-  lightDir: 144,   // xyz 光の向き（正規化・ワールド）, w 予約
+  lightDir: 144,   // xyz 光の向き（正規化・ワールド）, w 背景を透明にするか
+  shade: 148,      // x シェーディング種別(0 スムース/1 フラット/2 自動), y 自動の cos しきい値
 };
 
 const COMMON = /* wgsl */`
@@ -47,6 +48,7 @@ struct Uniforms {
   bprA        : vec4<f32>,   // x shadow, y softness(texel), z aoSamples, w shadowMapSize
   bprB        : vec4<f32>,   // x outlineWidth(px), y outlineStrength, z diffuse, w ambient
   lightDir    : vec4<f32>,   // xyz light direction (world, normalized)
+  shade       : vec4<f32>,   // x mode (0 smooth / 1 flat / 2 auto), y cos(autoAngle)
 };
 
 fn linearDepthFromNdc(d: f32, near: f32, far: f32) -> f32 {
@@ -130,6 +132,7 @@ struct VSOut {
   @location(3) curv : f32,
   @location(4) wnrm : vec3<f32>,
   @location(5) lpos : vec4<f32>,
+  @location(6) wpos : vec3<f32>,
 };
 
 @vertex
@@ -148,6 +151,7 @@ fn vs(
   o.curv = curv;
   o.wnrm = normal;
   o.lpos = u.lightVP * vec4<f32>(position, 1.0);
+  o.wpos = position;
   return o;
 }
 
@@ -190,7 +194,41 @@ struct FSOut {
 
 @fragment
 fn fs(i : VSOut, @builtin(front_facing) ff : bool) -> FSOut {
-  var n = normalize(i.vnrm);
+  // --- 使う法線を決める（スムース / フラット / 自動スムース）----------------
+  //
+  // 面の法線は**ワールド座標の画面微分**から出す。三角形の中では一定なので
+  // これがそのまま面の向きになる。頂点を割らずに済むので、頂点バッファも
+  // ピッキングも彫刻側の 1:1 対応もそのまま使える。
+  //
+  // 微分は分岐の外で取る。WGSL の dpdx / dpdy は「一様な制御フロー」で
+  // 呼ぶ決まりで、条件が uniform でも外に出しておくのが安全。
+  let dpx = dpdx(i.wpos);
+  let dpy = dpdy(i.wpos);
+  let mode = i32(u.shade.x + 0.5);
+  var wn = i.wnrm;
+  if (mode != 0) {
+    var fw = cross(dpx, dpy);
+    let fl = length(fw);
+    if (fl > 1e-20) {
+      fw = fw / fl;
+      // 微分の外積は画面上の巻き方で符号が決まるので、頂点法線に合わせる
+      if (dot(fw, wn) < 0.0) { fw = -fw; }
+      if (mode == 1) {
+        wn = fw;
+      } else {
+        // 自動: 面の向きが頂点法線から離れているところだけフラットへ寄せる。
+        //
+        // しきい値で 0/1 に切ると、頂点法線が三角形の中で回っているところ
+        // （立方体の稜線に沿った帯など）で判定が三角形の途中で反転し、
+        // 面の中に段差の線が出る。少し幅を持たせて混ぜると段差が出ない。
+        let d = dot(normalize(wn), fw);
+        let w = smoothstep(u.shade.y - 0.12, u.shade.y + 0.12, d);
+        wn = normalize(mix(fw, wn, w));
+      }
+    }
+  }
+  var n : vec3<f32>;
+  if (mode == 0) { n = normalize(i.vnrm); } else { n = normalize((u.view * vec4<f32>(wn, 0.0)).xyz); }
   if (!ff) { n = -n; }
 
   var uv = n.xy * 0.5 + vec2<f32>(0.5, 0.5);
@@ -217,10 +255,9 @@ fn fs(i : VSOut, @builtin(front_facing) ff : bool) -> FSOut {
   // 位置が変わっても絵が変わらない。ここで拡散光と影を掛けて、
   // 「どこから光が当たっているか」が分かる絵にする。
   if (u.bprA.x > 0.001) {
-    let wn = normalize(i.wnrm);
     let ld = normalize(u.lightDir.xyz);
-    let ndl = max(0.0, dot(wn, ld));
-    let sh = shadowFactor(i.lpos, i.wnrm);
+    let ndl = max(0.0, dot(normalize(wn), ld));
+    let sh = shadowFactor(i.lpos, wn);
     // 影は「拡散光を落とす」形で掛ける。環境光は残すので真っ黒にはならない。
     let lit = u.bprB.w + u.bprB.z * ndl * mix(1.0, sh, u.bprA.x);
     c = c * lit;

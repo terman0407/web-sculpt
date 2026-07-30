@@ -4,6 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import { spawn } from 'node:child_process';
+import { inflateSync } from 'node:zlib';
 import { mkdtempSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -27,6 +28,95 @@ const CHROME_CANDIDATES = [
 export function findChrome() {
   for (const p of CHROME_CANDIDATES) if (existsSync(p)) return p;
   return null;
+}
+
+/**
+ * Page.captureScreenshot の PNG を画素に戻す。
+ *
+ * **描画そのものを検証したいときに使う。** WebGPU のキャンバスは 2D の
+ * drawImage で写しても空になるので（実測で全画素 0 が返った）、絵を比べるには
+ * 合成後のスクリーンショットを取るしかない。依存パッケージは増やさない方針なので、
+ * zlib だけで足りる範囲の PNG（8bit / 非インタレース / RGB か RGBA）を自分で解く。
+ *
+ * @param {string} base64 Page.captureScreenshot の data
+ * @returns {{width: number, height: number, channels: number, data: Uint8Array}}
+ */
+export function decodePNG(base64) {
+  const buf = Buffer.from(base64, 'base64');
+  if (buf.length < 8 || buf.readUInt32BE(0) !== 0x89504e47) throw new Error('PNG ではない');
+  let p = 8, width = 0, height = 0, depth = 0, colorType = 0, interlace = 0;
+  const idat = [];
+  while (p + 8 <= buf.length) {
+    const len = buf.readUInt32BE(p);
+    const type = buf.toString('latin1', p + 4, p + 8);
+    const body = buf.subarray(p + 8, p + 8 + len);
+    if (type === 'IHDR') {
+      width = body.readUInt32BE(0);
+      height = body.readUInt32BE(4);
+      depth = body[8]; colorType = body[9]; interlace = body[12];
+    } else if (type === 'IDAT') {
+      idat.push(body);
+    } else if (type === 'IEND') {
+      break;
+    }
+    p += 12 + len;                       // len + type + body + crc
+  }
+  if (depth !== 8) throw new Error(`8bit 以外の PNG は解けない (depth ${depth})`);
+  if (interlace) throw new Error('インタレース PNG は解けない');
+  const channels = colorType === 6 ? 4 : (colorType === 2 ? 3 : 0);
+  if (!channels) throw new Error(`RGB / RGBA 以外は解けない (colorType ${colorType})`);
+
+  const raw = inflateSync(Buffer.concat(idat));
+  const stride = width * channels;
+  const out = new Uint8Array(stride * height);
+  let src = 0;
+  for (let y = 0; y < height; y++) {
+    const filter = raw[src++];
+    const row = src; src += stride;
+    const o = y * stride, prev = o - stride;
+    for (let x = 0; x < stride; x++) {
+      const v = raw[row + x];
+      const a = x >= channels ? out[o + x - channels] : 0;   // 左
+      const b = y > 0 ? out[prev + x] : 0;                   // 上
+      const c = (x >= channels && y > 0) ? out[prev + x - channels] : 0;  // 左上
+      let r;
+      switch (filter) {
+        case 0: r = v; break;
+        case 1: r = v + a; break;
+        case 2: r = v + b; break;
+        case 3: r = v + ((a + b) >> 1); break;
+        case 4: {
+          const pp = a + b - c;
+          const pa = Math.abs(pp - a), pb = Math.abs(pp - b), pc = Math.abs(pp - c);
+          r = v + (pa <= pb && pa <= pc ? a : (pb <= pc ? b : c));
+          break;
+        }
+        default: throw new Error(`知らないフィルタ ${filter}`);
+      }
+      out[o + x] = r & 0xff;
+    }
+  }
+  return { width, height, channels, data: out };
+}
+
+/**
+ * PNG 2 枚の平均絶対差（0..255）。輝度で比べる。
+ * 大きさが違うときは投げる（比べる意味がないので黙って 0 を返さない）。
+ */
+export function pngDiff(a, b) {
+  if (a.width !== b.width || a.height !== b.height) {
+    throw new Error(`大きさが違う (${a.width}x${a.height} / ${b.width}x${b.height})`);
+  }
+  const ca = a.channels, cb = b.channels;
+  let sum = 0;
+  const n = a.width * a.height;
+  for (let i = 0; i < n; i++) {
+    const ia = i * ca, ib = i * cb;
+    const la = 0.299 * a.data[ia] + 0.587 * a.data[ia + 1] + 0.114 * a.data[ia + 2];
+    const lb = 0.299 * b.data[ib] + 0.587 * b.data[ib + 1] + 0.114 * b.data[ib + 2];
+    sum += Math.abs(la - lb);
+  }
+  return sum / n;
 }
 
 export async function waitFor(fn, timeoutMs, label) {

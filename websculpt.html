@@ -1123,7 +1123,7 @@ const SETTING_KEYS = [
   'pressureSize', 'pressureStrength', 'backfaceMask',
   'dynTopo', 'decimate', 'detail', 'maxVerts',
   'dynaResolution', 'dynaSmooth', 'dynaTransferColor',
-  'material', 'wireframe', 'ao', 'aoIntensity', 'aoRadius', 'aoPower',
+  'material', 'shading', 'autoSmoothAngle', 'wireframe', 'ao', 'aoIntensity', 'aoRadius', 'aoPower',
   'cavity', 'peak', 'cavityGain', 'grid', 'exposure', 'maskDarken',
   'renderScale', 'invertOrbitY', 'bgPreset', 'paintColor', 'symmetry',
 ];
@@ -8150,8 +8150,8 @@ __M['shaders.js'] = (function () {
 //   5. overlay: ブラシリングを canvas に直接描画
 // ---------------------------------------------------------------------------
 
-// 行列6 + vec4×13 = 148 float = 592 byte
-const UNIFORM_FLOATS = 6 * 16 + 13 * 4;
+// 行列6 + vec4×14 = 152 float = 608 byte
+const UNIFORM_FLOATS = 6 * 16 + 14 * 4;
 
 // Float32Array 内のオフセット（float 単位）
 const UO = {
@@ -8164,7 +8164,8 @@ const UO = {
   lightVP: 120,    // 光源からの viewProj（シャドウマップの引き当てに使う）
   bprA: 136,       // x 影の強さ, y 影のにじみ(texel), z AO サンプル数, w シャドウマップ解像度
   bprB: 140,       // x 輪郭線の太さ(px), y 輪郭線の濃さ, z 拡散光の強さ, w 環境光
-  lightDir: 144,   // xyz 光の向き（正規化・ワールド）, w 予約
+  lightDir: 144,   // xyz 光の向き（正規化・ワールド）, w 背景を透明にするか
+  shade: 148,      // x シェーディング種別(0 スムース/1 フラット/2 自動), y 自動の cos しきい値
 };
 
 const COMMON = /* wgsl */`
@@ -8188,6 +8189,7 @@ struct Uniforms {
   bprA        : vec4<f32>,   // x shadow, y softness(texel), z aoSamples, w shadowMapSize
   bprB        : vec4<f32>,   // x outlineWidth(px), y outlineStrength, z diffuse, w ambient
   lightDir    : vec4<f32>,   // xyz light direction (world, normalized)
+  shade       : vec4<f32>,   // x mode (0 smooth / 1 flat / 2 auto), y cos(autoAngle)
 };
 
 fn linearDepthFromNdc(d: f32, near: f32, far: f32) -> f32 {
@@ -8271,6 +8273,7 @@ struct VSOut {
   @location(3) curv : f32,
   @location(4) wnrm : vec3<f32>,
   @location(5) lpos : vec4<f32>,
+  @location(6) wpos : vec3<f32>,
 };
 
 @vertex
@@ -8289,6 +8292,7 @@ fn vs(
   o.curv = curv;
   o.wnrm = normal;
   o.lpos = u.lightVP * vec4<f32>(position, 1.0);
+  o.wpos = position;
   return o;
 }
 
@@ -8331,7 +8335,41 @@ struct FSOut {
 
 @fragment
 fn fs(i : VSOut, @builtin(front_facing) ff : bool) -> FSOut {
-  var n = normalize(i.vnrm);
+  // --- 使う法線を決める（スムース / フラット / 自動スムース）----------------
+  //
+  // 面の法線は**ワールド座標の画面微分**から出す。三角形の中では一定なので
+  // これがそのまま面の向きになる。頂点を割らずに済むので、頂点バッファも
+  // ピッキングも彫刻側の 1:1 対応もそのまま使える。
+  //
+  // 微分は分岐の外で取る。WGSL の dpdx / dpdy は「一様な制御フロー」で
+  // 呼ぶ決まりで、条件が uniform でも外に出しておくのが安全。
+  let dpx = dpdx(i.wpos);
+  let dpy = dpdy(i.wpos);
+  let mode = i32(u.shade.x + 0.5);
+  var wn = i.wnrm;
+  if (mode != 0) {
+    var fw = cross(dpx, dpy);
+    let fl = length(fw);
+    if (fl > 1e-20) {
+      fw = fw / fl;
+      // 微分の外積は画面上の巻き方で符号が決まるので、頂点法線に合わせる
+      if (dot(fw, wn) < 0.0) { fw = -fw; }
+      if (mode == 1) {
+        wn = fw;
+      } else {
+        // 自動: 面の向きが頂点法線から離れているところだけフラットへ寄せる。
+        //
+        // しきい値で 0/1 に切ると、頂点法線が三角形の中で回っているところ
+        // （立方体の稜線に沿った帯など）で判定が三角形の途中で反転し、
+        // 面の中に段差の線が出る。少し幅を持たせて混ぜると段差が出ない。
+        let d = dot(normalize(wn), fw);
+        let w = smoothstep(u.shade.y - 0.12, u.shade.y + 0.12, d);
+        wn = normalize(mix(fw, wn, w));
+      }
+    }
+  }
+  var n : vec3<f32>;
+  if (mode == 0) { n = normalize(i.vnrm); } else { n = normalize((u.view * vec4<f32>(wn, 0.0)).xyz); }
   if (!ff) { n = -n; }
 
   var uv = n.xy * 0.5 + vec2<f32>(0.5, 0.5);
@@ -8358,10 +8396,9 @@ fn fs(i : VSOut, @builtin(front_facing) ff : bool) -> FSOut {
   // 位置が変わっても絵が変わらない。ここで拡散光と影を掛けて、
   // 「どこから光が当たっているか」が分かる絵にする。
   if (u.bprA.x > 0.001) {
-    let wn = normalize(i.wnrm);
     let ld = normalize(u.lightDir.xyz);
-    let ndl = max(0.0, dot(wn, ld));
-    let sh = shadowFactor(i.lpos, i.wnrm);
+    let ndl = max(0.0, dot(normalize(wn), ld));
+    let sh = shadowFactor(i.lpos, wn);
     // 影は「拡散光を落とす」形で掛ける。環境光は残すので真っ黒にはならない。
     let lit = u.bprB.w + u.bprB.z * ndl * mix(1.0, sh, u.bprA.x);
     c = c * lit;
@@ -9804,6 +9841,7 @@ class Renderer {
     U[UO.cav + 1] = state.peak;
     U[UO.cav + 2] = state.cavityGain;
     U[UO.cav + 3] = 0;
+    this._writeShade(state);
     // グリッド間隔はモデルサイズに合わせて 1-2-5 系列で丸める
     U[UO.grid] = niceStep(camera.modelRadius * 0.5);
     U[UO.grid + 1] = camera.modelRadius * 16;      // 板の広さ（フェード距離の基準にもなる）
@@ -9975,6 +10013,24 @@ class Renderer {
   // 4 の輪郭線と 5 の平均以外は実時間表示と同じパイプラインを使い回す。
   // -----------------------------------------------------------------------
 
+  /**
+   * シェーディングの種類を書く。
+   *
+   * フラットと自動スムースは**フラグメントシェーダ側で面の法線を出す**方式なので、
+   * ここで渡すのは種別と自動用のしきい値だけ。頂点バッファは触らない。
+   * 自動は「面の法線が頂点法線から angle 以上離れていたらフラット」という規則で、
+   * 立方体は全面フラット・球は全面スムース・彫った稜線はそこだけ立つ。
+   */
+  _writeShade(state) {
+    const U = this.uniformData;
+    const mode = state.shading === 'flat' ? 1 : (state.shading === 'auto' ? 2 : 0);
+    const deg = state.autoSmoothAngle === undefined ? 30 : state.autoSmoothAngle;
+    U[UO.shade] = mode;
+    U[UO.shade + 1] = Math.cos(clamp(deg, 0, 180) * Math.PI / 180);
+    U[UO.shade + 2] = 0;
+    U[UO.shade + 3] = 0;
+  }
+
   /** BPR 用ユニフォームを書く。opts が null なら実時間表示の値（影なし） */
   _writeBpr(opts) {
     const U = this.uniformData;
@@ -10115,6 +10171,7 @@ class Renderer {
       U[UO.cav + 1] = state.peak;
       U[UO.cav + 2] = state.cavityGain;
       U[UO.cav + 3] = 0;
+      this._writeShade(state);
       U[UO.grid] = niceStep(camera.modelRadius * 0.5);
       U[UO.grid + 1] = camera.modelRadius * 16;
       U[UO.grid + 2] = 1.0;
@@ -12522,6 +12579,41 @@ function sections(shortcuts) {
       ],
     },
     {
+      id: 'shading', title: '面の陰影（スムース / フラット / 自動）',
+      intro: [
+        '〔マテリアル〕→〔面の陰影〕で切り替えます。'
+        + '<b>描画のときに使う法線を変えるだけ</b>なので、形もポリゴン数も変わりません'
+        + '（切り替えても彫った内容は一切動きません）。',
+      ],
+      items: [
+        {
+          name: 'スムース', desc: '頂点の法線でなめらかに塗る（既定）。'
+            + '隣の面と法線を共有するので、少ないポリゴンでも丸く見える',
+        },
+        {
+          name: 'フラット', desc: '面ごとの法線で塗る。ポリゴンの面がはっきり見える。'
+            + 'ローポリの形を確認したいときや、面の流れを見たいときに使う',
+        },
+        {
+          name: '自動', desc: '角のきついところだけフラットにする。'
+            + '〔自動スムースの角度〕より大きく折れているところが立ち、'
+            + 'なだらかなところはなめらかなまま',
+        },
+      ],
+      notes: [
+        'フラットの面法線は<b>画面上の微分から求めています</b>。頂点を割らずに済むので、'
+        + '切り替えの瞬間にポリゴンが増えたりピッキングがずれたりしません。',
+        '自動の判定は「その面の法線が、そこの頂点法線から〔角度〕以上離れているか」です。'
+        + '立方体は全部の稜線が立ち、球は全部なめらかなまま、彫った稜線はそこだけ立ちます。',
+        '<b>Blender の自動スムースとは仕組みが違います。</b>'
+        + 'Blender は頂点を面のグループごとに分けて法線を別々に持たせますが、こちらは'
+        + '描画時に面ごとに判定します。そのため「片側だけなめらかにしたい」ような形'
+        + '（円柱の側面と蓋の境目など）では、境目の近くに少しフラットな帯が出ます。'
+        + '彫刻用のメッシュでは差が出にくいので、この方式を採っています'
+        + '（頂点を割る方式は、彫るたびに面ごとの法線を作り直すことになり実時間では重すぎます）。',
+      ],
+    },
+    {
       id: 'io', title: '保存と書き出し',
       intro: ['触った内容はブラウザの中に自動保存されます。他のソフトへ持ち出すには書き出します。'],
       items: [
@@ -14144,6 +14236,28 @@ function buildUI(app) {
     matBtns.forEach((b, k) => b.classList.toggle('on', k === i));
     toast(MATERIALS[i].jp);
   }
+
+  // --- 面の陰影（スムース / フラット / 自動スムース）----------------------
+  el('div', 'subhead', mt).textContent = '面の陰影';
+  let shadeSeg = null, autoAngleSlider = null;
+  shadeSeg = segmented(mt, [
+    { label: 'スムース', value: 'smooth', title: '頂点の法線でなめらかに（既定）' },
+    { label: 'フラット', value: 'flat', title: '面ごとの法線。ポリゴンの面が見える' },
+    { label: '自動', value: 'auto', title: '角のきついところだけフラットにする' },
+  ], state.shading, (v) => {
+    state.shading = v;
+    if (autoAngleSlider) autoAngleSlider.el.style.display = v === 'auto' ? '' : 'none';
+    toast('面の陰影: ' + { smooth: 'スムース', flat: 'フラット', auto: '自動スムース' }[v]);
+  });
+  autoAngleSlider = slider(mt, {
+    label: '自動スムースの角度', min: 1, max: 90, step: 1, value: state.autoSmoothAngle,
+    fmt: v => v.toFixed(0) + '°',
+    title: '面の法線が頂点の法線からこの角度以上離れているところをフラットにします',
+    onInput: (v) => { state.autoSmoothAngle = v; },
+  });
+  autoAngleSlider.el.style.display = state.shading === 'auto' ? '' : 'none';
+  el('p', 'note', mt).textContent =
+    '頂点を割らずに描画側で法線を切り替えるので、切り替えても形もポリゴン数も変わりません。';
 
   // --- ブラウザ内保存 ---------------------------------------------------
   const sv = section(right, '保存（ブラウザ内）');
@@ -21933,6 +22047,9 @@ const state = {
   exportQuads: false,      // OBJ を四角優勢で書き出す
   // 表示
   material: 0,
+  // 面の陰影の付け方。'smooth' 頂点法線 / 'flat' 面法線 / 'auto' 角度で切り替え
+  shading: 'smooth',
+  autoSmoothAngle: 30,   // 自動スムースのしきい値（度）
   wireframe: false,
   ao: true,
   aoIntensity: 1.0,

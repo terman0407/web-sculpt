@@ -1305,6 +1305,28 @@ export function buildUI(app) {
     toast(MATERIALS[i].jp);
   }
 
+  // --- 面の陰影（スムース / フラット / 自動スムース）----------------------
+  el('div', 'subhead', mt).textContent = '面の陰影';
+  let shadeSeg = null, autoAngleSlider = null;
+  shadeSeg = segmented(mt, [
+    { label: 'スムース', value: 'smooth', title: '頂点の法線でなめらかに（既定）' },
+    { label: 'フラット', value: 'flat', title: '面ごとの法線。ポリゴンの面が見える' },
+    { label: '自動', value: 'auto', title: '角のきついところだけフラットにする' },
+  ], state.shading, (v) => {
+    state.shading = v;
+    if (autoAngleSlider) autoAngleSlider.el.style.display = v === 'auto' ? '' : 'none';
+    toast('面の陰影: ' + { smooth: 'スムース', flat: 'フラット', auto: '自動スムース' }[v]);
+  });
+  autoAngleSlider = slider(mt, {
+    label: '自動スムースの角度', min: 1, max: 90, step: 1, value: state.autoSmoothAngle,
+    fmt: v => v.toFixed(0) + '°',
+    title: '面の法線が頂点の法線からこの角度以上離れているところをフラットにします',
+    onInput: (v) => { state.autoSmoothAngle = v; },
+  });
+  autoAngleSlider.el.style.display = state.shading === 'auto' ? '' : 'none';
+  el('p', 'note', mt).textContent =
+    '頂点を割らずに描画側で法線を切り替えるので、切り替えても形もポリゴン数も変わりません。';
+
   // --- ブラウザ内保存 ---------------------------------------------------
   const sv = section(right, '保存（ブラウザ内）');
   const nameInput = el('input', 'text', sv);
